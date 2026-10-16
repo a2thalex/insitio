@@ -13,6 +13,8 @@ import { newRepoRoutes } from "./web/routes/newRepo.js";
 import { codeRoutes } from "./web/routes/code.js";
 import { issueRoutes } from "./web/routes/issues.js";
 import { pullRoutes } from "./web/routes/pulls.js";
+import { repoSettingsRoutes } from "./web/routes/repoSettings.js";
+import { userRoutes } from "./web/routes/users.js";
 
 /**
  * Builds the web app. Fixed top-level paths are registered before the
@@ -38,6 +40,8 @@ export function buildApp(deps: Deps): Hono<Env> {
   codeRoutes(deps, app);
   issueRoutes(deps, app);
   pullRoutes(deps, app);
+  repoSettingsRoutes(deps, app);
+  userRoutes(deps, app);
 
   app.notFound((c) => notFound(c));
   app.onError((err, c) => {
