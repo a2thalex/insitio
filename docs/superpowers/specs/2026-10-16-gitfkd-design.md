@@ -136,6 +136,8 @@ not exist is rejected (repos are created in the UI).
 - `/:owner` profile: repos tab, stars tab.
 - `/:owner/:repo` code tab: file list for default branch, README rendered, clone URL box, stars.
 - `/:owner/:repo/tree/:ref/*path`, `/blob/:ref/*path` (highlighted, raw link), `/raw/:ref/*path`.
+- `/:owner/:repo/tree-commit-info/:ref/*path` JSON: last commit per entry,
+  fetched by the tree page after render (GitHub's split, see `docs/rea-findings.md` §2).
 - `/:owner/:repo/commits/:ref`, `/commit/:sha` (diff), `/branches`.
 - `/:owner/:repo/issues` (open/closed filter, label filter), `/issues/new`, `/issues/:n`.
 - `/:owner/:repo/pulls`, `/compare/:base...:head` + open PR form, `/pull/:n` (conversation), `/pull/:n/commits`, `/pull/:n/files`, merge button.
