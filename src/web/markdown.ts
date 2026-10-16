@@ -66,7 +66,6 @@ export function renderMarkdown(md: string, opts: { repo?: RepoContext } = {}): s
       input: ["type", "checked", "disabled"],
       th: ["align"],
       td: ["align"],
-      "*": ["id"],
     },
     allowedClasses: { code: ["hljs", /^language-/], span: [/^hljs-/] },
     allowedSchemes: ["http", "https", "mailto"],
