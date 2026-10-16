@@ -1,6 +1,35 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { GIT_ENV, GitError, assertSafePath, assertSafeRef, runGit } from "./run.js";
 import { parseUnifiedDiff, type DiffFile } from "./diff.js";
+
+export class MergeConflictError extends Error {
+  constructor() {
+    super("The branches have conflicts that must be resolved");
+  }
+}
+
+export class RefMovedError extends Error {
+  constructor(ref: string) {
+    super(`${ref} changed during the operation; try again`);
+  }
+}
+
+export type Author = { name: string; email: string };
+export type Mergeability = "clean" | "conflict" | "up_to_date" | "missing";
+
+const ZERO_SHA = "0".repeat(40);
+
+function authorEnv(a: Author): Record<string, string> {
+  return {
+    GIT_AUTHOR_NAME: a.name,
+    GIT_AUTHOR_EMAIL: a.email,
+    GIT_COMMITTER_NAME: a.name,
+    GIT_COMMITTER_EMAIL: a.email,
+  };
+}
 
 export type Commit = {
   sha: string;
@@ -182,6 +211,112 @@ export class Repo {
       : ["diff-tree", "-p", "-M", "--no-color", "--no-ext-diff", "--root", sha];
     const { stdout, truncated } = await this.git(diffArgs, { maxBytes: MAX_DIFF_BYTES });
     return { ...commit, parents, files: parseUnifiedDiff(stdout.toString()), diffTruncated: truncated };
+  }
+
+  /** Commits files onto a branch (creating it if needed) without a worktree. */
+  async commitFiles(branch: string, files: Record<string, string>, message: string, author: Author): Promise<string> {
+    assertSafeRef(branch);
+    const parent = await this.resolve(branch);
+    const tmp = await mkdtemp(join(tmpdir(), "gitfkd-index-"));
+    const env = { GIT_INDEX_FILE: join(tmp, "index") };
+    try {
+      if (parent) await this.git(["read-tree", parent], { env });
+      for (const [path, content] of Object.entries(files)) {
+        assertSafePath(path);
+        const blob = (await this.git(["hash-object", "-w", "--stdin"], { input: content })).stdout.toString().trim();
+        await this.git(["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
+      }
+      const tree = (await this.git(["write-tree"], { env })).stdout.toString().trim();
+      const commitArgs = ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message];
+      const sha = (await this.git(commitArgs, { env: authorEnv(author) })).stdout.toString().trim();
+      await this.updateRef(branch, sha, parent ?? ZERO_SHA);
+      return sha;
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  }
+
+  private async updateRef(branch: string, sha: string, expectedOld: string): Promise<void> {
+    try {
+      await this.git(["update-ref", `refs/heads/${branch}`, sha, expectedOld]);
+    } catch (err) {
+      if (err instanceof GitError) throw new RefMovedError(branch);
+      throw err;
+    }
+  }
+
+  async mergeBase(a: string, b: string): Promise<string | null> {
+    const { stdout, code } = await this.git(["merge-base", a, b], { okCodes: [0, 1] });
+    return code === 0 ? stdout.toString().trim() : null;
+  }
+
+  /** Commits on head but not base (oldest first) and the diff from their merge base. */
+  async compare(base: string, head: string): Promise<{ mergeBase: string | null; commits: Commit[]; files: DiffFile[]; diffTruncated: boolean }> {
+    const [b, h] = await Promise.all([this.resolve(base), this.resolve(head)]);
+    if (!b || !h) return { mergeBase: null, commits: [], files: [], diffTruncated: false };
+    const mergeBase = await this.mergeBase(b, h);
+    const log = await this.git(["log", "--reverse", `--format=${COMMIT_FORMAT}%x1e`, "--max-count=250", `${b}..${h}`]);
+    const diff = await this.git(["diff-tree", "-p", "-M", "--no-color", "--no-ext-diff", mergeBase ?? b, h], {
+      maxBytes: MAX_DIFF_BYTES,
+    });
+    return {
+      mergeBase,
+      commits: parseCommits(log.stdout.toString()),
+      files: parseUnifiedDiff(diff.stdout.toString()),
+      diffTruncated: diff.truncated,
+    };
+  }
+
+  async mergeability(base: string, head: string): Promise<Mergeability> {
+    const [b, h] = await Promise.all([this.resolve(base), this.resolve(head)]);
+    if (!b || !h) return "missing";
+    const anc = await this.git(["merge-base", "--is-ancestor", h, b], { okCodes: [0, 1] });
+    if (anc.code === 0) return "up_to_date";
+    const { code } = await this.git(["merge-tree", "--write-tree", "--no-messages", b, h], { okCodes: [0, 1] });
+    return code === 0 ? "clean" : "conflict";
+  }
+
+  /** Creates a merge commit of head into base, like GitHub's "Create a merge commit". */
+  async merge(base: string, head: string, message: string, author: Author): Promise<string> {
+    assertSafeRef(base);
+    const [b, h] = await Promise.all([this.resolve(base), this.resolve(head)]);
+    if (!b || !h) throw new GitError(["merge"], 128, "branch not found");
+    const anc = await this.git(["merge-base", "--is-ancestor", h, b], { okCodes: [0, 1] });
+    if (anc.code === 0) throw new GitError(["merge"], 1, "nothing to merge");
+    const mt = await this.git(["merge-tree", "--write-tree", "--no-messages", b, h], { okCodes: [0, 1] });
+    if (mt.code === 1) throw new MergeConflictError();
+    const tree = mt.stdout.toString().split("\n")[0].trim();
+    const sha = (
+      await this.git(["commit-tree", tree, "-p", b, "-p", h, "-m", message], { env: authorEnv(author) })
+    ).stdout.toString().trim();
+    await this.updateRef(base, sha, b);
+    return sha;
+  }
+
+  /** Case-insensitive fixed-string search over text files at a ref. */
+  async grep(ref: string, query: string, limit: number): Promise<{ path: string; lines: { no: number; text: string }[] }[]> {
+    const sha = await this.resolve(ref);
+    if (!sha || !query) return [];
+    const { stdout } = await this.git(
+      ["grep", "-z", "-n", "-I", "-i", "-F", "--max-count=20", "-e", query, sha, "--"],
+      { okCodes: [0, 1], maxBytes: 4 * 1024 * 1024 },
+    );
+    const results: { path: string; lines: { no: number; text: string }[] }[] = [];
+    let total = 0;
+    for (const rec of stdout.toString().split("\n")) {
+      if (!rec) continue;
+      const [file, no, ...rest] = rec.split("\0");
+      const path = file.slice(sha.length + 1);
+      let entry = results.at(-1);
+      if (!entry || entry.path !== path) {
+        if (results.length >= limit) break;
+        entry = { path, lines: [] };
+        results.push(entry);
+      }
+      entry.lines.push({ no: Number(no), text: rest.join("\0").slice(0, 500) });
+      if (++total >= limit * 20) break;
+    }
+    return results;
   }
 
   /**
