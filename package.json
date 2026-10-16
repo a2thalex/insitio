@@ -8,7 +8,7 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "dev": "tsx watch --disable-warning=ExperimentalWarning src/main.ts",
+    "dev": "tsx watch --include \"public/**\" --disable-warning=ExperimentalWarning src/main.ts",
     "start": "tsx --disable-warning=ExperimentalWarning src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

@@ -3,6 +3,7 @@ import { raw } from "hono/html";
 import octicons from "@primer/octicons";
 import type { User } from "../../services/users.js";
 import { formatDate, timeAgo } from "../format.js";
+import { assetUrl } from "../assets.js";
 
 export type PageProps = { title: string; user: User | null; csrf: string; children?: Child };
 
@@ -64,14 +65,14 @@ export function LabelChip({ label, href }: { label: { name: string; color: strin
 
 function Header({ user, csrf }: { user: User | null; csrf: string }) {
   return (
-    <header class="Header px-3 px-md-4 flex-wrap" role="banner">
+    <header class="Header px-3 px-md-4" role="banner">
       <div class="Header-item">
         <a href="/" class="Header-link f4 d-flex flex-items-center" aria-label="GitFkd home">
           <Octicon name="git-merge" size={28} />
-          <span class="ml-2 text-bold">GitFkd</span>
+          <span class="ml-2 text-bold header-wordmark">GitFkd</span>
         </a>
       </div>
-      <div class="Header-item Header-item--full">
+      <div class="Header-item Header-item--full min-width-0">
         <form action="/search" method="get" role="search" class="width-full" style="max-width:360px">
           <input
             class="form-control Header-input width-full"
@@ -132,10 +133,10 @@ export function Layout({ title, user, csrf, children }: PageProps) {
           <meta charset="utf-8" />
           <meta name="viewport" content="width=device-width, initial-scale=1" />
           <title>{title ? `${title} · GitFkd` : "GitFkd"}</title>
-          <link rel="stylesheet" href="/static/primer.css" />
-          <link rel="stylesheet" href="/static/app.css" />
-          <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-          <script src="/static/app.js" defer></script>
+          <link rel="stylesheet" href={assetUrl("primer.css")} />
+          <link rel="stylesheet" href={assetUrl("app.css")} />
+          <link rel="icon" href={assetUrl("favicon.svg")} type="image/svg+xml" />
+          <script src={assetUrl("app.js")} defer></script>
         </head>
         <body>
           <a class="px-2 py-4 color-bg-accent-emphasis color-fg-on-emphasis show-on-focus" href="#main">Skip to content</a>
