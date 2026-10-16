@@ -6,6 +6,8 @@ import { openDb } from "../src/db/db.js";
 import { migrate } from "../src/db/schema.js";
 import type { Config } from "../src/config.js";
 import type { Deps } from "../src/deps.js";
+import { buildApp } from "../src/app.js";
+import { createSession, createUser, type User } from "../src/services/users.js";
 
 export function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "gitfkd-test-"));
@@ -41,6 +43,33 @@ export type TestCommit = {
   /** Branch to commit on; created from the current branch if missing. */
   branch?: string;
 };
+
+export type Who = { cookie: string; csrf: string };
+
+/** An app over fresh deps, with request helpers that carry cookies and CSRF tokens. */
+export function testApp(overrides: Partial<Config> = {}) {
+  const deps = testDeps(overrides);
+  const app = buildApp(deps);
+  const anon: Who = { cookie: "gfk_csrf=test-csrf-token", csrf: "test-csrf-token" };
+  const loginAs = (user: User): Who => {
+    const s = createSession(deps.db, user.id);
+    return { cookie: `gfk_session=${s.id}`, csrf: s.csrf };
+  };
+  const user = (username: string, extra: { isAdmin?: boolean } = {}) =>
+    createUser(deps.db, { username, password: "longenough", email: `${username}@example.com`, ...extra });
+  const get = (path: string, who?: Who) => app.request(path, { headers: who ? { cookie: who.cookie } : {} });
+  const post = (path: string, fields: Record<string, string | string[]> = {}, who: Who = anon) => {
+    const body = new URLSearchParams();
+    body.append("_csrf", who.csrf);
+    for (const [k, v] of Object.entries(fields)) for (const x of Array.isArray(v) ? v : [v]) body.append(k, x);
+    return app.request(path, {
+      method: "POST",
+      headers: { cookie: who.cookie, "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+  };
+  return { deps, app, anon, loginAs, user, get, post };
+}
 
 /** Builds a working repo from the commits and returns a bare clone of it. */
 export function makeRepoWithCommits(dir: string, commits: TestCommit[]): string {

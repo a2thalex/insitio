@@ -1,0 +1,104 @@
+/* GitFkd styles layered on Primer CSS 21. Colors come from Primer's theme variables so light and dark both work. */
+
+body { background-color: var(--color-canvas-default); }
+.Header { background-color: var(--color-header-bg, #24292f); }
+.Header-input { background-color: rgba(255,255,255,.08); }
+.color-fg-on { color: var(--color-fg-on-emphasis); }
+
+/* Repository header */
+.repo-header { background-color: var(--color-page-header-bg, var(--color-canvas-default)); }
+.repo-title { font-size: 20px; }
+.repo-title a { color: var(--color-accent-fg); }
+.UnderlineNav-item .Counter { margin-left: 6px; }
+
+/* File listing */
+.file-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.file-table td { padding: 8px 16px; border-top: 1px solid var(--color-border-muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-table tr:first-child td { border-top: 0; }
+.file-table tbody tr:hover { background-color: var(--color-canvas-subtle); }
+.file-table .col-name { width: 34%; }
+.file-table .col-msg { color: var(--color-fg-muted); }
+.file-table .col-msg a { color: var(--color-fg-muted); }
+.file-table .col-age { width: 140px; text-align: right; color: var(--color-fg-muted); }
+.file-table .octicon-file-directory-fill { color: var(--color-accent-fg); }
+.file-table .octicon-file { color: var(--color-fg-muted); }
+.latest-commit { background-color: var(--color-canvas-subtle); }
+@media (max-width: 767px) { .file-table .col-msg { display: none; } .file-table .col-name { width: auto; } }
+
+/* Blob view */
+.blob-wrapper { overflow-x: auto; }
+.blob-table { border-collapse: collapse; width: 100%; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 20px; tab-size: 4; }
+.blob-num { width: 1%; min-width: 50px; padding: 0 10px; text-align: right; color: var(--color-fg-subtle); user-select: none; vertical-align: top; white-space: nowrap; }
+.blob-num a { color: inherit; }
+.blob-num a:hover { color: var(--color-fg-default); text-decoration: none; }
+.blob-code { padding: 0 10px; white-space: pre; vertical-align: top; }
+.blob-table tr:target .blob-code, .blob-table tr:target .blob-num { background-color: var(--color-attention-subtle, #fff8c5); }
+
+/* Diffs */
+.diff-table { border-collapse: collapse; width: 100%; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 20px; }
+.diff-table td { vertical-align: top; }
+.diff-table .blob-code { white-space: pre-wrap; word-break: break-all; }
+.diff-table .blob-code::before { display: inline-block; width: 1.2em; content: " "; user-select: none; }
+.diff-table .add .blob-code { background-color: var(--color-success-subtle); }
+.diff-table .add .blob-code::before { content: "+"; }
+.diff-table .add .blob-num { background-color: var(--color-success-muted); color: var(--color-fg-default); }
+.diff-table .del .blob-code { background-color: var(--color-danger-subtle); }
+.diff-table .del .blob-code::before { content: "-"; }
+.diff-table .del .blob-num { background-color: var(--color-danger-muted); color: var(--color-fg-default); }
+.diff-table .hunk td { background-color: var(--color-accent-subtle); color: var(--color-fg-muted); padding: 4px 10px; }
+.diff-table .hunk .blob-num { background-color: var(--color-accent-muted); }
+.diffstat-block { display: inline-block; width: 8px; height: 8px; margin-left: 1px; }
+.diffstat-add { background-color: var(--color-success-emphasis); }
+.diffstat-del { background-color: var(--color-danger-emphasis); }
+.diffstat-neutral { background-color: var(--color-neutral-muted); }
+.file-header { position: sticky; top: 0; z-index: 1; }
+
+/* Labels */
+.IssueLabel { display: inline-block; padding: 0 7px; font-size: 12px; font-weight: 500; line-height: 18px; border-radius: 2em; border: 1px solid transparent; white-space: nowrap; }
+a.IssueLabel:hover { text-decoration: none; filter: brightness(.95); }
+
+/* Issue and PR timeline */
+.timeline-comment { border: 1px solid var(--color-border-default); border-radius: 6px; background-color: var(--color-canvas-default); position: relative; }
+.timeline-comment-header { background-color: var(--color-canvas-subtle); border-bottom: 1px solid var(--color-border-default); border-top-left-radius: 6px; border-top-right-radius: 6px; padding: 8px 16px; color: var(--color-fg-muted); }
+.timeline-comment-header.is-author { background-color: var(--color-accent-subtle); border-bottom-color: var(--color-accent-muted); }
+.timeline-comment-body { padding: 16px; }
+.timeline-row { display: flex; gap: 16px; }
+.timeline-avatar { flex-shrink: 0; width: 40px; }
+.TimelineItem-badge.merged { background-color: var(--color-done-emphasis); color: var(--color-fg-on-emphasis); }
+.TimelineItem-badge.closed { background-color: var(--color-danger-emphasis); color: var(--color-fg-on-emphasis); }
+.TimelineItem-badge.reopened { background-color: var(--color-success-emphasis); color: var(--color-fg-on-emphasis); }
+.discussion-sidebar-item { padding: 16px 0; border-bottom: 1px solid var(--color-border-muted); font-size: 12px; }
+.discussion-sidebar-heading { font-size: 12px; font-weight: 600; color: var(--color-fg-muted); margin-bottom: 8px; }
+.merge-box { border: 1px solid var(--color-border-default); border-radius: 6px; }
+.merge-box.is-clean { border-color: var(--color-success-emphasis); }
+.merge-box.is-merged { border-color: var(--color-done-emphasis); }
+.merge-box.is-conflict { border-color: var(--color-attention-emphasis, #9a6700); }
+
+/* Markdown */
+.markdown-body { font-size: 16px; line-height: 1.5; word-wrap: break-word; }
+.markdown-body pre code.hljs { background: transparent; padding: 0; }
+.comment-body.markdown-body { font-size: 14px; }
+
+/* Syntax highlighting: highlight.js classes mapped to Primer's prettylights palette */
+.hljs-comment, .hljs-quote { color: var(--color-prettylights-syntax-comment); }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type, .hljs-meta .hljs-keyword, .hljs-doctag, .hljs-template-tag { color: var(--color-prettylights-syntax-keyword); }
+.hljs-string, .hljs-regexp, .hljs-meta .hljs-string, .hljs-addition { color: var(--color-prettylights-syntax-string); }
+.hljs-number, .hljs-built_in, .hljs-attr, .hljs-attribute, .hljs-variable.language_, .hljs-symbol, .hljs-selector-id, .hljs-selector-class, .hljs-property, .hljs-operator { color: var(--color-prettylights-syntax-constant); }
+.hljs-title, .hljs-title.function_, .hljs-title.class_, .hljs-section { color: var(--color-prettylights-syntax-entity); }
+.hljs-name, .hljs-tag, .hljs-selector-pseudo { color: var(--color-prettylights-syntax-entity-tag); }
+.hljs-variable, .hljs-template-variable, .hljs-params { color: var(--color-prettylights-syntax-variable); }
+.hljs-meta, .hljs-bullet, .hljs-link { color: var(--color-prettylights-syntax-constant); }
+.hljs-deletion { color: var(--color-prettylights-syntax-markup-deleted-text); background-color: var(--color-prettylights-syntax-markup-deleted-bg); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* Branch picker */
+.ref-menu { width: 300px; max-height: 380px; overflow-y: auto; }
+.ref-menu .SelectMenu-item[hidden] { display: none; }
+
+/* Misc */
+.clone-box { width: 340px; }
+.text-mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+.copy-ok { color: var(--color-success-fg) !important; }
+.empty-repo pre { white-space: pre-wrap; }
+details.dropdown summary::-webkit-details-marker { display: none; }

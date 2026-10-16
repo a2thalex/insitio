@@ -1,0 +1,86 @@
+import { timingSafeEqual } from "node:crypto";
+import type { Context, MiddlewareHandler } from "hono";
+import { getCookie, setCookie } from "hono/cookie";
+import type { Deps } from "../deps.js";
+import { randomToken } from "../auth/tokens.js";
+import { getSession } from "../services/users.js";
+import type { Env } from "./env.js";
+
+export const SESSION_COOKIE = "gfk_session";
+export const CSRF_COOKIE = "gfk_csrf";
+
+export function cookieOptions(deps: Deps) {
+  return { httpOnly: true, sameSite: "Lax" as const, path: "/", secure: deps.config.baseUrl.startsWith("https:") };
+}
+
+/** Loads the signed-in user, and gives anonymous visitors a double-submit CSRF cookie. */
+export function loadSession(deps: Deps): MiddlewareHandler<Env> {
+  return async (c, next) => {
+    const sid = getCookie(c, SESSION_COOKIE);
+    const s = sid ? getSession(deps.db, sid) : null;
+    c.set("user", s?.user ?? null);
+    c.set("session", s?.session ?? null);
+    let csrf = s?.session.csrf ?? getCookie(c, CSRF_COOKIE);
+    if (!csrf) {
+      csrf = randomToken(24);
+      setCookie(c, CSRF_COOKIE, csrf, cookieOptions(deps));
+    }
+    c.set("csrf", csrf);
+    await next();
+  };
+}
+
+function sameToken(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+/** Rejects state-changing requests that do not echo the CSRF token. */
+export function csrfGuard(onFail: (c: Context<Env>) => Response | Promise<Response>): MiddlewareHandler<Env> {
+  return async (c, next) => {
+    if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+      let token = c.req.header("x-csrf-token");
+      const type = c.req.header("content-type") ?? "";
+      if (!token && (type.includes("application/x-www-form-urlencoded") || type.includes("multipart/form-data"))) {
+        // Same options as form() so Hono's cached parse keeps repeated fields.
+        const body = await c.req.parseBody({ all: true });
+        const v = Array.isArray(body._csrf) ? body._csrf[0] : body._csrf;
+        if (typeof v === "string") token = v;
+      }
+      if (!token || !sameToken(token, c.get("csrf"))) return onFail(c);
+    }
+    await next();
+  };
+}
+
+/** A local path to return to after signing in; anything else falls back to "/". */
+export function safeNext(next: string | undefined): string {
+  return next && next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/";
+}
+
+export function loginRedirect(c: Context<Env>): Response {
+  const url = new URL(c.req.url);
+  return c.redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
+}
+
+/** Reads urlencoded or multipart form fields as strings (repeated fields become arrays). */
+export async function form(c: Context<Env>): Promise<Record<string, string | string[]>> {
+  const body = await c.req.parseBody({ all: true });
+  const out: Record<string, string | string[]> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (Array.isArray(v)) out[k] = v.filter((x): x is string => typeof x === "string");
+    else if (typeof v === "string") out[k] = v;
+  }
+  return out;
+}
+
+export function field(f: Record<string, string | string[]>, name: string): string {
+  const v = f[name];
+  return Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
+}
+
+export function fields(f: Record<string, string | string[]>, name: string): string[] {
+  const v = f[name];
+  return Array.isArray(v) ? v : v === undefined ? [] : [v];
+}
