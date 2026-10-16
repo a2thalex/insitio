@@ -1,0 +1,34 @@
+{
+  "name": "gitfkd",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted, invite-only git forge with a GitHub-style web UI",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "tsx watch --disable-warning=ExperimentalWarning src/main.ts",
+    "start": "tsx --disable-warning=ExperimentalWarning src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "admin:create": "tsx --disable-warning=ExperimentalWarning src/cli/admin-create.ts",
+    "invite:create": "tsx --disable-warning=ExperimentalWarning src/cli/invite-create.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "@primer/css": "^22.3.2",
+    "@primer/octicons": "^19.40.0",
+    "highlight.js": "^11.12.0",
+    "hono": "^4.13.13",
+    "marked": "^18.1.1",
+    "sanitize-html": "^2.18.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/sanitize-html": "^2.16.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12"
+  }
+}
