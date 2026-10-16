@@ -387,7 +387,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
     const user = c.get("user")!;
     const pull = getPull(deps.db, ctx.repo.id, Number(c.req.param("n")));
     if (!pull) return notFound(c);
-    if (pull.state !== "open") return renderError(c, 409, "This pull request is already closed.");
+    if (pull.state !== "open" || pull.mergedAt) return renderError(c, 409, "This pull request is already closed.");
     const message = `Merge pull request #${pull.number} from ${ctx.repo.owner}/${pull.headRef}\n\n${pull.title}`;
     try {
       const sha = await ctx.git.merge(pull.baseRef, pull.headRef, message, authorFor(user));

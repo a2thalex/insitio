@@ -8,8 +8,15 @@ import { handleGitHttp, matchGitRoute } from "./githttp/handler.js";
 export function createGitFkdServer(deps: Deps): Server {
   const web = getRequestListener(buildApp(deps).fetch);
   return createServer((req, res) => {
-    const route = matchGitRoute(req.url ?? "/");
-    if (route) handleGitHttp(req, res, deps, route);
-    else web(req, res);
+    try {
+      const route = matchGitRoute(req.url ?? "/");
+      if (route) handleGitHttp(req, res, deps, route);
+      else web(req, res);
+    } catch (err) {
+      // A bad request must never take the process down.
+      console.error("Request failed", err);
+      if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Internal server error\n");
+    }
   });
 }

@@ -20,7 +20,13 @@ const ROUTE = /^\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/(info\/refs|git
 
 /** Recognizes smart-HTTP git requests; everything else belongs to the web app. */
 export function matchGitRoute(url: string): GitRoute | null {
-  const u = new URL(url, "http://localhost");
+  let u: URL;
+  try {
+    // Prefix a fixed origin so paths like "//host" can't be read as a different authority.
+    u = new URL(`http://localhost${url.startsWith("/") ? "" : "/"}${url}`);
+  } catch {
+    return null;
+  }
   const m = ROUTE.exec(u.pathname);
   if (!m) return null;
   const rest = m[3];
@@ -30,6 +36,7 @@ export function matchGitRoute(url: string): GitRoute | null {
 }
 
 function send(res: ServerResponse, status: number, message: string, headers: Record<string, string> = {}) {
+  if (res.headersSent || res.writableEnded) return;
   res.writeHead(status, { "content-type": "text/plain; charset=utf-8", ...headers });
   res.end(message + "\n");
 }
@@ -94,14 +101,11 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
   child.stdin.on("error", () => {});
   child.stderr.on("data", (d) => console.error(`[git http-backend] ${String(d).trim()}`));
 
-  // git http-backend speaks CGI: headers, a blank line, then the body.
+  // git http-backend speaks CGI: headers, a blank line, then the body. Once the
+  // headers are parsed the body is piped, so a slow client applies backpressure.
   let head = Buffer.alloc(0);
   let headersSent = false;
-  child.stdout.on("data", (chunk: Buffer) => {
-    if (headersSent) {
-      res.write(chunk);
-      return;
-    }
+  const onHead = (chunk: Buffer) => {
     head = Buffer.concat([head, chunk]);
     const sep = head.indexOf("\r\n\r\n") !== -1 ? head.indexOf("\r\n\r\n") : head.indexOf("\n\n");
     if (sep === -1) return;
@@ -119,10 +123,13 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
     res.writeHead(status, headers);
     headersSent = true;
     res.write(head.subarray(sep + sepLen));
-  });
+    child.stdout.off("data", onHead);
+    child.stdout.pipe(res, { end: false });
+  };
+  child.stdout.on("data", onHead);
   child.on("error", (err) => {
     console.error("git http-backend failed to start", err);
-    if (!headersSent) send(res, 500, "Git backend unavailable.");
+    send(res, 500, "Git backend unavailable.");
   });
   child.on("close", async (code) => {
     if (!headersSent) {

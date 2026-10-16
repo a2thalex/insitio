@@ -6,6 +6,7 @@ import {
   listLabels, participants, setIssueLabels, setIssueState, updateIssue, type Issue,
 } from "../../services/issues.js";
 import { can } from "../../services/permissions.js";
+import { getPull } from "../../services/pulls.js";
 import type { Env } from "../env.js";
 import { field, fields, form, loginRedirect } from "../middleware.js";
 import { repoUrl } from "../paths.js";
@@ -176,8 +177,11 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
       const f = await form(c);
       const action = field(f, "action");
       const body = field(f, "body");
-      if ((action === "close" || action === "reopen") && !canManage(c, ctx, issue)) {
-        return renderError(c, 403, "Only the author and collaborators with write access can change this.");
+      if (action === "close" || action === "reopen") {
+        if (!canManage(c, ctx, issue)) return renderError(c, 403, "Only the author and collaborators with write access can change this.");
+        if (issue.isPull && getPull(deps.db, ctx.repo.id, issue.number)?.mergedAt) {
+          return renderError(c, 409, "This pull request was merged, so it can't be closed or reopened.");
+        }
       }
       if (body.trim()) addComment(deps.db, issue.id, user.id, body);
       else if (action === "comment") throw new ValidationError("Comment can't be blank");

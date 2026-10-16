@@ -225,7 +225,8 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
     return codeView(c, ctx, { ref, path: "", sha });
   }));
 
-  app.get(`${R}/tree`, (c) => c.redirect(`/${c.req.param("owner")}/${c.req.param("repo")}`));
+  // Redirect using the stored names, never the decoded URL params (which could form "//host").
+  app.get(`${R}/tree`, withRepo(deps, "read", (c, ctx) => c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name))));
 
   app.get(`${R}/tree/:rest{.+}`, withRepo(deps, "read", async (c, ctx) => {
     const loc = await locate(ctx, (c.req.param("rest") ?? ""));
@@ -329,8 +330,9 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
     const type = IMAGE_TYPES[ext(loc.path)] ?? (isBinary(content) ? "application/octet-stream" : "text/plain; charset=utf-8");
     const headers: Record<string, string> = { "content-type": type, "content-security-policy": RAW_CSP, "cache-control": "private, max-age=60" };
     if (c.req.query("download")) {
-      const fileName = loc.path.split("/").pop()!.replace(/["\\\r\n]/g, "_");
-      headers["content-disposition"] = `attachment; filename="${fileName}"`;
+      const fileName = loc.path.split("/").pop()!;
+      const ascii = fileName.replace(/[^\x20-\x7e]|["\\]/g, "_");
+      headers["content-disposition"] = `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
     }
     return c.body(new Uint8Array(content), 200, headers);
   }));

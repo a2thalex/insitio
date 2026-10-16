@@ -172,8 +172,11 @@ export function addEvent(db: DatabaseSync, issueId: number, actorId: number, kin
 
 export function setIssueState(db: DatabaseSync, issueId: number, state: "open" | "closed", actorId: number): void {
   tx(db, () => {
-    const cur = db.prepare("select state from issues where id = ?").get(issueId) as Row | undefined;
-    if (!cur || cur.state === state) return;
+    const cur = db
+      .prepare("select i.state, p.merged_at from issues i left join pulls p on p.issue_id = i.id where i.id = ?")
+      .get(issueId) as Row | undefined;
+    // A merged pull request stays closed for good.
+    if (!cur || cur.state === state || cur.merged_at) return;
     const t = now();
     db.prepare("update issues set state = ?, closed_at = ?, updated_at = ? where id = ?").run(state, state === "closed" ? t : null, t, issueId);
     addEvent(db, issueId, actorId, state === "closed" ? "closed" : "reopened");

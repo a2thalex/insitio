@@ -54,9 +54,14 @@ export function csrfGuard(onFail: (c: Context<Env>) => Response | Promise<Respon
   };
 }
 
-/** A local path to return to after signing in; anything else falls back to "/". */
+/**
+ * A local path to return to after signing in; anything else falls back to "/".
+ * Browsers strip tabs/newlines and treat "\" as "/", so any control character,
+ * space or backslash is rejected rather than risk "//host".
+ */
 export function safeNext(next: string | undefined): string {
-  return next && next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/";
+  if (!next || !next.startsWith("/") || next.startsWith("//") || /[\x00-\x20\\]/.test(next)) return "/";
+  return next;
 }
 
 export function loginRedirect(c: Context<Env>): Response {

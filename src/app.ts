@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import type { Deps } from "./deps.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "./services/errors.js";
 import type { Env } from "./web/env.js";
@@ -16,6 +17,8 @@ import { pullRoutes } from "./web/routes/pulls.js";
 import { repoSettingsRoutes } from "./web/routes/repoSettings.js";
 import { userRoutes } from "./web/routes/users.js";
 
+const MAX_FORM_BYTES = 2 * 1024 * 1024;
+
 /**
  * Builds the web app. Fixed top-level paths are registered before the
  * /:owner/... routes so a username can never shadow them.
@@ -23,6 +26,8 @@ import { userRoutes } from "./web/routes/users.js";
 export function buildApp(deps: Deps): Hono<Env> {
   const app = new Hono<Env>();
   staticRoutes(app);
+  // Forms are small; cap bodies before anything parses them. Git pushes bypass Hono entirely.
+  app.use("*", bodyLimit({ maxSize: MAX_FORM_BYTES, onError: (c) => renderError(c, 413, "That request was too large.") }));
   app.use("*", loadSession(deps));
   app.use("*", csrfGuard((c) => renderError(c, 403, "Your form expired or was sent from another site. Reload the page and try again.")));
   app.use("*", async (c, next) => {
