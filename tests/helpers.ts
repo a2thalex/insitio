@@ -2,9 +2,22 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { openDb } from "../src/db/db.js";
+import { migrate } from "../src/db/schema.js";
+import type { Config } from "../src/config.js";
+import type { Deps } from "../src/deps.js";
 
 export function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "gitfkd-test-"));
+}
+
+/** Fresh deps: an in-memory database and a temporary data directory. */
+export function testDeps(overrides: Partial<Config> = {}): Deps {
+  const db = openDb(":memory:");
+  migrate(db);
+  const dataDir = tmpDir();
+  mkdirSync(join(dataDir, "repos"));
+  return { db, config: { dataDir, port: 0, baseUrl: "http://localhost:3000", allowUserInvites: false, ...overrides } };
 }
 
 export function git(cwd: string, ...args: string[]): string {

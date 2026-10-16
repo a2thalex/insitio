@@ -14,7 +14,7 @@ describe("schema", () => {
     expect(names).toEqual(
       expect.arrayContaining([
         "users", "sessions", "invites", "access_tokens", "repos", "collaborators",
-        "stars", "issues", "pulls", "comments", "labels", "issue_labels", "repo_counters",
+        "stars", "issues", "pulls", "comments", "labels", "issue_labels", "repo_counters", "issue_events",
       ]),
     );
   });

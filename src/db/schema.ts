@@ -105,6 +105,17 @@ const MIGRATIONS = [
   create index comments_issue on comments (issue_id);
   create index sessions_user on sessions (user_id);
   `,
+  `
+  create table issue_events (
+    id integer primary key,
+    issue_id integer not null references issues(id) on delete cascade,
+    actor_id integer references users(id) on delete set null,
+    kind text not null check (kind in ('closed', 'reopened', 'merged', 'head_deleted')),
+    detail text not null default '',
+    created_at integer not null
+  );
+  create index issue_events_issue on issue_events (issue_id);
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {
