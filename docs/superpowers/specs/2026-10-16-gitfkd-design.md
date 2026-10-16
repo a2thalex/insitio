@@ -99,7 +99,7 @@ tests/
 - No open sign-up. `/join/:token` is the only sign-up path; the token is
   single-use and expires (default 7 days).
 - `npm run admin:create -- <username>` bootstraps the first admin and prints a
-  one-time password-set link. `npm run invite:create` prints an invite link.
+  generated password once. `npm run invite:create` prints an invite link.
 - Admin page `/admin/invites` lists, creates and revokes invites. Setting
   `ALLOW_USER_INVITES=1` lets non-admins create invites from settings.
 - Passwords: scrypt with per-user salt. Sessions: random 32-byte id in an
