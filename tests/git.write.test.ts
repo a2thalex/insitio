@@ -19,6 +19,9 @@ describe("Repo writes", () => {
     expect(c).toMatchObject({ subject: "Initial commit", authorName: "Ada" });
     await repo.commitFiles("main", { "docs/b.md": "b\n" }, "Add b", author);
     expect((await repo.tree("main", "docs")).map((e) => e.name)).toEqual(["a.md", "b.md"]);
+    await repo.commitFiles("topic", { "c.md": "c\n" }, "Add c", author, "main");
+    expect(await repo.commitCount("topic")).toBe(3);
+    expect((await repo.tree("topic", "")).map((e) => e.name)).toEqual(["docs", "README.md", "c.md"]);
   });
 
   it("compares branches with three-dot semantics", async () => {

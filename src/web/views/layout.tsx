@@ -9,7 +9,7 @@ export type PageProps = { title: string; user: User | null; csrf: string; childr
 export function Octicon({ name, size = 16, class: cls }: { name: string; size?: number; class?: string }) {
   const icon = octicons[name];
   if (!icon) return null;
-  return raw(icon.toSVG({ width: size, height: size, class: cls ? `octicon ${cls}` : undefined }));
+  return raw(icon.toSVG({ width: size, height: size, class: `octicon octicon-${name}${cls ? ` ${cls}` : ""}` }));
 }
 
 export function Avatar({ name, size = 20, class: cls = "" }: { name: string; size?: number; class?: string }) {

@@ -213,10 +213,11 @@ export class Repo {
     return { ...commit, parents, files: parseUnifiedDiff(stdout.toString()), diffTruncated: truncated };
   }
 
-  /** Commits files onto a branch (creating it if needed) without a worktree. */
-  async commitFiles(branch: string, files: Record<string, string>, message: string, author: Author): Promise<string> {
+  /** Commits files onto a branch without a worktree; a missing branch starts from `from` (or as a root commit). */
+  async commitFiles(branch: string, files: Record<string, string>, message: string, author: Author, from?: string): Promise<string> {
     assertSafeRef(branch);
-    const parent = await this.resolve(branch);
+    const existing = await this.resolve(branch);
+    const parent = existing ?? (from ? await this.resolve(from) : null);
     const tmp = await mkdtemp(join(tmpdir(), "gitfkd-index-"));
     const env = { GIT_INDEX_FILE: join(tmp, "index") };
     try {
@@ -229,7 +230,7 @@ export class Repo {
       const tree = (await this.git(["write-tree"], { env })).stdout.toString().trim();
       const commitArgs = ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message];
       const sha = (await this.git(commitArgs, { env: authorEnv(author) })).stdout.toString().trim();
-      await this.updateRef(branch, sha, parent ?? ZERO_SHA);
+      await this.updateRef(branch, sha, existing ?? ZERO_SHA);
       return sha;
     } finally {
       await rm(tmp, { recursive: true, force: true });
