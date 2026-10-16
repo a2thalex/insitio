@@ -70,6 +70,12 @@ export function getUserById(db: DatabaseSync, id: number): User | null {
   return r ? toUser(r) : null;
 }
 
+export function getUserByEmail(db: DatabaseSync, email: string): User | null {
+  if (!email) return null;
+  const r = db.prepare("select * from users where email = ? collate nocase order by id limit 1").get(email);
+  return r ? toUser(r) : null;
+}
+
 export function listUsers(db: DatabaseSync): User[] {
   return db.prepare("select * from users order by username").all().map(toUser);
 }
