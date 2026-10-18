@@ -62,12 +62,17 @@ function DownloadPage({ baseUrl, releaseRepo }: { baseUrl: string; releaseRepo: 
           </div>
         ))}
       </div>
-      <p class="color-fg-muted f6 mb-5">
-        Checksums for every file are in <a href={`${base}/SHA256SUMS`}>SHA256SUMS</a>. After downloading, check a file with{" "}
-        <code class="text-mono">sha256sum -c --ignore-missing SHA256SUMS</code> (macOS: <code class="text-mono">shasum -a 256 -c</code>,
-        Windows: <code class="text-mono">Get-FileHash</code>). Older versions are on the{" "}
-        <a href={`https://github.com/${releaseRepo}/releases`}>releases page</a>.
+      <p class="color-fg-muted f6 mb-2">
+        Checksums for every file are in <a href={`${base}/SHA256SUMS`}>SHA256SUMS</a>. Download it next to the binary and check that one file
+        (macOS: use the line for your Mac). Older versions are on the <a href={`https://github.com/${releaseRepo}/releases`}>releases page</a>.
       </p>
+      <div class="Box px-3 py-2 mb-5 f6" style="overflow-x:auto">
+        <code class="text-mono d-block" style="white-space:nowrap">grep nsit-linux-x64 SHA256SUMS | sha256sum -c</code>
+        <code class="text-mono d-block" style="white-space:nowrap">grep nsit-macos-arm64 SHA256SUMS | shasum -a 256 -c</code>
+        <code class="text-mono d-block" style="white-space:nowrap">grep nsit-macos-x64 SHA256SUMS | shasum -a 256 -c</code>
+        <code class="text-mono d-block" style="white-space:nowrap">Get-FileHash .\nsit-windows-x64.exe</code>
+        <span class="color-fg-muted">On Windows, compare the hash with the nsit-windows-x64.exe line in SHA256SUMS.</span>
+      </div>
 
       <h2 class="f3 mb-2">Connect it</h2>
       <p class="mb-2">
@@ -96,6 +101,10 @@ export function installPs1(releaseRepo: string): string {
     # Windows PowerShell 5.1 does not offer TLS 1.2 by default, and GitHub requires it.
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+    if (-not [Environment]::Is64BitOperatingSystem) {
+        throw "nsit is only built for 64-bit Windows, and this is a 32-bit system. Nothing was installed."
+    }
+
     $releaseUrl = "${releaseBase(releaseRepo)}"
     $asset = "nsit-windows-x64.exe"
 
@@ -120,9 +129,10 @@ export function installPs1(releaseRepo: string): string {
         }
 
         # Each SHA256SUMS line is "<hex>  <file name>", with an optional * before the name.
+        # The first line for the asset wins, as in install.sh.
         $expected = $null
         foreach ($line in (Get-Content -LiteralPath $sumsFile)) {
-            if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+?)\s*$' -and $Matches[2] -eq $asset) {
+            if (-not $expected -and $line -match '^([0-9a-fA-F]{64})\s+\*?(.+?)\s*$' -and $Matches[2] -eq $asset) {
                 $expected = $Matches[1].ToLowerInvariant()
             }
         }
@@ -141,17 +151,34 @@ export function installPs1(releaseRepo: string): string {
         }
         Write-Host "Installed $exe"
 
-        # Add the folder to the user PATH (not the machine PATH), once.
-        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        $entries = @()
-        if ($userPath) { $entries = @($userPath.Split(";") | Where-Object { $_ -ne "" }) }
+        # Add the folder to the user PATH (never the system one), once. The registry is edited
+        # directly: the .NET accessors expand %VARIABLE% entries and save them back expanded,
+        # which would freeze entries like %JAVA_HOME%\bin. Reading the raw value and writing it
+        # back as REG_EXPAND_SZ leaves every existing entry exactly as it was.
+        $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+        if (-not $envKey) { throw "Could not open HKCU\Environment to update your user PATH." }
         $onPath = $false
-        foreach ($entry in $entries) {
-            if ($entry.TrimEnd("\") -ieq $installDir.TrimEnd("\")) { $onPath = $true }
+        try {
+            # A missing Path value reads as empty and is created below.
+            $rawPath = [string]$envKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $entries = @()
+            if ($rawPath) { $entries = @($rawPath.Split(";") | Where-Object { $_ -ne "" }) }
+            foreach ($entry in $entries) {
+                # Compare expanded, ignoring case and a trailing backslash.
+                if ([Environment]::ExpandEnvironmentVariables($entry).TrimEnd("\") -ieq $installDir.TrimEnd("\")) { $onPath = $true }
+            }
+            if (-not $onPath) {
+                $newPath = (@($entries) + $installDir) -join ";"
+                $envKey.SetValue("Path", $newPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            }
+        } finally {
+            $envKey.Close()
         }
         if (-not $onPath) {
-            $newPath = (@($entries) + $installDir) -join ";"
-            [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+            # Writing the registry does not tell running programs. Setting and clearing a throwaway
+            # user variable makes Windows broadcast WM_SETTINGCHANGE, so new shells see the new PATH.
+            [Environment]::SetEnvironmentVariable("NSIT_INSTALL_TMP", "1", "User")
+            [Environment]::SetEnvironmentVariable("NSIT_INSTALL_TMP", $null, "User")
             Write-Host "Added $installDir to your user PATH. Terminals opened from now on will find nsit."
         }
         # Let this window find nsit straight away too.
@@ -218,9 +245,15 @@ main() {
 
   # Find the tools before downloading anything.
   if command -v curl >/dev/null 2>&1; then
-    fetch() { curl -fsSL "$1"; }
+    # HTTPS only, even across redirects, and TLS 1.2 or newer.
+    fetch() { curl --proto '=https' --tlsv1.2 -fsSL "$1"; }
   elif command -v wget >/dev/null 2>&1; then
-    fetch() { wget -qO- "$1"; }
+    # BusyBox wget has no --https-only, so only pass it when wget lists it.
+    if wget --help 2>&1 | grep -q -e '--https-only'; then
+      fetch() { wget --https-only -qO- "$1"; }
+    else
+      fetch() { wget -qO- "$1"; }
+    fi
   else
     fail "curl or wget is required to download nsit"
   fi

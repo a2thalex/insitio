@@ -56,6 +56,17 @@ describe("GET /download", () => {
     expect(html).not.toContain("git.iam.bot");
   });
 
+  it("shows a working per-file checksum check for Linux and macOS", async () => {
+    const html = await text(testApp({ baseUrl: BASE }).get("/download"));
+    expect(html).toContain("grep nsit-linux-x64 SHA256SUMS | sha256sum -c");
+    expect(html).toContain("grep nsit-macos-arm64 SHA256SUMS | shasum -a 256 -c");
+    expect(html).toContain("grep nsit-macos-x64 SHA256SUMS | shasum -a 256 -c");
+    expect(html).toContain("Get-FileHash");
+    // The old, incomplete hint.
+    expect(html).not.toContain("shasum -a 256 -c</code>,");
+    expect(html).not.toContain("--ignore-missing");
+  });
+
   it("renders for a signed-in user too", async () => {
     const t = testApp({ baseUrl: BASE });
     const ada = t.loginAs(t.user("ada"));
@@ -117,7 +128,11 @@ describe("GET /install.sh", () => {
 
   it("uses curl -fsSL, falls back to wget, never needs sudo, and installs to ~/.local/bin", async () => {
     const sh = await text(testApp().get("/install.sh"));
-    expect(sh).toContain('curl -fsSL "$1"');
+    // HTTPS only (also across redirects) and TLS 1.2 or newer.
+    expect(sh).toContain(`curl --proto '=https' --tlsv1.2 -fsSL "$1"`);
+    expect(sh).toContain('wget --https-only -qO- "$1"');
+    // BusyBox wget does not know --https-only, so it is only used when wget lists it.
+    expect(sh).toContain("wget --help 2>&1 | grep -q -e '--https-only'");
     expect(sh).toContain('wget -qO- "$1"');
     expect(sh).not.toMatch(/\bsudo\b/);
     expect(sh).toContain("$HOME/.local/bin");
@@ -195,11 +210,44 @@ describe("GET /install.ps1", () => {
     expect(ps).toContain("$env:LOCALAPPDATA");
     expect(ps).toContain("Programs\\nsit");
     expect(ps).toContain("nsit.exe");
-    expect(ps).toContain('[Environment]::GetEnvironmentVariable("Path", "User")');
-    expect(ps).toContain('[Environment]::SetEnvironmentVariable("Path", $newPath, "User")');
     expect(ps).toContain("if (-not $onPath)");
+    expect(ps).toContain("-ieq");
     expect(ps).not.toMatch(/RunAs|Machine/);
     expect(ps).toContain("--version");
+  });
+
+  it("edits the raw user PATH in HKCU so %VARIABLE% entries are not frozen", async () => {
+    const ps = await text(testApp().get("/install.ps1"));
+    // Read unexpanded, write back as REG_EXPAND_SZ.
+    expect(ps).toContain('[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)');
+    expect(ps).toContain("[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames");
+    expect(ps).toContain("[Microsoft.Win32.RegistryValueKind]::ExpandString");
+    expect(ps).toContain('.GetValue("Path", ""');
+    expect(ps).toContain('.SetValue("Path", $newPath');
+    expect(ps).toContain("$envKey.Close()");
+    // The expanding .NET accessor must not be used for PATH any more.
+    expect(ps).not.toMatch(/(Get|Set)EnvironmentVariable\("Path"/);
+    // Existing entries are compared after expansion, so %LOCALAPPDATA%\Programs\nsit counts as present.
+    expect(ps).toContain("[Environment]::ExpandEnvironmentVariables($entry)");
+    // Windows is told the environment changed (WM_SETTINGCHANGE) by touching a throwaway user variable.
+    expect(ps).toContain('[Environment]::SetEnvironmentVariable("NSIT_INSTALL_TMP", "1", "User")');
+    expect(ps).toContain('[Environment]::SetEnvironmentVariable("NSIT_INSTALL_TMP", $null, "User")');
+    // The registry is written before the broadcast, and both only when the folder was missing.
+    expect(ps.indexOf(".SetValue(")).toBeLessThan(ps.indexOf("NSIT_INSTALL_TMP"));
+  });
+
+  it("refuses 32-bit Windows before downloading anything", async () => {
+    const ps = await text(testApp().get("/install.ps1"));
+    const check = ps.indexOf("[Environment]::Is64BitOperatingSystem");
+    expect(check).toBeGreaterThan(0);
+    expect(ps).toContain("if (-not [Environment]::Is64BitOperatingSystem)");
+    expect(ps.slice(check, check + 200)).toContain("throw");
+    expect(check).toBeLessThan(ps.indexOf("Invoke-WebRequest"));
+  });
+
+  it("uses the first matching SHA256SUMS entry, like install.sh", async () => {
+    const ps = await text(testApp().get("/install.ps1"));
+    expect(ps).toContain("if (-not $expected -and $line -match");
   });
 
   it.skipIf(!psExe)("parses in PowerShell", async () => {
