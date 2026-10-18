@@ -46,6 +46,32 @@ describe("addressBucket", () => {
   });
 });
 
+describe("addressBucket with a /48 (the unit of the pending device-code cap)", () => {
+  it("is the /64 bucket unless a /48 is asked for", () => {
+    expect(addressBucket("2001:db8:1:2::1")).toBe(addressBucket("2001:db8:1:2::1", 64));
+    expect(addressBucket("2001:db8:1:2::1")).not.toBe(addressBucket("2001:db8:1:2::1", 48));
+  });
+
+  it("groups every /64 of a /48 together, however the addresses are written", () => {
+    const bucket = addressBucket("2001:db8:1:2::1", 48);
+    expect(addressBucket("2001:db8:1:3::1", 48)).toBe(bucket);
+    expect(addressBucket("2001:db8:1:ffff:aaaa:bbbb:cccc:dddd", 48)).toBe(bucket);
+    expect(addressBucket("2001:DB8:0001::", 48)).toBe(bucket);
+    expect(addressBucket("2001:db8:1::1%eth0", 48)).toBe(bucket);
+    expect(addressBucket("2001:db8:2:2::1", 48)).not.toBe(bucket);
+    expect(addressBucket("2001:db9:1:2::1", 48)).not.toBe(bucket);
+    expect(addressBucket("2001:db8::1", 48)).toBe(addressBucket("2001:db8:0:7::2", 48));
+    expect(addressBucket("2001:db8::1", 48)).not.toBe(addressBucket("2001:db8:1::1", 48));
+  });
+
+  it("still treats IPv4, IPv4-mapped IPv6 and non-addresses as they are", () => {
+    expect(addressBucket("203.0.113.9", 48)).toBe("203.0.113.9");
+    expect(addressBucket("::ffff:203.0.113.9", 48)).toBe("203.0.113.9");
+    expect(addressBucket("unknown", 48)).toBe("unknown");
+    expect(addressBucket("1::2::3", 48)).toBe("1::2::3");
+  });
+});
+
 describe("clientAddress", () => {
   it("ignores X-Forwarded-For from untrusted peers", () => {
     expect(clientAddress("203.0.113.9", "1.2.3.4", LOOPBACK)).toBe("203.0.113.9");

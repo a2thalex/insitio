@@ -46,20 +46,22 @@ function parseIpv6(address: string): number[] | null {
 }
 
 /**
- * The unit a rate limit counts clients in. An IPv4 address stands for itself, and so does an
+ * The unit a limit counts clients in. An IPv4 address stands for itself, and so does an
  * IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) as its IPv4. Any other IPv6 address stands for its
- * whole /64: that is the smallest block a network hands out, so one client that holds a /64 (or
- * a /48, or a /32) cannot get a fresh allowance by changing the low 64 bits of its address.
+ * whole /64 (the default; the smallest block a network hands out, so one client that holds a /64,
+ * a /48 or a /32 cannot get a fresh allowance by changing the low 64 bits of its address) or, when
+ * `ipv6Bits` is 48, for its whole /48 (what a site is usually given: a limit on how much one
+ * source may hold at once should not be beaten by a client that spreads over its /64s).
  * Anything that is not an address ("unknown") comes back unchanged.
  */
-export function addressBucket(address: string): string {
+export function addressBucket(address: string, ipv6Bits: 64 | 48 = 64): string {
   if (!address.includes(":")) return address;
   const g = parseIpv6(address);
   if (!g) return address;
   if (g.slice(0, 5).every((n) => n === 0) && g[5] === 0xffff) {
     return `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
   }
-  return `${g.slice(0, 4).map((n) => n.toString(16)).join(":")}::/64`;
+  return `${g.slice(0, ipv6Bits / 16).map((n) => n.toString(16)).join(":")}::/${ipv6Bits}`;
 }
 
 /** The client address of an incoming request; "unknown" when there is no socket (in-process test requests). */
@@ -73,7 +75,7 @@ export function requestAddress(c: Context, trustedProxies: string[]): string {
   return clientAddress(peer, c.req.header("x-forwarded-for"), trustedProxies);
 }
 
-/** The rate-limit bucket of the client that made a request: see `addressBucket`. */
-export function requestBucket(c: Context, trustedProxies: string[]): string {
-  return addressBucket(requestAddress(c, trustedProxies));
+/** The bucket of the client that made a request (a /64 for IPv6 unless `ipv6Bits` says /48): see `addressBucket`. */
+export function requestBucket(c: Context, trustedProxies: string[], ipv6Bits: 64 | 48 = 64): string {
+  return addressBucket(requestAddress(c, trustedProxies), ipv6Bits);
 }

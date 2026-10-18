@@ -22,11 +22,22 @@ const KEEP_SECONDS = 3600;
 // needs no account, so this (not the per-address limit alone) bounds what anonymous callers can
 // put in the database: a flood can fill it, but only for as long as the codes live.
 export const MAX_PENDING_DEVICE_CODES = 1000;
+// The most sign-ins one source (an IPv4 address or an IPv6 /48: the caller picks the bucket) may have
+// waiting at once. Without it a handful of sources could fill the table-wide cap above and lock
+// everyone else out of `nsit auth login`: 1000 / 5 means it takes 200 distinct sources.
+export const MAX_PENDING_PER_BUCKET = 5;
 
-/** Too many sign-ins are already waiting. `retryAfter` is the seconds until the first of them expires. */
+/**
+ * Too many sign-ins are already waiting: `scope` says whether that is the source's own limit
+ * (MAX_PENDING_PER_BUCKET) or the table-wide one. `retryAfter` is the seconds until the first of
+ * the codes that are counted expires.
+ */
 export class DeviceCapacityError extends Error {
-  constructor(readonly retryAfter: number) {
-    super("Too many sign-ins are waiting for approval.");
+  constructor(
+    readonly retryAfter: number,
+    readonly scope: "bucket" | "global" = "global",
+  ) {
+    super(scope === "bucket" ? "Too many sign-ins from this source are waiting for approval." : "Too many sign-ins are waiting for approval.");
   }
 }
 
@@ -80,19 +91,30 @@ function cleanClientName(name: string): string {
 }
 
 /**
- * Begins a sign-in. `at` is unix seconds. Throws a DeviceCapacityError when
- * MAX_PENDING_DEVICE_CODES sign-ins are already waiting.
+ * Begins a sign-in. `at` is unix seconds. `bucket` names the source that is asking (the API passes
+ * an IPv4 address or an IPv6 /48); it is stored on the row, and with one given, a source that already
+ * has MAX_PENDING_PER_BUCKET sign-ins waiting is turned away. Without one only the table-wide cap
+ * applies. Throws a DeviceCapacityError (scope "bucket", checked first, or "global") when a cap is hit.
  */
 export function startDevice(
   db: DatabaseSync,
   clientName: string,
   at = clock(),
+  bucket: string | null = null,
 ): { deviceCode: string; userCode: string; expiresIn: 600; interval: 5 } {
   const name = cleanClientName(clientName);
   // Swept before (and outside) the transaction below, so the table stays small, and the sweep
   // is kept, even while requests are being turned away.
   db.prepare("delete from device_codes where expires_at < ?").run(at - KEEP_SECONDS);
   return tx(db, () => {
+    if (bucket !== null) {
+      const mine = db
+        .prepare("select count(*) as n, min(expires_at) as soonest from device_codes where bucket = ? and status = 'pending' and expires_at > ?")
+        .get(bucket, at) as { n: number; soonest: number | null };
+      if (mine.n >= MAX_PENDING_PER_BUCKET) {
+        throw new DeviceCapacityError(Math.max(1, (mine.soonest ?? at + DEVICE_EXPIRES_IN) - at), "bucket");
+      }
+    }
     const open = db
       .prepare("select count(*) as n, min(expires_at) as soonest from device_codes where status = 'pending' and expires_at > ?")
       .get(at) as { n: number; soonest: number | null };
@@ -105,10 +127,10 @@ export function startDevice(
       const userCode = newUserCode();
       const res = db
         .prepare(
-          `insert into device_codes (device_code_hash, user_code_hash, client_name, interval, expires_at, created_at)
-           values (?, ?, ?, ?, ?, ?) on conflict do nothing`,
+          `insert into device_codes (device_code_hash, user_code_hash, client_name, interval, expires_at, created_at, bucket)
+           values (?, ?, ?, ?, ?, ?, ?) on conflict do nothing`,
         )
-        .run(sha256Hex(deviceCode), sha256Hex(normalizeUserCode(userCode)), name, DEVICE_INTERVAL, at + DEVICE_EXPIRES_IN, at);
+        .run(sha256Hex(deviceCode), sha256Hex(normalizeUserCode(userCode)), name, DEVICE_INTERVAL, at + DEVICE_EXPIRES_IN, at, bucket);
       if (Number(res.changes) > 0) return { deviceCode, userCode, expiresIn: DEVICE_EXPIRES_IN, interval: DEVICE_INTERVAL };
     }
     throw new Error("could not allocate a device code");

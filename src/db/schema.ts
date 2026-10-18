@@ -134,6 +134,13 @@ const MIGRATIONS = [
   `
   create index device_codes_expires_at on device_codes (expires_at);
   `,
+  // The source that asked for a code (an IPv4 address or an IPv6 /48, see addressBucket), so that startDevice
+  // can cap the open codes of one source. Null for rows made before this column existed. The sweep removes
+  // a row (and with it the address) an hour after it expires.
+  `
+  alter table device_codes add column bucket text;
+  create index device_codes_bucket on device_codes (bucket, expires_at);
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

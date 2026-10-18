@@ -1,7 +1,7 @@
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { requestBucket } from "../clientAddress.js";
+import { addressBucket, requestAddress } from "../clientAddress.js";
 import { now } from "../db/db.js";
 import type { Deps } from "../deps.js";
 import { createRateLimiter } from "../rateLimit.js";
@@ -136,8 +136,12 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
   const codeLimiter = createRateLimiter(10, 60_000);
 
   app.post("/device/code", async (c) => {
-    // Counted per IPv4 address or IPv6 /64, so rotating the low bits of an address buys nothing.
-    const bucket = requestBucket(c, deps.config.trustedProxies);
+    const address = requestAddress(c, deps.config.trustedProxies);
+    // The request rate is counted per IPv4 address or IPv6 /64, so rotating the low bits of an address
+    // buys nothing. The sign-ins one source may have waiting at once are counted per IPv4 address or
+    // IPv6 /48 (startDevice), so spreading over the /64s of a site buys nothing either.
+    const bucket = addressBucket(address);
+    const pendingBucket = addressBucket(address, 48);
     const wait = codeLimiter.retryAfter(bucket);
     if (wait > 0) {
       c.header("retry-after", String(wait));
@@ -151,12 +155,19 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
 
     let d;
     try {
-      d = startDevice(deps.db, body.client_name);
+      d = startDevice(deps.db, body.client_name, now(), pendingBucket);
     } catch (err) {
-      // However many addresses ask, only so many sign-ins may wait for approval at once.
+      // Only so many sign-ins may wait for approval at once from one source, and, however many sources ask, in all.
       if (!(err instanceof DeviceCapacityError)) throw err;
       c.header("retry-after", String(err.retryAfter));
-      return apiError(c, 429, "rate_limited", "Too many sign-ins are waiting for approval. Try again in a few minutes.");
+      return apiError(
+        c,
+        429,
+        "rate_limited",
+        err.scope === "bucket"
+          ? "Too many sign-ins from your network are waiting for approval. Finish one of them, or try again in a few minutes."
+          : "Too many sign-ins are waiting for approval. Try again in a few minutes.",
+      );
     }
     c.header("cache-control", "no-store");
     return c.json({

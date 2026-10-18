@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
 import { createRateLimiter } from "../src/rateLimit.js";
+import { migrate } from "../src/db/schema.js";
 import {
   DeviceCapacityError,
   MAX_PENDING_DEVICE_CODES,
+  MAX_PENDING_PER_BUCKET,
   decideDevice,
   findPendingByUserCode,
   normalizeUserCode,
@@ -146,6 +148,117 @@ describe("the cap on pending device codes", () => {
   });
 });
 
+describe("the cap on pending device codes per bucket", () => {
+  const A = "203.0.113.9";
+  const B = "203.0.113.10";
+  const fillBucket = (db: Parameters<typeof startDevice>[0], bucket: string, n: number, at: number) => {
+    for (let i = 0; i < n; i++) startDevice(db, `pc-${bucket}-${i}`, at, bucket);
+  };
+  const refusal = (fn: () => unknown): DeviceCapacityError => {
+    try {
+      fn();
+    } catch (err) {
+      expect(err).toBeInstanceOf(DeviceCapacityError);
+      return err as DeviceCapacityError;
+    }
+    throw new Error("expected a DeviceCapacityError");
+  };
+
+  it("lets one bucket have MAX_PENDING_PER_BUCKET open codes, then turns it away and says when its first one expires", () => {
+    const { deps } = setup();
+    expect(MAX_PENDING_PER_BUCKET).toBe(5);
+    fillBucket(deps.db, A, MAX_PENDING_PER_BUCKET, T0);
+    const err = refusal(() => startDevice(deps.db, "sixth", T0 + 100, A));
+    expect(err.scope).toBe("bucket");
+    expect(err.retryAfter).toBe(500); // the first code expires at T0 + 600
+    const count = deps.db.prepare("select count(*) as n from device_codes").get() as { n: number };
+    expect(count.n).toBe(MAX_PENDING_PER_BUCKET);
+  });
+
+  it("leaves every other bucket alone while one is full", () => {
+    const { deps } = setup();
+    fillBucket(deps.db, A, MAX_PENDING_PER_BUCKET, T0);
+    expect(() => startDevice(deps.db, "x", T0, A)).toThrow(DeviceCapacityError);
+    expect(() => startDevice(deps.db, "x", T0, B)).not.toThrow();
+    expect(() => startDevice(deps.db, "x", T0, "2001:db8:1::/48")).not.toThrow();
+    // A caller that names no bucket is only held to the table-wide cap.
+    for (let i = 0; i < MAX_PENDING_PER_BUCKET + 2; i++) expect(() => startDevice(deps.db, "x", T0)).not.toThrow();
+  });
+
+  it("counts only the bucket's open codes: a decided or an expired one frees its slot, other buckets' codes do not count", () => {
+    const { deps, ada } = setup();
+    fillBucket(deps.db, B, MAX_PENDING_PER_BUCKET, T0); // B being full does not use up A's allowance
+    const first = startDevice(deps.db, "first", T0, A);
+    fillBucket(deps.db, A, MAX_PENDING_PER_BUCKET - 1, T0);
+    expect(() => startDevice(deps.db, "no-room", T0 + 1, A)).toThrow(DeviceCapacityError);
+
+    const row = findPendingByUserCode(deps.db, first.userCode, T0 + 1)!;
+    expect(decideDevice(deps.db, row.id, ada.id, false, T0 + 1)).toBe(true);
+    expect(() => startDevice(deps.db, "fits-now", T0 + 1, A)).not.toThrow();
+    expect(() => startDevice(deps.db, "full-again", T0 + 1, A)).toThrow(DeviceCapacityError);
+
+    // The codes made at T0 expire at T0 + 600; the one made at T0 + 1 is the only one left then.
+    expect(() => startDevice(deps.db, "after-expiry", T0 + 600, A)).not.toThrow();
+  });
+
+  it("says when the bucket's own oldest code expires, not the table's", () => {
+    const { deps } = setup();
+    startDevice(deps.db, "someone-else", T0, B); // expires at T0 + 600
+    fillBucket(deps.db, A, MAX_PENDING_PER_BUCKET, T0 + 200); // expire at T0 + 800
+    expect(refusal(() => startDevice(deps.db, "x", T0 + 300, A)).retryAfter).toBe(500);
+  });
+
+  it("checks the bucket before the table-wide cap", () => {
+    const { deps } = setup();
+    fillBucket(deps.db, A, MAX_PENDING_PER_BUCKET, T0);
+    for (let i = 0; i < MAX_PENDING_DEVICE_CODES - MAX_PENDING_PER_BUCKET; i++) startDevice(deps.db, `pc-${i}`, T0);
+    // The table is full now. The full bucket is told so (it can only wait for its own codes)...
+    expect(refusal(() => startDevice(deps.db, "x", T0 + 1, A)).scope).toBe("bucket");
+    // ...and a bucket with room is told that the table is full.
+    expect(refusal(() => startDevice(deps.db, "x", T0 + 1, B)).scope).toBe("global");
+  });
+
+  it("still enforces the table-wide cap when every bucket is under its own", () => {
+    const { deps } = setup();
+    const buckets = MAX_PENDING_DEVICE_CODES / MAX_PENDING_PER_BUCKET;
+    for (let b = 0; b < buckets; b++) fillBucket(deps.db, `198.51.100.${b}`, MAX_PENDING_PER_BUCKET, T0);
+    const err = refusal(() => startDevice(deps.db, "one-too-many", T0 + 100, "192.0.2.1"));
+    expect(err.scope).toBe("global");
+    expect(err.retryAfter).toBe(500);
+    const count = deps.db.prepare("select count(*) as n from device_codes").get() as { n: number };
+    expect(count.n).toBe(MAX_PENDING_DEVICE_CODES);
+  });
+
+  it("records the bucket on the row (null when none is given) and counts by it through an index", () => {
+    const { deps } = setup();
+    startDevice(deps.db, "with", T0, A);
+    startDevice(deps.db, "without", T0);
+    const rows = deps.db.prepare("select client_name, bucket from device_codes order by id").all() as { client_name: string; bucket: string | null }[];
+    expect(rows).toEqual([
+      { client_name: "with", bucket: A },
+      { client_name: "without", bucket: null },
+    ]);
+    const plan = deps.db
+      .prepare("explain query plan select count(*) as n, min(expires_at) as soonest from device_codes where bucket = ? and status = 'pending' and expires_at > ?")
+      .all(A, T0) as { detail: string }[];
+    expect(plan.map((p) => p.detail).join(" ")).toMatch(/USING (COVERING )?INDEX device_codes_bucket/);
+  });
+
+  it("migrates a database that already holds device codes: they keep their rows and get no bucket", () => {
+    const { deps } = setup();
+    const version = (deps.db.prepare("pragma user_version").get() as { user_version: number }).user_version;
+    // Turn the database back into what it was before the bucket column existed.
+    deps.db.exec("drop index device_codes_bucket; alter table device_codes drop column bucket; pragma user_version = " + (version - 1));
+    deps.db
+      .prepare("insert into device_codes (device_code_hash, user_code_hash, client_name, expires_at, created_at) values ('d', 'u', 'legacy', ?, ?)")
+      .run(T0 + 600, T0);
+
+    migrate(deps.db);
+    expect((deps.db.prepare("pragma user_version").get() as { user_version: number }).user_version).toBe(version);
+    expect(deps.db.prepare("select client_name, bucket from device_codes").all()).toEqual([{ client_name: "legacy", bucket: null }]);
+  });
+});
+
 describe("normalizeUserCode and findPendingByUserCode", () => {
   it("ignores case, dashes and spaces", () => {
     expect(normalizeUserCode("abcd efgh")).toBe("ABCDEFGH");
@@ -273,9 +386,17 @@ describe("POST /api/v1/device/code", () => {
     }
   });
 
+  // The rate limit lets one address ask for 10 codes a minute, which is more than may wait for approval
+  // at once (MAX_PENDING_PER_BUCKET), so the tests of the rate limit decide each code as soon as it is
+  // issued: a decided code no longer waits, and the rate limit is then the only thing that can refuse.
+  const settle = (db: Parameters<typeof startDevice>[0]) => db.exec("update device_codes set status = 'denied' where status = 'pending'");
+
   it("allows 10 requests a minute per client address, then 429, then recovers", async () => {
-    const { start, app } = setup();
-    for (let i = 0; i < 10; i++) expect((await start()).res.status).toBe(200);
+    const { start, app, deps } = setup();
+    for (let i = 0; i < 10; i++) {
+      expect((await start()).res.status).toBe(200);
+      settle(deps.db);
+    }
 
     const blocked = await jsonPost(app, "/api/v1/device/code", { client_name: "test-pc" });
     expect(blocked.status).toBe(429);
@@ -295,29 +416,93 @@ describe("POST /api/v1/device/code", () => {
     );
 
   it("shares one allowance between all the addresses of an IPv6 /64, but not between /64s", async () => {
-    const { app } = setup();
+    const { app, deps } = setup();
+    const settled = async (address: string) => {
+      const res = await from(app, address);
+      settle(deps.db);
+      return res;
+    };
     // Ten different addresses of 2001:db8:1:2::/64 use up the bucket...
-    for (let i = 0; i < 10; i++) expect((await from(app, `2001:db8:1:2:${i + 1}::${i + 1}`)).status).toBe(200);
+    for (let i = 0; i < 10; i++) expect((await settled(`2001:db8:1:2:${i + 1}::${i + 1}`)).status).toBe(200);
     // ...so an eleventh address in the same /64 is blocked, however it is written...
     for (const address of ["2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:DB8:1:2::", "2001:db8:1:2::1"]) {
-      const blocked = await from(app, address);
+      const blocked = await settled(address);
       expect(blocked.status).toBe(429);
       expect((await blocked.json()).error.code).toBe("rate_limited");
       expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
     }
     // ...while the neighbouring /64s are untouched.
-    expect((await from(app, "2001:db8:1:3::1")).status).toBe(200);
-    expect((await from(app, "2001:db8:2:2::1")).status).toBe(200);
+    expect((await settled("2001:db8:1:3::1")).status).toBe(200);
+    expect((await settled("2001:db8:2:2::1")).status).toBe(200);
   });
 
   it("keeps limiting IPv4 per address, and counts an IPv4-mapped IPv6 address as its IPv4", async () => {
-    const { app } = setup();
-    for (let i = 0; i < 5; i++) expect((await from(app, "203.0.113.9")).status).toBe(200);
-    for (let i = 0; i < 5; i++) expect((await from(app, "::ffff:203.0.113.9")).status).toBe(200);
-    expect((await from(app, "203.0.113.9")).status).toBe(429);
-    expect((await from(app, "::ffff:203.0.113.9")).status).toBe(429);
+    const { app, deps } = setup();
+    const settled = async (address: string) => {
+      const res = await from(app, address);
+      settle(deps.db);
+      return res;
+    };
+    for (let i = 0; i < 5; i++) expect((await settled("203.0.113.9")).status).toBe(200);
+    for (let i = 0; i < 5; i++) expect((await settled("::ffff:203.0.113.9")).status).toBe(200);
+    expect((await settled("203.0.113.9")).status).toBe(429);
+    expect((await settled("::ffff:203.0.113.9")).status).toBe(429);
     // A neighbour on the same /24 is a different client.
+    expect((await settled("203.0.113.10")).status).toBe(200);
+  });
+
+  it("lets an IPv4 address keep MAX_PENDING_PER_BUCKET sign-ins waiting, then answers 429 rate_limited for that address only", async () => {
+    const { app, deps } = setup();
+    for (let i = 0; i < MAX_PENDING_PER_BUCKET; i++) expect((await from(app, "203.0.113.9")).status).toBe(200);
+
+    const blocked = await from(app, "203.0.113.9");
+    expect(blocked.status).toBe(429);
+    const body = await blocked.json();
+    expect(body.error.code).toBe("rate_limited");
+    expect(body.error.message).toContain("from your network");
+    expect(blocked.headers.get("retry-after")).toBe("600");
+    // An IPv4-mapped IPv6 address is the same source.
+    expect((await from(app, "::ffff:203.0.113.9")).status).toBe(429);
+    const count = deps.db.prepare("select count(*) as n from device_codes").get() as { n: number };
+    expect(count.n).toBe(MAX_PENDING_PER_BUCKET);
+
+    // Everyone else can still sign in, and so can this address once a code is decided or expires.
     expect((await from(app, "203.0.113.10")).status).toBe(200);
+    expect((await from(app, "198.51.100.1")).status).toBe(200);
+    advance(100);
+    expect((await from(app, "203.0.113.9")).headers.get("retry-after")).toBe("500");
+    advance(501);
+    expect((await from(app, "203.0.113.9")).status).toBe(200);
+  });
+
+  it("counts a whole IPv6 /48 as one source for the pending cap, though the rate limit counts per /64", async () => {
+    const { app } = setup();
+    // Five different /64s of 2001:db8:1::/48 each keep a sign-in waiting...
+    for (let i = 0; i < MAX_PENDING_PER_BUCKET; i++) expect((await from(app, `2001:db8:1:${i + 1}::1`)).status).toBe(200);
+    // ...so a sixth /64 of the same /48 (a fresh rate-limit bucket) is turned away, however it is written...
+    for (const address of ["2001:db8:1:99::1", "2001:DB8:0001:ffff:aaaa:bbbb:cccc:dddd", "2001:db8:1::"]) {
+      const blocked = await from(app, address);
+      expect(blocked.status).toBe(429);
+      expect((await blocked.json()).error.code).toBe("rate_limited");
+      expect(blocked.headers.get("retry-after")).toBe("600");
+    }
+    // ...while other /48s are untouched.
+    expect((await from(app, "2001:db8:2:1::1")).status).toBe(200);
+    expect((await from(app, "2001:db9:1:1::1")).status).toBe(200);
+  });
+
+  it("still enforces the table-wide cap when no single address is over its own", async () => {
+    const { app, deps } = setup();
+    const buckets = MAX_PENDING_DEVICE_CODES / MAX_PENDING_PER_BUCKET;
+    for (let b = 0; b < buckets; b++) {
+      for (let i = 0; i < MAX_PENDING_PER_BUCKET; i++) startDevice(deps.db, `pc-${b}-${i}`, T0, `198.51.100.${b}`);
+    }
+    const full = await from(app, "192.0.2.1");
+    expect(full.status).toBe(429);
+    const body = await full.json();
+    expect(body.error.code).toBe("rate_limited");
+    expect(body.error.message).not.toContain("from your network");
+    expect(full.headers.get("retry-after")).toBe("600");
   });
 
   it("answers 429 rate_limited with retry-after while MAX_PENDING_DEVICE_CODES sign-ins are waiting", async () => {
