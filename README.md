@@ -128,7 +128,7 @@ Global flags work before or after the subcommand: `--host <host>` (default: `$NS
 | `nsit status` | Staged, unstaged and untracked changes, and how far ahead of or behind the upstream you are. |
 | `nsit add <paths>` | Stage files or directories. |
 | `nsit commit [-m <msg>] [--staged] [--allow-secret <path>]` | Stage every change, including new files but never anything ignored, and commit. `--staged` commits only what `nsit add` staged. Without `-m` it can only finish a merge, using the message the merge left. Commits are by your git `user.name` and `user.email`, else by the name and email Insitio gave nsit at sign-in. |
-| `nsit log [-n N] [--oneline]` | History of the current branch. |
+| `nsit log [-n N] [--oneline]` | History of the current branch, newest first. It shows 20 entries unless `-n` asks for another number, and that holds for `--json` too. |
 | `nsit branch [name] [-d name]` | List branches, create `name`, or delete a branch. |
 | `nsit switch <branch> [-c]` | Switch branches (`-c` creates the branch first). Refuses when uncommitted changes would be overwritten. |
 | `nsit pull [--abort]` | Fetch, then fast-forward or merge. A conflict leaves the merge in progress with conflict markers in the files and exits with code 4: fix the files, then `nsit commit`. `--abort` goes back to how things were before the pull. |
@@ -146,6 +146,20 @@ There is no command to delete a repository: tokens are not scoped, so an agent h
 - Data goes to stdout; progress, hints and errors go to stderr.
 - Nothing prompts when stdin or stdout is not a terminal.
 - Color and progress appear only on a terminal, and `NO_COLOR` or `--no-color` turns color off. `-q` hides progress and hints.
+
+The fields of `--json` for the main commands. The names are exact, and a field that is said to be null is still there:
+
+| Command | `--json` output |
+|---|---|
+| `nsit auth status` (and `auth login`) | `{host, user, token_source}`. `token_source` is `Env`, `Keychain` or `File`. The token itself is never printed. |
+| `nsit repo list` | An array of repositories, each as in the next row. |
+| `nsit repo view`, `nsit repo create` | One repository: `{owner, name, full_name, description, private, default_branch, clone_url, html_url, created_at}`. `created_at` is ISO-8601. |
+| `nsit status` | `{branch, upstream, ahead, behind, staged, unstaged, untracked, conflicted}`. The last four are arrays of repository-relative paths. `branch` is null on a detached HEAD, and `upstream` is null (with `ahead` and `behind` 0) when there is none. |
+| `nsit log` | An array of `{sha, author, email, date, subject}`, newest first, 20 unless `-n` says otherwise. `date` is ISO-8601 in the author's own UTC offset. |
+| `nsit commit` | `{sha, files}`. `sha` is null and `files` is empty when there was nothing to commit. |
+| `nsit clone` | `{owner, name, dir, default_branch}`. |
+| `nsit push` | `{branch, remote, updated, old, new}`. `remote` is `owner/name`; `updated` is false when the server already had `new`; `old` is null when the server had no such branch. |
+| `nsit pull` | `{result, head, conflicts}`. `result` is `up_to_date`, `fast_forward`, `merged`, `conflict` or (with `--abort`) `aborted`; `head` is the commit `HEAD` is at afterwards; `conflicts` lists the paths that stopped a merge. On a conflict this still goes to stdout, and the exit code is 4. |
 
 Exit codes:
 
@@ -181,7 +195,7 @@ To commit such a file anyway, say so by name: `nsit commit -m "..." --allow-secr
 cargo build --release --manifest-path cli/Cargo.toml   # writes cli/target/release/nsit
 ```
 
-This needs Rust 1.89 or later and a C compiler: libgit2 is compiled into the binary, and so is OpenSSL on Linux (which also needs `perl` and `make`). Git is not needed. For the static Linux binary that the releases ship, install `musl-tools`, run `rustup target add x86_64-unknown-linux-musl`, and add `--target x86_64-unknown-linux-musl` to the command above.
+This needs Rust 1.89 or later and a C compiler: libgit2 is compiled into the binary, and so is OpenSSL on Linux (which also needs `perl` and `make`). Git is not needed. For the static Linux binary that the releases ship, install `musl-tools`, run `rustup target add x86_64-unknown-linux-musl`, and add `--target x86_64-unknown-linux-musl` to the command above. With `--target`, cargo puts the binary in a different place: `cli/target/x86_64-unknown-linux-musl/release/nsit`.
 
 ## Configuration
 
@@ -200,6 +214,11 @@ This needs Rust 1.89 or later and a C compiler: libgit2 is compiled into the bin
 | `GIT_DRAIN_IDLE_MS` | `60000` | The same drain also gives up when the client sends nothing for this long. |
 
 The four numbers above must be whole numbers of at least 1; a bad value stops the server at start-up with a message that names it.
+
+Two things to know about the limits:
+
+- Node's request timeout belongs to the whole server, not to a route, so `REQUEST_TIMEOUT_MS` (2 hours) applies to every request, not only to git pushes. What stops a client from holding a connection open by trickling its headers is `HEADERS_TIMEOUT_MS` in the app and, behind the shipped Caddyfile, Caddy's `read_header` (30 s) in front of it. A client that trickles a request body is bounded only by the full 2 hours, on any route.
+- When a push is turned away before it has been read to the end, the server keeps reading and dropping it for up to `GIT_DRAIN_MAX_BYTES`, so the client can receive the server's message. If more than that is still to come, the connection is closed instead: the client sees a dropped connection, not the server's message.
 
 For anything beyond your own machine, put Insitio behind an HTTPS reverse proxy (Caddy, nginx) and set `BASE_URL` to the public `https://` address. Tokens and session cookies must not travel over plain HTTP. Back up `DATA_DIR` to back up everything.
 
@@ -232,13 +251,25 @@ cargo test --manifest-path cli/Cargo.toml   # the nsit CLI's own tests (needs Ru
 
 The end-to-end tests start a real server and run `git clone` and `git push` against it. They use an isolated git config with credential helpers disabled, so they never touch your own git settings or credential store. The `nsit` end-to-end tests build the debug CLI with cargo and run it against the server; one of them pushes and clones a repository of 2,000 commits and a 20 MB file, and `NSIT_SKIP_SCALE=1 npm test` leaves that one out.
 
-`.github/workflows/ci.yml` runs all of the above, plus `cargo fmt`, `cargo clippy` and the type check, on Windows, Linux and macOS for every push and pull request.
+`.github/workflows/ci.yml` runs all of the above, plus `cargo fmt`, `cargo clippy` and the type check, on Windows, Linux and macOS. It runs on pushes to `main`, on pull requests, and on demand (`workflow_dispatch`, from the Actions tab), so a branch with no pull request is only built when someone starts it by hand.
+
+### Layout
+
+```
+src/git/        bare-repo access through the git CLI (reads, server-side merge, grep)
+src/githttp/    smart-HTTP bridge to git http-backend
+src/services/   users, invites, tokens, repos, permissions, issues, pull requests
+src/web/        Hono routes and server-rendered JSX views
+cli/            the nsit command-line client (Rust)
+deploy/         VM install and deploy scripts, systemd unit, Caddyfile
+docs/           design spec, implementation plan, REA findings
+```
 
 ### Releasing nsit
 
 `.github/workflows/nsit-release.yml` builds the four `nsit` binaries and publishes them, with `SHA256SUMS`, as a GitHub release when a tag `nsit-vX.Y.Z` is pushed. The tag must match `version` in `cli/Cargo.toml`, so raise that (and `cli/Cargo.lock`) first. To try the pipeline without publishing anything, run it by hand from the Actions tab: it is a dry run by default, and the binaries stay as artifacts of that run.
 
-The macOS binaries are signed with a Developer ID certificate and notarized by Apple inside the workflow. That needs six repository secrets (Settings → Secrets and variables → Actions), and a tag build stops at once if any is missing:
+The macOS binaries are signed with a Developer ID certificate and notarized by Apple inside the workflow, in a job of their own (`sign-macos`) that runs after the Mac build and builds nothing. The build jobs, which run every dependency's build script, never see a secret. Signing needs six repository secrets (Settings → Secrets and variables → Actions), and a tag build stops at once if any is missing:
 
 | Secret | What it holds |
 |---|---|
@@ -250,18 +281,6 @@ The macOS binaries are signed with a Developer ID certificate and notarized by A
 | `APPLE_API_ISSUER_ID` | The Issuer ID shown above the key list in App Store Connect |
 
 The Windows binary is not signed.
-
-Layout:
-
-```
-src/git/        bare-repo access through the git CLI (reads, server-side merge, grep)
-src/githttp/    smart-HTTP bridge to git http-backend
-src/services/   users, invites, tokens, repos, permissions, issues, pull requests
-src/web/        Hono routes and server-rendered JSX views
-cli/            the nsit command-line client (Rust)
-deploy/         VM install and deploy scripts, systemd unit, Caddyfile
-docs/           design spec, implementation plan, REA findings
-```
 
 ## Not included (yet)
 
