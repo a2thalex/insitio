@@ -90,7 +90,7 @@ deploy/deploy.sh
 Point your domain's A record at the VM first, so Caddy can get a certificate. Then create the first admin on the server:
 
 ```bash
-gcloud compute ssh gitfkd-1 --zone us-central1-a --tunnel-through-iap --command "cd /opt/gitfkd && sudo -u gitfkd env \$(sudo cat /etc/gitfkd.env) node --disable-warning=ExperimentalWarning --import tsx src/cli/admin-create.ts yourname you@example.com"
+gcloud compute ssh gitfkd-1 --zone us-central1-a --tunnel-through-iap --command 'cd /opt/gitfkd && sudo -u gitfkd env DATA_DIR=/var/lib/gitfkd BASE_URL=https://git.example.com node --disable-warning=ExperimentalWarning --import tsx src/cli/admin-create.ts yourname you@example.com'
 ```
 
 ## Development
