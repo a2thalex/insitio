@@ -11,6 +11,8 @@ use serde::Serialize;
 use crate::error::NsitError;
 
 /// Output settings resolved once from the global flags and the terminal.
+// Nothing prints data yet; the first command that does drops these allows.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Out {
     /// Print JSON instead of human text. Always true when `jq` is set.
@@ -26,6 +28,7 @@ pub struct Out {
     pub quiet: bool,
 }
 
+#[allow(dead_code)]
 impl Out {
     /// Build from the global flags and the real terminal and environment.
     /// A malformed `--jq` expression is rejected here, before any command

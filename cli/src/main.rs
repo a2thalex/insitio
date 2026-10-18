@@ -1,12 +1,17 @@
 //! nsit: the Insitio command-line tool for people and agents.
 //!
-//! Skeleton: the global flags, errors, output modes and config are in place
-//! and every subcommand is a stub. Later tasks fill in the commands, and
-//! with them use the helpers that nothing calls yet.
-#![allow(dead_code)]
+//! Skeleton: the global flags, errors, output modes, config, token storage
+//! and API client are in place and every subcommand is a stub. Later tasks
+//! fill in the commands, and with them use the helpers that nothing calls yet.
 
+// The commands that call into these two arrive with `nsit auth` (Task 6); the
+// allow goes away then.
+#[allow(dead_code)]
+mod api;
 mod cli;
 mod config;
+#[allow(dead_code)]
+mod credentials;
 mod error;
 mod output;
 #[cfg(test)]

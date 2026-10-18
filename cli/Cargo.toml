@@ -18,11 +18,21 @@ git2 = { version = "0.21", default-features = false, features = ["vendored-libgi
 jaq-core = "3.1"
 jaq-json = "2.0"
 jaq-std = "3.0"
+# OS credential store: Windows Credential Manager, macOS Keychain, and on other
+# Unix the Secret Service over D-Bus through the pure-Rust zbus (keyring's
+# default `v1` feature; no libdbus, so the musl build stays static).
+keyring = "4.2"
+# rustls only (no OpenSSL / native-tls). 30 s timeouts are set on the client.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "http2", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 toml = "1.1"
 url = "2"
+
+# Token file safety checks on Unix: who owns the config dir, and O_NOFOLLOW.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # libgit2 over HTTPS uses OpenSSL on Linux; build it from source so the musl
 # release binary stays static. Windows and macOS use their native TLS stacks.

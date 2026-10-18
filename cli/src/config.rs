@@ -14,6 +14,9 @@ use url::{Host, Url};
 
 use crate::error::NsitError;
 
+// Used by the commands that pick a host; the allows on this item, `save` and
+// `resolve_host` go away with the first of them.
+#[allow(dead_code)]
 pub const DEFAULT_HOST: &str = "git.iam.bot";
 pub const CONFIG_FILE: &str = "nsit.toml";
 
@@ -39,6 +42,7 @@ impl Config {
         Config::load_from(&config_dir()?)
     }
 
+    #[allow(dead_code)]
     pub fn save(&self) -> Result<(), NsitError> {
         self.save_to(&config_dir()?)
     }
@@ -74,19 +78,27 @@ impl Config {
             NsitError::Other(format!("cannot write {}: {e}", path.display()))
         };
         let text = toml::to_string(self).map_err(|e| cannot_write(&e))?;
-        create_private_dir(dir).map_err(|e| cannot_write(&e))?;
-        let (tmp, mut file) = create_temp_file(dir).map_err(|e| cannot_write(&e))?;
-        let written = file
-            .write_all(text.as_bytes())
-            .and_then(|()| file.sync_all());
-        drop(file); // close before renaming: Windows cannot rename an open file
-        written
-            .and_then(|()| std::fs::rename(&tmp, &path))
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                cannot_write(&e)
-            })
+        write_private_file(dir, CONFIG_FILE, text.as_bytes()).map_err(|e| cannot_write(&e))
     }
+}
+
+/// Write `dir/name` atomically, creating `dir` if needed (owner-only on Unix).
+///
+/// The content goes to a uniquely named temporary file in `dir`, created
+/// with `create_new` so it can never be a pre-planted file or symlink, and is
+/// then renamed over the target. A crash cannot leave half a file behind, and
+/// a symlink at `name` is replaced, not followed. The token file uses this
+/// too.
+pub(crate) fn write_private_file(dir: &Path, name: &str, contents: &[u8]) -> io::Result<()> {
+    create_private_dir(dir)?;
+    let (tmp, mut file) = create_temp_file(dir, name)?;
+    let written = file.write_all(contents).and_then(|()| file.sync_all());
+    drop(file); // close before renaming: Windows cannot rename an open file
+    written
+        .and_then(|()| std::fs::rename(&tmp, dir.join(name)))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
 }
 
 /// Create `dir` and any missing parents. On Unix the new directories are
@@ -115,16 +127,17 @@ fn create_new_private(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-/// Create a uniquely named temporary file inside `dir`.
-fn create_temp_file(dir: &Path) -> io::Result<(PathBuf, File)> {
+/// Create a uniquely named temporary file inside `dir`, named after the file
+/// (`name`) it will become.
+fn create_temp_file(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     for _ in 0..16 {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let name = format!("{CONFIG_FILE}.{}.{nanos}.{n}.tmp", std::process::id());
-        let path = dir.join(name);
+        let tmp_name = format!("{name}.{}.{nanos}.{n}.tmp", std::process::id());
+        let path = dir.join(tmp_name);
         match create_new_private(&path) {
             Ok(file) => return Ok((path, file)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -196,6 +209,7 @@ pub fn config_dir_from(
 }
 
 /// Pick the host: `--host` flag, then `NSIT_HOST`, then the default.
+#[allow(dead_code)]
 pub fn resolve_host(flag: Option<&str>) -> String {
     resolve_host_from(flag, env_value("NSIT_HOST").as_deref())
 }
@@ -259,7 +273,8 @@ pub fn base_url(host: &str) -> Result<Url, NsitError> {
     Ok(url)
 }
 
-fn is_loopback(url: &Url) -> bool {
+/// Is this URL's host `localhost`, `127.0.0.1` or `[::1]`?
+pub(crate) fn is_loopback(url: &Url) -> bool {
     match url.host() {
         Some(Host::Domain(name)) => name == "localhost",
         Some(Host::Ipv4(ip)) => ip == Ipv4Addr::LOCALHOST,
@@ -492,8 +507,8 @@ mod tests {
     #[test]
     fn temp_files_get_unique_names_in_the_target_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let (a, _fa) = create_temp_file(dir.path()).unwrap();
-        let (b, _fb) = create_temp_file(dir.path()).unwrap();
+        let (a, _fa) = create_temp_file(dir.path(), CONFIG_FILE).unwrap();
+        let (b, _fb) = create_temp_file(dir.path(), CONFIG_FILE).unwrap();
         assert_ne!(a, b);
         for p in [&a, &b] {
             assert_eq!(p.parent().unwrap(), dir.path());

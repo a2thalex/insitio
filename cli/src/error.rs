@@ -18,12 +18,16 @@ pub enum NsitError {
     #[error("{0}")]
     Auth(String),
     /// A merge stopped on conflicts in these paths (exit 4).
+    // The git commands construct the next three; the allows go away with them.
+    #[allow(dead_code)]
     #[error("{}", conflict_summary(.0))]
     Conflict(Vec<String>),
     /// The secret guard blocked a commit (exit 5).
+    #[allow(dead_code)]
     #[error("{}", secret_summary(.0))]
     SecretGuard(Vec<SecretHit>),
     /// The server rejected a push (exit 6).
+    #[allow(dead_code)]
     #[error("{0}")]
     Rejected(String),
     /// libgit2 failed. Shown as its bare message, never the class/code dump.
@@ -57,6 +61,25 @@ impl NsitError {
             NsitError::Git(_) | NsitError::Api { .. } | NsitError::Io(_) | NsitError::Other(_) => 1,
         }
     }
+}
+
+/// Make text from outside nsit (a server message, an OS error) safe to put in
+/// an error line: whitespace runs collapse to one space, control characters
+/// (terminal escapes included) are dropped, and the result is cut to
+/// `max_chars` with `...` when longer.
+pub(crate) fn one_line(text: &str, max_chars: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let cleaned: String = words
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    if cleaned.chars().count() <= max_chars {
+        return cleaned;
+    }
+    let mut cut: String = cleaned.chars().take(max_chars).collect();
+    cut.push_str("...");
+    cut
 }
 
 fn conflict_summary(paths: &[String]) -> String {
@@ -166,6 +189,20 @@ mod tests {
         assert_eq!(api(409).to_string(), "something happened");
         let io = NsitError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
         assert_eq!(io.to_string(), "gone");
+    }
+
+    #[test]
+    fn one_line_collapses_whitespace_and_drops_control_characters() {
+        assert_eq!(one_line("  a\r\nb\t\tc  ", 50), "a b c");
+        assert_eq!(one_line("red \u{1b}[31mtext\u{7}", 50), "red [31mtext");
+        assert_eq!(one_line("", 5), "");
+    }
+
+    #[test]
+    fn one_line_truncates_long_text_on_a_character_boundary() {
+        assert_eq!(one_line("abcdef", 6), "abcdef");
+        assert_eq!(one_line("abcdefg", 6), "abcdef...");
+        assert_eq!(one_line("ééééé", 2), "éé...");
     }
 
     #[test]
