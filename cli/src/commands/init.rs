@@ -388,7 +388,7 @@ fn wire_remote(
     // The server's answer is checked like any repository URL: no user name or
     // token in it, https (or loopback), and on the server that was asked (as in
     // `nsit clone`). `origin` gets the cleaned form.
-    let target = server_named_repo(&made.clone_url, host).map_err(&after_creation)?;
+    let target = server_named_repo(&made.clone_url, host).map_err(after_creation)?;
     repo.remote("origin", target.clone_url.as_str())
         .map_err(|e| after_creation(e.into()))?;
     Ok(Wired {

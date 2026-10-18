@@ -363,10 +363,11 @@ mod tests {
         let mut p = provider();
         let cred = p.provide(URL, CredentialType::USER_PASS_PLAINTEXT).unwrap();
         assert!(cred.has_username());
-        assert_ne!(
-            cred.credtype() as u32 & CredentialType::USER_PASS_PLAINTEXT.bits(),
-            0
-        );
+        // `git_credential_t` is a C enum: u32 on Unix, i32 with MSVC, so the cast is
+        // needed on Windows and a no-op elsewhere.
+        #[allow(clippy::unnecessary_cast)]
+        let kind = cred.credtype() as u32;
+        assert_ne!(kind & CredentialType::USER_PASS_PLAINTEXT.bits(), 0);
         // libgit2 usually offers several kinds at once.
         let mut p = provider();
         let any = CredentialType::USER_PASS_PLAINTEXT | CredentialType::DEFAULT;
