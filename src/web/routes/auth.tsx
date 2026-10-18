@@ -1,7 +1,7 @@
 import type { Context, Hono } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
 import type { Deps } from "../../deps.js";
-import { requestAddress } from "../../clientAddress.js";
+import { requestBucket } from "../../clientAddress.js";
 import { ValidationError } from "../../services/errors.js";
 import { authenticate, createSession, deleteSession, inviteStatus, redeemInvite } from "../../services/users.js";
 import type { Env } from "../env.js";
@@ -9,7 +9,7 @@ import { SESSION_COOKIE, cookieOptions, field, form, safeNext } from "../middlew
 import { render, renderError } from "../render.js";
 import { CsrfField, Flash, InsitioMark } from "../views/layout.js";
 
-// Failed sign-ins per username+address, to slow down password guessing.
+// Failed sign-ins per username+client (an IPv4 address or an IPv6 /64), to slow down password guessing.
 const failures = new Map<string, { count: number; until: number }>();
 const MAX_FAILURES = 10;
 const WINDOW_MS = 15 * 60 * 1000;
@@ -104,7 +104,7 @@ export function authRoutes(deps: Deps, app: Hono<Env>) {
     const f = await form(c);
     const username = field(f, "username").trim();
     const next = safeNext(c.req.query("next"));
-    const key = `${username.toLowerCase()}|${requestAddress(c, deps.config.trustedProxies)}`;
+    const key = `${username.toLowerCase()}|${requestBucket(c, deps.config.trustedProxies)}`;
     if (throttled(key)) {
       return render(c, "Sign in", <LoginPage csrf={c.get("csrf")} next={next} username={username} error="Too many failed attempts. Try again in a few minutes." />, 429);
     }

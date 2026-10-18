@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
 import { createRateLimiter } from "../src/rateLimit.js";
 import {
+  DeviceCapacityError,
+  MAX_PENDING_DEVICE_CODES,
   decideDevice,
   findPendingByUserCode,
   normalizeUserCode,
@@ -85,6 +87,62 @@ describe("startDevice", () => {
     startDevice(deps.db, "fresh", T0 + 3600 + 601);
     const rows = deps.db.prepare("select client_name from device_codes").all() as { client_name: string }[];
     expect(rows.map((r) => r.client_name)).toEqual(["fresh"]);
+  });
+
+  it("looks the expired rows up by index, not by scanning the table", () => {
+    const { deps } = setup();
+    const plan = deps.db.prepare("explain query plan delete from device_codes where expires_at < ?").all(0) as { detail: string }[];
+    expect(plan.map((p) => p.detail).join(" ")).toMatch(/USING (COVERING )?INDEX device_codes_expires_at/);
+  });
+});
+
+describe("the cap on pending device codes", () => {
+  const fill = (db: Parameters<typeof startDevice>[0], n: number, at: number) => {
+    for (let i = 0; i < n; i++) startDevice(db, `pc-${i}`, at);
+  };
+
+  it("refuses a new code once MAX_PENDING_DEVICE_CODES are waiting, and says when a slot frees up", () => {
+    const { deps } = setup();
+    expect(MAX_PENDING_DEVICE_CODES).toBe(1000);
+    fill(deps.db, MAX_PENDING_DEVICE_CODES, T0);
+    expect(() => startDevice(deps.db, "one-too-many", T0 + 100)).toThrow(DeviceCapacityError);
+    try {
+      startDevice(deps.db, "one-too-many", T0 + 100);
+    } catch (err) {
+      expect((err as DeviceCapacityError).retryAfter).toBe(500); // the first code expires at T0 + 600
+    }
+    const count = deps.db.prepare("select count(*) as n from device_codes").get() as { n: number };
+    expect(count.n).toBe(MAX_PENDING_DEVICE_CODES);
+  });
+
+  it("counts only codes that are still open: a decided one frees its slot", () => {
+    const { deps, ada } = setup();
+    const first = startDevice(deps.db, "first", T0);
+    fill(deps.db, MAX_PENDING_DEVICE_CODES - 1, T0);
+    expect(() => startDevice(deps.db, "no-room", T0 + 1)).toThrow(DeviceCapacityError);
+
+    const row = findPendingByUserCode(deps.db, first.userCode, T0 + 1)!;
+    expect(decideDevice(deps.db, row.id, ada.id, false, T0 + 1)).toBe(true);
+    expect(() => startDevice(deps.db, "fits-now", T0 + 1)).not.toThrow();
+    expect(() => startDevice(deps.db, "full-again", T0 + 1)).toThrow(DeviceCapacityError);
+  });
+
+  it("still sweeps long-expired rows on the request it turns away", () => {
+    const { deps } = setup();
+    fill(deps.db, MAX_PENDING_DEVICE_CODES, T0);
+    deps.db
+      .prepare("insert into device_codes (device_code_hash, user_code_hash, client_name, expires_at, created_at) values ('d', 'u', 'ancient', ?, ?)")
+      .run(T0 - 4000, T0 - 4600);
+    expect(() => startDevice(deps.db, "no-room", T0)).toThrow(DeviceCapacityError);
+    const names = deps.db.prepare("select client_name from device_codes where client_name = 'ancient'").all();
+    expect(names).toHaveLength(0);
+  });
+
+  it("frees every slot when the codes expire", () => {
+    const { deps } = setup();
+    fill(deps.db, MAX_PENDING_DEVICE_CODES, T0);
+    expect(() => startDevice(deps.db, "early", T0 + 599)).toThrow(DeviceCapacityError);
+    expect(() => startDevice(deps.db, "on-time", T0 + 600)).not.toThrow();
   });
 });
 
@@ -226,6 +284,70 @@ describe("POST /api/v1/device/code", () => {
 
     advance(61);
     expect((await start()).res.status).toBe(200);
+  });
+
+  // In-process requests have no socket, so these hand Hono the connection details a real server would.
+  const from = (app: Hono<any>, address: string) =>
+    app.request(
+      "/api/v1/device/code",
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "test-pc" }) },
+      { incoming: { socket: { remoteAddress: address } } },
+    );
+
+  it("shares one allowance between all the addresses of an IPv6 /64, but not between /64s", async () => {
+    const { app } = setup();
+    // Ten different addresses of 2001:db8:1:2::/64 use up the bucket...
+    for (let i = 0; i < 10; i++) expect((await from(app, `2001:db8:1:2:${i + 1}::${i + 1}`)).status).toBe(200);
+    // ...so an eleventh address in the same /64 is blocked, however it is written...
+    for (const address of ["2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:DB8:1:2::", "2001:db8:1:2::1"]) {
+      const blocked = await from(app, address);
+      expect(blocked.status).toBe(429);
+      expect((await blocked.json()).error.code).toBe("rate_limited");
+      expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
+    }
+    // ...while the neighbouring /64s are untouched.
+    expect((await from(app, "2001:db8:1:3::1")).status).toBe(200);
+    expect((await from(app, "2001:db8:2:2::1")).status).toBe(200);
+  });
+
+  it("keeps limiting IPv4 per address, and counts an IPv4-mapped IPv6 address as its IPv4", async () => {
+    const { app } = setup();
+    for (let i = 0; i < 5; i++) expect((await from(app, "203.0.113.9")).status).toBe(200);
+    for (let i = 0; i < 5; i++) expect((await from(app, "::ffff:203.0.113.9")).status).toBe(200);
+    expect((await from(app, "203.0.113.9")).status).toBe(429);
+    expect((await from(app, "::ffff:203.0.113.9")).status).toBe(429);
+    // A neighbour on the same /24 is a different client.
+    expect((await from(app, "203.0.113.10")).status).toBe(200);
+  });
+
+  it("answers 429 rate_limited with retry-after while MAX_PENDING_DEVICE_CODES sign-ins are waiting", async () => {
+    const { app, deps } = setup();
+    for (let i = 0; i < MAX_PENDING_DEVICE_CODES; i++) startDevice(deps.db, `pc-${i}`, T0);
+
+    const full = await jsonPost(app, "/api/v1/device/code", { client_name: "one-too-many" });
+    expect(full.status).toBe(429);
+    expect((await full.json()).error.code).toBe("rate_limited");
+    expect(full.headers.get("retry-after")).toBe("600");
+    const count = deps.db.prepare("select count(*) as n from device_codes").get() as { n: number };
+    expect(count.n).toBe(MAX_PENDING_DEVICE_CODES);
+
+    // The wait shrinks as the open codes age, and the endpoint reopens once they expire.
+    advance(100);
+    const later = await jsonPost(app, "/api/v1/device/code", { client_name: "one-too-many" });
+    expect(later.status).toBe(429);
+    expect(later.headers.get("retry-after")).toBe("500");
+
+    advance(500);
+    const open = await jsonPost(app, "/api/v1/device/code", { client_name: "fits-now" });
+    expect(open.status).toBe(200);
+  });
+
+  it("validates the request body before it reports that the queue is full", async () => {
+    const { app, deps } = setup();
+    for (let i = 0; i < MAX_PENDING_DEVICE_CODES; i++) startDevice(deps.db, `pc-${i}`, T0);
+    // A malformed request is still a 4xx about the request, so a broken client sees its own mistake.
+    expect((await jsonPost(app, "/api/v1/device/code", "[]")).status).toBe(400);
+    expect((await jsonPost(app, "/api/v1/device/code", {})).status).toBe(422);
   });
 });
 
@@ -463,5 +585,63 @@ describe("createRateLimiter", () => {
     limiter.record("a", 10_000);
     expect(limiter.retryAfter("a", 20_000)).toBe(50);
     expect(limiter.retryAfter("a", 69_500)).toBe(1);
+  });
+
+  it("holds at most `maxKeys` keys: past that the key that was active longest ago is evicted", () => {
+    const limiter = createRateLimiter(1, 60_000, 3);
+    limiter.record("a", 0);
+    limiter.record("b", 1);
+    limiter.record("c", 2);
+    expect(limiter.size()).toBe(3);
+    limiter.record("d", 3);
+    expect(limiter.size()).toBe(3);
+    expect(limiter.retryAfter("a", 4)).toBe(0); // evicted
+    for (const key of ["b", "c", "d"]) expect(limiter.retryAfter(key, 4)).toBeGreaterThan(0);
+  });
+
+  it("treats a key as active when it records again, so a busy key is not the one evicted", () => {
+    const limiter = createRateLimiter(5, 60_000, 3);
+    limiter.record("a", 0);
+    limiter.record("b", 1);
+    limiter.record("c", 2);
+    limiter.record("a", 3); // a is now the most recently active
+    limiter.record("d", 4); // evicts b
+    expect(limiter.size()).toBe(3);
+    expect(limiter.retryAfter("b", 5)).toBe(0);
+    limiter.record("b", 5); // evicts c; a and d stay
+    expect(limiter.size()).toBe(3);
+    expect(limiter.retryAfter("c", 6)).toBe(0);
+    // a kept its first two hits through all of that: three more reach the limit of 5.
+    expect(limiter.retryAfter("a", 6)).toBe(0);
+    for (let i = 0; i < 3; i++) limiter.record("a", 7 + i);
+    expect(limiter.retryAfter("a", 10)).toBeGreaterThan(0);
+  });
+
+  it("drops keys whose hits have all aged out when something new is recorded", () => {
+    const limiter = createRateLimiter(1, 1000, 100);
+    for (const key of ["a", "b", "c"]) limiter.record(key, 0);
+    limiter.record("fresh", 500);
+    expect(limiter.size()).toBe(4); // nothing has aged out yet
+    limiter.record("later", 1500); // every earlier hit (0 and 500) is now outside the 1000 ms window
+    expect(limiter.size()).toBe(1);
+  });
+
+  it("stays bounded at the default cap however many keys it sees", () => {
+    const limiter = createRateLimiter(1, 60_000);
+    for (let i = 0; i < 12_000; i++) limiter.record(`k${i}`, i);
+    expect(limiter.size()).toBe(10_000);
+    expect(limiter.retryAfter("k0", 12_000)).toBe(0);
+    expect(limiter.retryAfter("k1999", 12_000)).toBe(0);
+    expect(limiter.retryAfter("k2000", 12_000)).toBeGreaterThan(0);
+    expect(limiter.retryAfter("k11999", 12_000)).toBeGreaterThan(0);
+  });
+
+  it("remembers only the last `max` hits of a key, so one key cannot grow without bound", () => {
+    const limiter = createRateLimiter(2, 100_000);
+    for (let i = 0; i < 5; i++) limiter.record("a", i * 10_000); // hits at 0, 10k, 20k, 30k, 40k
+    // The two newest hits (30k and 40k) decide: a may act again once 30k leaves the window, at 130k.
+    expect(limiter.retryAfter("a", 50_000)).toBe(80);
+    expect(limiter.retryAfter("a", 129_999)).toBe(1);
+    expect(limiter.retryAfter("a", 130_000)).toBe(0);
   });
 });

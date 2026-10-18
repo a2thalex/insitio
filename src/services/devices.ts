@@ -18,6 +18,17 @@ const USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 const CLIENT_NAME_MAX = 64;
 // How long a finished or expired row is kept before startDevice sweeps it away.
 const KEEP_SECONDS = 3600;
+// The most sign-ins that may be waiting for approval at once, across all clients. Starting one
+// needs no account, so this (not the per-address limit alone) bounds what anonymous callers can
+// put in the database: a flood can fill it, but only for as long as the codes live.
+export const MAX_PENDING_DEVICE_CODES = 1000;
+
+/** Too many sign-ins are already waiting. `retryAfter` is the seconds until the first of them expires. */
+export class DeviceCapacityError extends Error {
+  constructor(readonly retryAfter: number) {
+    super("Too many sign-ins are waiting for approval.");
+  }
+}
 
 type Row = Record<string, any>;
 
@@ -68,27 +79,40 @@ function cleanClientName(name: string): string {
   return clean;
 }
 
-/** Begins a sign-in. `at` is unix seconds. */
+/**
+ * Begins a sign-in. `at` is unix seconds. Throws a DeviceCapacityError when
+ * MAX_PENDING_DEVICE_CODES sign-ins are already waiting.
+ */
 export function startDevice(
   db: DatabaseSync,
   clientName: string,
   at = clock(),
 ): { deviceCode: string; userCode: string; expiresIn: 600; interval: 5 } {
   const name = cleanClientName(clientName);
+  // Swept before (and outside) the transaction below, so the table stays small, and the sweep
+  // is kept, even while requests are being turned away.
   db.prepare("delete from device_codes where expires_at < ?").run(at - KEEP_SECONDS);
-  // A clash on either hash is astronomically unlikely, but then we simply draw new codes.
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const deviceCode = randomToken(32);
-    const userCode = newUserCode();
-    const res = db
-      .prepare(
-        `insert into device_codes (device_code_hash, user_code_hash, client_name, interval, expires_at, created_at)
-         values (?, ?, ?, ?, ?, ?) on conflict do nothing`,
-      )
-      .run(sha256Hex(deviceCode), sha256Hex(normalizeUserCode(userCode)), name, DEVICE_INTERVAL, at + DEVICE_EXPIRES_IN, at);
-    if (Number(res.changes) > 0) return { deviceCode, userCode, expiresIn: DEVICE_EXPIRES_IN, interval: DEVICE_INTERVAL };
-  }
-  throw new Error("could not allocate a device code");
+  return tx(db, () => {
+    const open = db
+      .prepare("select count(*) as n, min(expires_at) as soonest from device_codes where status = 'pending' and expires_at > ?")
+      .get(at) as { n: number; soonest: number | null };
+    if (open.n >= MAX_PENDING_DEVICE_CODES) {
+      throw new DeviceCapacityError(Math.max(1, (open.soonest ?? at + DEVICE_EXPIRES_IN) - at));
+    }
+    // A clash on either hash is astronomically unlikely, but then we simply draw new codes.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const deviceCode = randomToken(32);
+      const userCode = newUserCode();
+      const res = db
+        .prepare(
+          `insert into device_codes (device_code_hash, user_code_hash, client_name, interval, expires_at, created_at)
+           values (?, ?, ?, ?, ?, ?) on conflict do nothing`,
+        )
+        .run(sha256Hex(deviceCode), sha256Hex(normalizeUserCode(userCode)), name, DEVICE_INTERVAL, at + DEVICE_EXPIRES_IN, at);
+      if (Number(res.changes) > 0) return { deviceCode, userCode, expiresIn: DEVICE_EXPIRES_IN, interval: DEVICE_INTERVAL };
+    }
+    throw new Error("could not allocate a device code");
+  });
 }
 
 /**

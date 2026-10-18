@@ -53,6 +53,25 @@ describe("sign in", () => {
     expect(ok.headers.get("location")).toBe("/settings/profile");
   });
 
+  it("throttles failed sign-ins per IPv6 /64, so changing the low bits of the address does not reset it", async () => {
+    const t = testApp();
+    t.user("grace");
+    // In-process requests have no socket, so hand Hono the connection details a real server would.
+    const attempt = (address: string) =>
+      t.app.request(
+        "/login",
+        {
+          method: "POST",
+          headers: { cookie: t.anon.cookie, "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ _csrf: t.anon.csrf, username: "grace", password: "wrong-password" }),
+        },
+        { incoming: { socket: { remoteAddress: address } } },
+      );
+    for (let i = 0; i < 10; i++) expect((await attempt(`2001:db8:9:9:${i + 1}::1`)).status).toBe(401);
+    expect((await attempt("2001:db8:9:9:ffff::1")).status).toBe(429);
+    expect((await attempt("2001:db8:9:8::1")).status).toBe(401); // another /64 has its own allowance
+  });
+
   it("ignores off-site next parameters", async () => {
     const t = testApp();
     t.user("ada");

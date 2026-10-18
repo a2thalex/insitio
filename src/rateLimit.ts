@@ -1,18 +1,37 @@
+/** The most keys a limiter tracks at once unless it is told otherwise. */
+export const DEFAULT_MAX_KEYS = 10_000;
+
 /**
  * An in-memory sliding-window limiter: at most `max` recorded hits per key within
  * `windowMs`. State lives in this process only, which is fine for one server.
  * Times are milliseconds and default to the current time.
+ *
+ * Memory is bounded. A key remembers at most its last `max` hits, and the limiter holds
+ * at most `maxKeys` keys. The map is kept in order of each key's latest hit (a key that
+ * records again moves to the back), so the front is always the key that was active longest
+ * ago: record() drops the keys at the front whose hits have all aged out, then, if the map
+ * is still over `maxKeys`, evicts further keys from the front. Every key is removed at most
+ * once, so that work is O(1) amortized per record. An evicted key starts again from zero,
+ * so under a flood of distinct keys the oldest are forgotten first.
  */
-export function createRateLimiter(max: number, windowMs: number) {
+export function createRateLimiter(max: number, windowMs: number, maxKeys = DEFAULT_MAX_KEYS) {
   const hits = new Map<string, number[]>();
-  // Past this many keys, record() sweeps out keys whose hits have all aged out.
-  const SWEEP_AT = 10_000;
+  const cap = Math.max(1, maxKeys);
 
   function recent(key: string, at: number): number[] {
     const list = (hits.get(key) ?? []).filter((t) => t > at - windowMs);
     if (list.length > 0) hits.set(key, list);
     else hits.delete(key);
     return list;
+  }
+
+  /** Forgets expired keys, then the least recently active ones, until at most `cap` remain. */
+  function trim(at: number): void {
+    for (const [key, list] of hits) {
+      const expired = list[list.length - 1] <= at - windowMs;
+      if (!expired && hits.size <= cap) return;
+      hits.delete(key);
+    }
   }
 
   return {
@@ -24,8 +43,17 @@ export function createRateLimiter(max: number, windowMs: number) {
     },
     /** Counts one hit against `key`. */
     record(key: string, at = Date.now()): void {
-      if (hits.size >= SWEEP_AT) for (const k of [...hits.keys()]) recent(k, at);
-      hits.set(key, [...recent(key, at), at]);
+      const list = recent(key, at);
+      list.push(at);
+      if (list.length > max) list.splice(0, list.length - max);
+      // Delete and set again so the key moves to the back of the map.
+      hits.delete(key);
+      hits.set(key, list);
+      trim(at);
+    },
+    /** How many keys are tracked right now. */
+    size(): number {
+      return hits.size;
     },
   };
 }

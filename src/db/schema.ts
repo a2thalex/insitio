@@ -130,6 +130,10 @@ const MIGRATIONS = [
     created_at integer not null
   );
   `,
+  // startDevice sweeps old rows (expires_at < x) and counts open ones (expires_at > x) on every call.
+  `
+  create index device_codes_expires_at on device_codes (expires_at);
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

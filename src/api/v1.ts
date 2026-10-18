@@ -1,11 +1,11 @@
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { requestAddress } from "../clientAddress.js";
+import { requestBucket } from "../clientAddress.js";
 import { now } from "../db/db.js";
 import type { Deps } from "../deps.js";
 import { createRateLimiter } from "../rateLimit.js";
-import { pollDevice, startDevice } from "../services/devices.js";
+import { DeviceCapacityError, pollDevice, startDevice } from "../services/devices.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../services/errors.js";
 import { accessLevel } from "../services/permissions.js";
 import { createRepo, getRepo, listAllVisible, listReposForOwner, validateRepoName, type RepoRow } from "../services/repos.js";
@@ -136,19 +136,28 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
   const codeLimiter = createRateLimiter(10, 60_000);
 
   app.post("/device/code", async (c) => {
-    const address = requestAddress(c, deps.config.trustedProxies);
-    const wait = codeLimiter.retryAfter(address);
+    // Counted per IPv4 address or IPv6 /64, so rotating the low bits of an address buys nothing.
+    const bucket = requestBucket(c, deps.config.trustedProxies);
+    const wait = codeLimiter.retryAfter(bucket);
     if (wait > 0) {
       c.header("retry-after", String(wait));
       return apiError(c, 429, "rate_limited", "Too many sign-in requests. Try again in a minute.");
     }
-    codeLimiter.record(address);
+    codeLimiter.record(bucket);
 
     const body = await jsonObject(c);
     if (!body) return apiError(c, 400, "bad_request", "The request body must be a JSON object.");
     if (typeof body.client_name !== "string") throw new ValidationError("client_name is required and must be a string");
 
-    const d = startDevice(deps.db, body.client_name);
+    let d;
+    try {
+      d = startDevice(deps.db, body.client_name);
+    } catch (err) {
+      // However many addresses ask, only so many sign-ins may wait for approval at once.
+      if (!(err instanceof DeviceCapacityError)) throw err;
+      c.header("retry-after", String(err.retryAfter));
+      return apiError(c, 429, "rate_limited", "Too many sign-ins are waiting for approval. Try again in a few minutes.");
+    }
     c.header("cache-control", "no-store");
     return c.json({
       device_code: d.deviceCode,
