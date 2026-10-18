@@ -171,7 +171,10 @@ fn run_jq(expr: &str, input_json: &[u8]) -> Result<Vec<String>, NsitError> {
         match item {
             Ok(value) => lines.push(value.to_string()),
             Err(exception) => match exception.get_err() {
-                Ok(e) => return Err(NsitError::Usage(format!("jq: {e}"))),
+                // A syntax or compile error was already rejected up front
+                // (exit 2). This one depends on the data, and the command may
+                // have acted by now, so it is a general failure (exit 1).
+                Ok(e) => return Err(NsitError::Other(format!("jq: {e}"))),
                 // `halt`: stop here. jaq's own `unwrap_valr` would exit the
                 // whole process, which is not ours to give away.
                 Err(_halt) => break,
@@ -357,10 +360,15 @@ mod tests {
     }
 
     #[test]
-    fn jq_runtime_error_is_a_usage_error_with_the_reason() {
+    fn jq_runtime_error_is_a_general_failure_with_the_reason() {
+        // The expression is fine; the data is not. By the time this happens
+        // the command may already have acted, so it is not a usage error.
+        assert!(Out::new(false, Some(".a.b".into()), false, false).is_ok());
         let err = jq(".a.b", json!({"a": 1})).unwrap_err();
-        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
         assert!(err.to_string().starts_with("jq: "), "{err}");
+        assert!(!err.to_string().contains('\n'), "{err:?}");
+        assert_eq!(err.exit_code(), 1);
     }
 
     #[test]

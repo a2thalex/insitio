@@ -9,6 +9,8 @@ mod cli;
 mod config;
 mod error;
 mod output;
+#[cfg(test)]
+pub(crate) mod test_env;
 
 use std::io::Write;
 
