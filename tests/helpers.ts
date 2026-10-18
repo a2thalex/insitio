@@ -208,9 +208,17 @@ export type NsitOptions = {
   input?: string;
   /** "open": stdin is a pipe nobody writes to or closes, so a read blocks. Default: no input at all. */
   stdin?: "ignore" | "open";
-  /** The process is killed after this long. Default 60 s. */
+  /**
+   * The process is killed, and the call rejects, after this long. Default 20 s: below vitest's
+   * `testTimeout` (30 s in vitest.config.ts), so a hung `nsit` fails with its own output and is
+   * never left running behind a test that already timed out. A test that needs longer (the
+   * device flow waits a poll interval) passes a larger value here and a larger per-test timeout.
+   */
   timeoutMs?: number;
 };
+
+/** The default for `NsitOptions.timeoutMs`; keep it below `testTimeout` in vitest.config.ts. */
+export const NSIT_TIMEOUT_MS = 20_000;
 
 export type NsitResult = { code: number | null; stdout: string; stderr: string };
 
@@ -269,16 +277,27 @@ export async function startNsit(args: string[], opts: NsitOptions = {}): Promise
   });
 
   let exited = false;
-  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const timeoutMs = opts.timeoutMs ?? NSIT_TIMEOUT_MS;
   const label = `nsit ${args.join(" ")}`;
   let timedOut = false;
+  let rejectDone: (reason: Error) => void = () => {};
   const timer = setTimeout(() => {
     timedOut = true;
     child.kill();
+    // If it does not die at once, kill it for good and fail now rather than wait for a 'close' that may never come.
+    const force = setTimeout(() => {
+      child.kill("SIGKILL");
+      rejectDone(new Error(`${label} did not finish in ${timeoutMs} ms and had to be force-killed\nstdout: ${stdout}\nstderr: ${stderr}`));
+    }, 2_000);
+    child.once("close", () => clearTimeout(force));
   }, timeoutMs);
 
   const done = new Promise<NsitResult>((resolve, reject) => {
-    child.on("error", reject);
+    rejectDone = reject;
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     child.on("close", (code) => {
       exited = true;
       clearTimeout(timer);

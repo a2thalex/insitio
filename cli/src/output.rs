@@ -21,8 +21,6 @@ pub struct Out {
     pub tty: bool,
     /// Color is allowed: stdout is a terminal, `NO_COLOR` is unset, and
     /// `--no-color` was not given.
-    // The first command that colors its output reads it; the allow goes then.
-    #[allow(dead_code)]
     pub color: bool,
     /// `-q`: suppress `info` messages.
     pub quiet: bool,

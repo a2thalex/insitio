@@ -239,7 +239,7 @@ pub struct RepoListArgs {
 
 #[derive(Debug, Args)]
 pub struct RepoViewArgs {
-    /// `name` (yours) or `owner/name`
+    /// `name` (yours), `owner/name`, or a full URL
     pub repo: String,
 }
 

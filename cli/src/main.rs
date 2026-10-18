@@ -1,7 +1,8 @@
 //! nsit: the Insitio command-line tool for people and agents.
 //!
-//! `nsit auth` is implemented; the other subcommands are still stubs that later
-//! tasks fill in, and with them use the helpers that nothing calls yet.
+//! `nsit auth` and `nsit repo` are implemented; the other subcommands are still
+//! stubs that later tasks fill in, and with them use the git helpers that
+//! nothing calls yet.
 
 mod api;
 mod cli;
@@ -9,6 +10,7 @@ mod commands;
 mod config;
 mod credentials;
 mod error;
+mod git;
 mod output;
 #[cfg(test)]
 pub(crate) mod test_env;
@@ -38,6 +40,7 @@ fn run(cli: &Cli) -> Result<(), NsitError> {
 
     match &cli.command {
         Command::Auth(args) => commands::auth::run(args, g, &out),
+        Command::Repo(args) => commands::repo::run(args, g, &out),
         Command::Init(_)
         | Command::Clone(_)
         | Command::Status
@@ -48,7 +51,6 @@ fn run(cli: &Cli) -> Result<(), NsitError> {
         | Command::Switch(_)
         | Command::Pull(_)
         | Command::Push(_)
-        | Command::Readme
-        | Command::Repo(_) => Err(NsitError::Other("not implemented".into())),
+        | Command::Readme => Err(NsitError::Other("not implemented".into())),
     }
 }

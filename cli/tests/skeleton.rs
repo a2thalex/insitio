@@ -1,7 +1,9 @@
 //! Runs the real `nsit` binary: version string, usage errors, the stubs, and
 //! the rule that a bad `--jq` fails before any command runs.
 
-use std::process::{Command, Output};
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 fn nsit(args: &[&str]) -> Output {
     let config = tempfile::tempdir().unwrap();
@@ -75,7 +77,7 @@ fn help_lists_every_v1_command_and_exits_zero() {
 
 #[test]
 fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
-    // `auth` is implemented (see tests/nsit.e2e.test.ts); the rest are still stubs.
+    // `auth` and `repo` are implemented (see tests/nsit.e2e.test.ts); the rest are still stubs.
     let invocations: &[&[&str]] = &[
         &["init", "demo", "--remote", "--readme"],
         &["clone", "ada/demo", "target"],
@@ -89,13 +91,9 @@ fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
         &["pull", "--abort"],
         &["push", "-u", "main", "--force-with-lease"],
         &["readme"],
-        &["repo", "create", "tools", "--description", "d", "--public"],
-        &["repo", "list", "--owner", "ada"],
-        &["repo", "view", "ada/tools"],
         // Global flags after the subcommand.
         &[
-            "repo",
-            "list",
+            "status",
             "--json",
             "--jq",
             ".[].name",
@@ -113,6 +111,71 @@ fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
         assert_eq!(o.status.code(), Some(1), "nsit {label}: {}", stderr(&o));
         assert_eq!(stderr(&o), "nsit: not implemented\n", "nsit {label}");
         assert_eq!(stdout(&o), "", "nsit {label}");
+    }
+}
+
+/// Review Focus 2: nobody is signed in and stdin is an open pipe that nobody
+/// writes to or closes (an agent's). Each `nsit repo` command must exit 3 with
+/// a sign-in hint at once, not wait for input, and not touch the network (the
+/// host here is a port nothing listens on).
+#[test]
+fn repo_commands_signed_out_exit_3_at_once_and_never_read_stdin() {
+    let invocations: &[&[&str]] = &[
+        &["repo", "list"],
+        &["repo", "list", "--json"],
+        &["repo", "list", "--owner", "ada"],
+        &["repo", "create", "tools"],
+        &["repo", "view", "ada/tools"],
+        &["repo", "view", "tools"],
+    ];
+    for args in invocations {
+        let config = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nsit"))
+            .args(*args)
+            .args(["--host", "http://127.0.0.1:9"])
+            .env("NSIT_CONFIG_DIR", config.path())
+            .env("NSIT_NO_KEYCHAIN", "1")
+            .env_remove("NSIT_HOST")
+            .env_remove("NSIT_TOKEN")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run nsit");
+        // Keeping the pipe's write end open (`_stdin`) is what makes a read block.
+        let _stdin = child.stdin.take();
+        let label = format!("nsit {}", args.join(" "));
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                let _ = child.kill();
+                panic!("{label} did not exit within 5 s: it is waiting for something");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let (mut out, mut err) = (String::new(), String::new());
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut err)
+            .unwrap();
+        assert_eq!(status.code(), Some(3), "{label}: {err}");
+        assert_eq!(out, "", "{label}");
+        assert_eq!(
+            err, "nsit: not signed in to 127.0.0.1:9; run nsit auth login\n",
+            "{label}"
+        );
     }
 }
 

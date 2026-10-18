@@ -25,7 +25,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::config::{base_url, config_dir, write_private_file, Config};
+use crate::config::{base_url, config_dir, write_private_file, Config, HostConfig};
 use crate::error::{one_line, NsitError};
 
 /// Environment variable that supplies a token directly.
@@ -129,15 +129,21 @@ fn env_token() -> Result<Option<String>, NsitError> {
     }
 }
 
-/// The signed-in user for a host according to the config file, matching the
-/// host by its canonical key so the config may spell it any way.
+/// The config entry for the host with this canonical key. The config may spell
+/// the host any way (`https://Git.Iam.Bot/`), so entries are matched by key.
+pub(crate) fn host_entry<'c>(config: &'c Config, key: &str) -> Option<&'c HostConfig> {
+    config
+        .hosts
+        .iter()
+        .find(|(host, _)| host_key_for(host).is_ok_and(|k| k == key))
+        .map(|(_, entry)| entry)
+}
+
+/// The signed-in user for a host according to the config file.
 fn configured_user(key: &str) -> Result<Option<String>, NsitError> {
     let config = Config::load()?;
-    Ok(config
-        .hosts
-        .into_iter()
-        .find(|(host, _)| host_key_for(host).is_ok_and(|k| k == key))
-        .map(|(_, host_config)| host_config.user)
+    Ok(host_entry(&config, key)
+        .map(|entry| entry.user.clone())
         .filter(|user| !user.is_empty()))
 }
 
@@ -721,6 +727,26 @@ mod tests {
         let err = token_for(HOST, None).unwrap_err();
         assert!(matches!(err, NsitError::Auth(_)), "{err:?}");
         assert!(!token_file_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn a_config_entry_is_found_by_the_hosts_canonical_key_however_it_is_spelled() {
+        let entry = |user: &str| HostConfig {
+            user: user.into(),
+            name: None,
+            email: None,
+        };
+        let mut config = Config::default();
+        config
+            .hosts
+            .insert("https://GIT.iam.bot/".into(), entry("ada"));
+        config
+            .hosts
+            .insert("http://127.0.0.1:3000".into(), entry("grace"));
+        assert_eq!(host_entry(&config, "git.iam.bot").unwrap().user, "ada");
+        assert_eq!(host_entry(&config, "127.0.0.1:3000").unwrap().user, "grace");
+        assert!(host_entry(&config, "other.example").is_none());
+        assert!(host_entry(&Config::default(), "git.iam.bot").is_none());
     }
 
     #[test]

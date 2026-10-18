@@ -22,7 +22,8 @@ use crate::api::{Api, DeviceCodeJson, DevicePoll, UserJson};
 use crate::cli::{AuthArgs, AuthCommand, GlobalArgs, LoginArgs};
 use crate::config::{config_dir, is_loopback, resolve_host, Config, HostConfig};
 use crate::credentials::{
-    delete_token, host_key_for, store_token, token_for, TokenSource, TOKEN_ENV, TOKEN_FILE,
+    delete_token, host_entry, host_key_for, store_token, token_for, TokenSource, TOKEN_ENV,
+    TOKEN_FILE,
 };
 use crate::error::{one_line, NsitError};
 use crate::output::Out;
@@ -302,6 +303,9 @@ fn read_token(input: impl Read) -> Result<String, NsitError> {
     }
     let text = String::from_utf8(bytes)
         .map_err(|_| NsitError::Usage("the token on stdin is not valid text".into()))?;
+    // Windows PowerShell and many editors start a file with a byte-order mark.
+    // It is not whitespace, so `trim` would leave it in the token.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let token = text.trim();
     if token.is_empty() {
         return Err(NsitError::Usage(
@@ -384,6 +388,7 @@ fn status(host: &str, out: &Out) -> Result<(), NsitError> {
 // ---- logout ------------------------------------------------------------------
 
 /// What happened to the token on the server.
+#[derive(Debug)]
 enum Revocation {
     Revoked,
     /// The server no longer knew the token (401): nothing left to revoke.
@@ -399,7 +404,22 @@ enum Revocation {
 /// If the server cannot be reached the token is still deleted here, and the
 /// command then fails (exit 1) saying the token stays valid: the machine is
 /// clean either way, and a script is told the revocation did not happen.
+///
+/// The same holds when the token cannot even be read (a locked credential
+/// store, a damaged token file): deleting it is still attempted, and the
+/// account is forgotten once that worked. The original error is what is
+/// reported.
 fn sign_out(host: &str, out: &Out) -> Result<(), NsitError> {
+    sign_out_with(host, out, revoke)
+}
+
+/// `sign_out` with the "read the token and revoke it" step passed in, so a
+/// failing read can be tested.
+fn sign_out_with(
+    host: &str,
+    out: &Out,
+    revoke: impl FnOnce(&str, &str) -> Result<Revocation, NsitError>,
+) -> Result<(), NsitError> {
     let key = host_key_for(host)?;
     // The revoke call revokes whichever token `token_for` finds, and that would
     // be the one in the environment: an agent's credential, not ours to destroy.
@@ -414,14 +434,19 @@ fn sign_out(host: &str, out: &Out) -> Result<(), NsitError> {
         NsitError::Auth(format!("not signed in to {key}; nothing to sign out of"))
     })?;
 
-    let revocation = revoke(host, &user)?;
+    // Whatever happens to the revocation, the local token is deleted.
+    let revocation = revoke(host, &user);
+    let deleted = delete_token(host, &user);
     // Only once the token is gone does the config forget the account: a failed
     // delete can then be retried, because logout can still find the account.
-    delete_token(host, &user)?;
-    forget_host(&mut config, &key);
-    config.save()?;
+    let saved = if deleted.is_ok() {
+        forget_host(&mut config, &key);
+        config.save()
+    } else {
+        Ok(())
+    };
 
-    let (revoked, note) = match revocation {
+    let (revoked, note) = match sign_out_outcome(revocation, deleted, saved)? {
         Revocation::Failed(why) => {
             return Err(NsitError::Other(format!(
                 "signed out here, but the token could not be revoked on the server ({why}); \
@@ -438,6 +463,44 @@ fn sign_out(host: &str, out: &Out) -> Result<(), NsitError> {
         revoked,
     };
     out.data(&result, |r| format!("Signed out of {}; {note}.", r.host))
+}
+
+/// What logout reports once it has tried to revoke the token, delete it and
+/// update the config.
+///
+/// If the token could not be read, that original error comes first (exit 1,
+/// the wording the user needs to fix it); a cleanup failure on top of it is
+/// added to the same line. If it was read, a failed delete or a failed config
+/// write is the error.
+fn sign_out_outcome(
+    revocation: Result<Revocation, NsitError>,
+    deleted: Result<(), NsitError>,
+    saved: Result<(), NsitError>,
+) -> Result<Revocation, NsitError> {
+    match revocation {
+        Ok(revocation) => {
+            deleted?;
+            saved?;
+            Ok(revocation)
+        }
+        Err(original) => {
+            let first = original.to_string();
+            let also: Vec<String> = [deleted, saved]
+                .into_iter()
+                .filter_map(Result::err)
+                .map(|e| e.to_string())
+                .filter(|text| *text != first)
+                .collect();
+            if also.is_empty() {
+                Err(original)
+            } else {
+                Err(NsitError::Other(format!(
+                    "{first}; cleaning up here failed too ({})",
+                    also.join("; ")
+                )))
+            }
+        }
+    }
 }
 
 fn revoke(host: &str, user: &str) -> Result<Revocation, NsitError> {
@@ -459,11 +522,7 @@ fn revoke(host: &str, user: &str) -> Result<Revocation, NsitError> {
 /// config may spell the host any way (`https://Git.Iam.Bot/`), so entries are
 /// matched by key, as `credentials` does.
 fn remembered_user(config: &Config, key: &str) -> Option<String> {
-    config
-        .hosts
-        .iter()
-        .find(|(host, _)| host_key_for(host).is_ok_and(|k| k == key))
-        .map(|(_, entry)| entry.user.clone())
+    host_entry(config, key).map(|entry| entry.user.clone())
 }
 
 /// Drop every config entry for the host with this key, however it is spelled.
@@ -844,6 +903,42 @@ mod tests {
     }
 
     #[test]
+    fn a_leading_byte_order_mark_is_dropped() {
+        // Windows PowerShell and many editors put one first (EF BB BF).
+        for raw in [
+            "\u{feff}ins_abc",
+            "\u{feff}ins_abc\r\n",
+            "\u{feff}  ins_abc \n",
+            "\u{feff}\n\tins_abc",
+        ] {
+            assert_eq!(read_token(Cursor::new(raw)).unwrap(), "ins_abc", "{raw:?}");
+        }
+        let bytes = b"\xEF\xBB\xBFins_abc\r\n".to_vec();
+        assert_eq!(read_token(Cursor::new(bytes)).unwrap(), "ins_abc");
+    }
+
+    #[test]
+    fn a_byte_order_mark_alone_is_no_token() {
+        let err = read_token(Cursor::new("\u{feff}\r\n")).unwrap_err();
+        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+        assert!(err.to_string().contains("no token on stdin"), "{err}");
+    }
+
+    #[test]
+    fn only_a_leading_byte_order_mark_is_dropped() {
+        // Anywhere else it is part of the text, and the token stays unusable
+        // (and is refused later) instead of being silently repaired.
+        for raw in [
+            "ins_\u{feff}abc",
+            "\u{feff}\u{feff}ins_abc",
+            "ins_abc\u{feff}",
+        ] {
+            let token = read_token(Cursor::new(raw)).unwrap();
+            assert!(!crate::credentials::is_well_formed(&token), "{raw:?}");
+        }
+    }
+
+    #[test]
     fn a_failing_reader_is_an_io_error() {
         struct Broken;
         impl Read for Broken {
@@ -1043,6 +1138,104 @@ mod tests {
         forget_host(&mut config, HOST);
         assert_eq!(config.hosts.keys().collect::<Vec<_>>(), ["other.example"]);
         assert_eq!(remembered_user(&config, HOST), None);
+    }
+
+    // ---- logout: the local token goes away on every path -------------------------
+
+    fn quiet_out() -> Out {
+        Out {
+            json: false,
+            jq: None,
+            tty: false,
+            color: false,
+            quiet: true,
+        }
+    }
+
+    #[test]
+    fn a_token_that_cannot_be_read_is_still_deleted_and_the_account_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = env(dir.path());
+        save_login(HOST, HOST, &account("ada", "", ""), "ins_ada_token").unwrap();
+        assert!(dir.path().join(TOKEN_FILE).exists());
+
+        let original = "cannot read the token from the OS credential store: locked";
+        let err = sign_out_with(HOST, &quiet_out(), |_, _| {
+            Err(NsitError::Other(original.into()))
+        })
+        .unwrap_err();
+        // The original failure is what gets reported (exit 1)...
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+        assert_eq!(err.to_string(), original);
+        assert_eq!(err.exit_code(), 1);
+        // ...but the token is gone here and the account is forgotten.
+        assert!(!dir.path().join(TOKEN_FILE).exists());
+        assert!(token_for(HOST, Some("ada")).is_err());
+        assert!(Config::load().unwrap().hosts.is_empty());
+    }
+
+    #[test]
+    fn a_token_file_that_cannot_be_read_or_deleted_keeps_the_account_so_logout_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = env(dir.path());
+        save_login(HOST, HOST, &account("ada", "", ""), "ins_ada_token").unwrap();
+        let garbage = "this is [not toml";
+        std::fs::write(dir.path().join(TOKEN_FILE), garbage).unwrap();
+
+        // Reading the token fails before any network call, so no server is needed.
+        let err = sign_out_with(HOST, &quiet_out(), revoke).unwrap_err();
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains("not a valid token file"), "{text}");
+        assert!(!text.contains('\n'), "one line please: {text:?}");
+        assert!(!text.contains("ins_ada_token"), "{text}");
+        // Neither the file nor the account was thrown away.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(TOKEN_FILE)).unwrap(),
+            garbage
+        );
+        assert_eq!(Config::load().unwrap().hosts[HOST].user, "ada");
+    }
+
+    #[test]
+    fn what_logout_reports_when_cleaning_up_goes_wrong() {
+        let ok = || Ok(());
+        let read_failed = || Err(NsitError::Other("cannot read the token".into()));
+        let failure = |why: &str| Err(NsitError::Other(why.into()));
+
+        // Cleanup fine: the original error, untouched.
+        let err = sign_out_outcome(read_failed(), ok(), ok()).unwrap_err();
+        assert_eq!(err.to_string(), "cannot read the token");
+        // Cleanup failed too: both are said, on one line.
+        let err = sign_out_outcome(read_failed(), failure("cannot remove it"), ok()).unwrap_err();
+        let text = err.to_string();
+        assert!(text.starts_with("cannot read the token"), "{text}");
+        assert!(text.contains("cannot remove it"), "{text}");
+        assert!(!text.contains('\n'), "{text:?}");
+        // The same words are not said twice.
+        let err =
+            sign_out_outcome(read_failed(), failure("cannot read the token"), ok()).unwrap_err();
+        assert_eq!(err.to_string(), "cannot read the token");
+        // A failed config save after a failed read is mentioned as well.
+        let err =
+            sign_out_outcome(read_failed(), ok(), failure("cannot write nsit.toml")).unwrap_err();
+        assert!(err.to_string().contains("cannot write nsit.toml"), "{err}");
+
+        // The token was read: the revocation result stands, unless cleanup failed.
+        assert!(matches!(
+            sign_out_outcome(Ok(Revocation::Revoked), ok(), ok()),
+            Ok(Revocation::Revoked)
+        ));
+        assert!(matches!(
+            sign_out_outcome(Ok(Revocation::NoToken), ok(), ok()),
+            Ok(Revocation::NoToken)
+        ));
+        let err =
+            sign_out_outcome(Ok(Revocation::Revoked), failure("cannot delete"), ok()).unwrap_err();
+        assert_eq!(err.to_string(), "cannot delete");
+        let err =
+            sign_out_outcome(Ok(Revocation::Revoked), ok(), failure("cannot save")).unwrap_err();
+        assert_eq!(err.to_string(), "cannot save");
     }
 
     // ---- small things -----------------------------------------------------------

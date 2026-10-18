@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { decideDevice, findPendingByUserCode } from "../src/services/devices.js";
+import { getRepo } from "../src/services/repos.js";
 import { createAccessToken, createUser, listAccessTokens, type User } from "../src/services/users.js";
-import { nsitBin, runNsit, startInsitio, startNsit, tmpDir, type Insitio, type NsitOptions, type NsitResult } from "./helpers.js";
+import vitestConfig from "../vitest.config.js";
+import { NSIT_TIMEOUT_MS, nsitBin, runNsit, startInsitio, startNsit, tmpDir, type Insitio, type NsitOptions, type NsitResult } from "./helpers.js";
 
 // These tests run the real `nsit` binary against a real Insitio server in this process. Every
 // run gets its own config directory, no OS credential store (NSIT_NO_KEYCHAIN=1) and none of
@@ -11,8 +13,11 @@ import { nsitBin, runNsit, startInsitio, startNsit, tmpDir, type Insitio, type N
 
 // The first build compiles the vendored libgit2 and can take many minutes.
 const BUILD_TIMEOUT = 15 * 60_000;
-// The device flow waits one poll interval (5 s) before the first poll.
+// The device flow waits one poll interval (5 s) before the first poll. The per-test timeout is
+// above the 30 s default of vitest.config.ts, and the process limit stays below the test's, so a
+// stuck `nsit` is killed (and reported with its output) before vitest gives up on the test.
 const DEVICE_TIMEOUT = 60_000;
+const DEVICE_PROCESS_TIMEOUT = 50_000;
 const USER_CODE = /First copy your one-time code: ([BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4})\r?\n/;
 const TOKEN_SHAPE = /ins_[A-Za-z0-9_-]{20,}/;
 
@@ -120,6 +125,13 @@ describe("nsit auth login --with-token", () => {
     expect((await statusJson(configDir)).user).toBe("ada");
   });
 
+  it("ignores a leading UTF-8 byte-order mark, as Windows PowerShell and editors write one", async () => {
+    const configDir = tmpDir();
+    const login = await nsit(auth("login", "--with-token"), { configDir, input: `﻿${newToken()}\r\n` });
+    expect(login.code, login.stderr).toBe(0);
+    expect((await statusJson(configDir)).user).toBe("ada");
+  });
+
   it("rejects empty input and anything that cannot be one token (exit 2), storing nothing", async () => {
     for (const input of ["", "   \r\n", "ins_one ins_two", "ins_one\nins_two\n"]) {
       const configDir = tmpDir();
@@ -160,6 +172,17 @@ describe("nsit auth login --with-token", () => {
     const login = await nsit(auth("login", "--with-token"), { configDir, input: newToken(), env: { NSIT_TOKEN: newToken("env") } });
     expect(login.code, login.stderr).toBe(0);
     expect(login.stderr).toMatch(/warning: NSIT_TOKEN is set/);
+  });
+});
+
+describe("the nsit test helpers", () => {
+  it("give a run less time than vitest gives a test, and kill a nsit that does not finish", async () => {
+    expect(NSIT_TIMEOUT_MS).toBeLessThan(vitestConfig.test?.testTimeout ?? 5_000);
+
+    // --with-token reads stdin, and the open, silent pipe makes that wait for ever.
+    const started = Date.now();
+    await expect(runNsit(auth("login", "--with-token"), { stdin: "open", timeoutMs: 1_000 })).rejects.toThrow(/did not finish in 1000 ms/);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 });
 
@@ -228,7 +251,7 @@ describe("nsit auth login (device flow)", () => {
     async () => {
       const configDir = tmpDir();
       // stdin is an open pipe that is never written to: any attempt to read it would hang.
-      const proc = await startNsit(auth("login"), { configDir, stdin: "open" });
+      const proc = await startNsit(auth("login"), { configDir, stdin: "open", timeoutMs: DEVICE_PROCESS_TIMEOUT });
       try {
         const [, userCode] = await proc.waitForStderr(USER_CODE);
         const pending = findPendingByUserCode(ins.deps.db, userCode!);
@@ -263,7 +286,7 @@ describe("nsit auth login (device flow)", () => {
     "denying the one-time code exits 3 and stores nothing",
     async () => {
       const configDir = tmpDir();
-      const proc = await startNsit(auth("login"), { configDir });
+      const proc = await startNsit(auth("login"), { configDir, timeoutMs: DEVICE_PROCESS_TIMEOUT });
       try {
         const [, userCode] = await proc.waitForStderr(USER_CODE);
         const pending = findPendingByUserCode(ins.deps.db, userCode!);
@@ -358,6 +381,27 @@ describe("nsit auth logout", () => {
     }
   });
 
+  it("a token that cannot be read still fails with the original reason (exit 1), and keeps the account so logout can be retried", async () => {
+    const configDir = tmpDir();
+    const token = await signIn(configDir);
+    writeFileSync(join(configDir, "tokens.toml"), "this is [not toml");
+
+    const logout = await nsit(auth("logout"), { configDir });
+    expect(logout.code, logout.stderr).toBe(1);
+    expect(logout.stdout).toBe("");
+    expect(logout.stderr).toMatch(/^nsit: .*not a valid token file/);
+    expect(oneLine(logout.stderr), logout.stderr).toBe(true);
+    // The token could not even be read, so it was not revoked; nothing was thrown away.
+    expect(await tokenStatus(token)).toBe(200);
+    expect(readFileSync(join(configDir, "nsit.toml"), "utf8")).toContain('user = "ada"');
+
+    // Once the file is out of the way, logout can run again and finish the job.
+    rmSync(join(configDir, "tokens.toml"));
+    const again = await nsit(auth("logout"), { configDir });
+    expect(again.code, again.stderr).toBe(0);
+    expect(readFileSync(join(configDir, "nsit.toml"), "utf8")).not.toContain("ada");
+  });
+
   it("refuses while NSIT_TOKEN is set (exit 2) and revokes nothing", async () => {
     const configDir = tmpDir();
     const saved = await signIn(configDir);
@@ -373,5 +417,225 @@ describe("nsit auth logout", () => {
     expect(await tokenStatus(fromEnv)).toBe(200);
     expect(await tokenStatus(saved)).toBe(200);
     expect(await statusJson(configDir)).toEqual({ host: hostKey, user: "ada", token_source: "File" });
+  });
+});
+
+describe("nsit repo", () => {
+  // The two users each have their own signed-in config directory. The tests run in this order
+  // and share the server: ada's `tools` (private) is made first, `open` (public) later.
+  let grace: User;
+  let adaDir: string;
+  let adaToken: string;
+  let graceDir: string;
+
+  const repo = (...args: string[]) => ["repo", ...args, "--host", ins.base];
+  const REPO_FIELDS = ["clone_url", "created_at", "default_branch", "description", "full_name", "html_url", "name", "owner", "private"];
+
+  async function serverJson(path: string, token: string) {
+    const response = await fetch(`${ins.base}/api/v1${path}`, { headers: { authorization: `Bearer ${token}` } });
+    expect(response.status).toBe(200);
+    return response.json();
+  }
+
+  beforeAll(async () => {
+    grace = createUser(ins.deps.db, { username: "grace", password: "longenough", email: "grace@example.com" });
+    adaDir = tmpDir();
+    adaToken = await signIn(adaDir);
+    graceDir = tmpDir();
+    const graceToken = createAccessToken(ins.deps.db, grace.id, "e2e");
+    secrets.add(graceToken);
+    await signIn(graceDir, graceToken);
+  });
+
+  it("signed out, with stdin an open pipe: exits 3 within 5 s with a sign-in hint and never waits for input (Review Focus 2)", async () => {
+    const timings: Record<string, number> = {};
+    for (const args of [["list"], ["list", "--json"], ["list", "--owner", "ada"], ["create", "tools"], ["view", "ada/tools"], ["view", "tools"]]) {
+      const started = performance.now();
+      // No NSIT_TOKEN (the test environment removes it), no config, stdin open and silent: a read would hang.
+      const result = await nsit(repo(...args), { stdin: "open", timeoutMs: 5_000 });
+      const elapsed = performance.now() - started;
+      timings[args.join(" ")] = Math.round(elapsed);
+      expect(result.code, `repo ${args.join(" ")}: ${result.stderr}`).toBe(3);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("nsit auth login");
+      expect(result.stderr).toBe(`nsit: not signed in to ${hostKey}; run nsit auth login\n`);
+      expect(elapsed, `repo ${args.join(" ")} took ${elapsed} ms`).toBeLessThan(5_000);
+    }
+    console.info(`signed-out nsit repo, ms until exit 3: ${JSON.stringify(timings)}`);
+  });
+
+  it("with no repositories: [] for --json, and a note on stderr (not stdout) that -q silences", async () => {
+    const json = await nsit(repo("list", "--json"), { configDir: graceDir });
+    expect(json.code, json.stderr).toBe(0);
+    expect(JSON.parse(json.stdout)).toEqual([]);
+
+    const human = await nsit(repo("list"), { configDir: graceDir });
+    expect(human.code, human.stderr).toBe(0);
+    expect(human.stdout).toBe("");
+    expect(human.stderr).toBe("No repositories.\n");
+
+    const quiet = await nsit(repo("list", "-q"), { configDir: graceDir });
+    expect(quiet.code).toBe(0);
+    expect(quiet.stdout + quiet.stderr).toBe("");
+  });
+
+  it("create makes a private repository by default and prints where it is", async () => {
+    const result = await nsit(repo("create", "tools"), { configDir: adaDir });
+    expect(result.code, result.stderr).toBe(0);
+    const row = getRepo(ins.deps.db, "ada", "tools");
+    expect(row, "the server should have ada/tools").not.toBeNull();
+    expect(row!.isPrivate).toBe(true);
+    expect(result.stdout).toContain("Created ada/tools (private).");
+    expect(result.stdout).toContain(`${ins.base}/ada/tools\n`);
+    expect(result.stdout).toContain(`${ins.base}/ada/tools.git`);
+    expect(result.stderr).toBe("");
+  });
+
+  it("list --json --jq '.[].name' prints the names", async () => {
+    const result = await nsit(repo("list", "--json", "--jq", ".[].name"), { configDir: adaDir });
+    expect(result.code, result.stderr).toBe(0);
+    // jq's own output form: a string is JSON-quoted (as in `auth status --jq .user`).
+    expect(result.stdout).toBe('"tools"\n');
+  });
+
+  it("list prints an aligned table; --json is the server's own fields, unchanged", async () => {
+    const table = await nsit(repo("list"), { configDir: adaDir });
+    expect(table.code, table.stderr).toBe(0);
+    const [header, row, ...rest] = table.stdout.trimEnd().split("\n");
+    expect(rest).toEqual([]);
+    expect(header).toMatch(/^NAME\s+VISIBILITY\s+DESCRIPTION$/);
+    expect(row).toMatch(/^ada\/tools\s+private$/);
+    expect(row!.indexOf("private")).toBe(header!.indexOf("VISIBILITY"));
+    expect(table.stdout).not.toContain("\u001b");
+
+    const json = await nsit(repo("list", "--json"), { configDir: adaDir });
+    const parsed = JSON.parse(json.stdout);
+    expect(parsed).toEqual(await serverJson("/repos", adaToken));
+    expect(Object.keys(parsed[0]).sort()).toEqual(REPO_FIELDS);
+  });
+
+  it("creating a name that is taken exits 1 with the server's message and prints nothing", async () => {
+    const result = await nsit(repo("create", "tools"), { configDir: adaDir });
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("nsit: Repository ada/tools already exists\n");
+  });
+
+  it("create --public --description makes a public repository; --json is the server's fields", async () => {
+    const result = await nsit(repo("create", "open", "--public", "--description", "Open source", "--json"), { configDir: adaDir });
+    expect(result.code, result.stderr).toBe(0);
+    const made = JSON.parse(result.stdout);
+    expect(Object.keys(made).sort()).toEqual(REPO_FIELDS);
+    expect(made).toMatchObject({ owner: "ada", name: "open", full_name: "ada/open", private: false, description: "Open source" });
+    expect(made.clone_url).toBe(`${ins.base}/ada/open.git`);
+    const row = getRepo(ins.deps.db, "ada", "open");
+    expect(row).toMatchObject({ isPrivate: false, description: "Open source" });
+  });
+
+  it("names the server would refuse are usage errors (exit 2) and create nothing", async () => {
+    for (const name of ["bad name", "tools.git", "a/b", ".."]) {
+      const result = await nsit(repo("create", name), { configDir: adaDir });
+      expect(result.code, `create ${JSON.stringify(name)}: ${result.stderr}`).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(oneLine(result.stderr), result.stderr).toBe(true);
+    }
+    expect(getRepo(ins.deps.db, "ada", "bad name")).toBeNull();
+    expect(getRepo(ins.deps.db, "ada", "tools")!.isPrivate).toBe(true);
+  });
+
+  it("view shows a repository by owner/name, by bare name (yours), and by URL", async () => {
+    const byPair = await nsit(repo("view", "ada/tools", "--json"), { configDir: adaDir });
+    expect(byPair.code, byPair.stderr).toBe(0);
+    expect(JSON.parse(byPair.stdout)).toEqual(await serverJson("/repos/ada/tools", adaToken));
+
+    const bare = await nsit(repo("view", "tools"), { configDir: adaDir });
+    expect(bare.code, bare.stderr).toBe(0);
+    expect(bare.stdout).toContain("ada/tools (private)");
+    expect(bare.stdout).toContain(`${ins.base}/ada/tools.git`);
+    expect(bare.stdout).toMatch(/default branch: main/);
+
+    for (const input of [`${ins.base}/ada/tools.git`, `${ins.base}/ada/tools`, "ada/tools.git"]) {
+      const result = await nsit(repo("view", input, "--jq", ".full_name"), { configDir: adaDir });
+      expect(result.code, `${input}: ${result.stderr}`).toBe(0);
+      expect(result.stdout).toBe('"ada/tools"\n');
+    }
+  });
+
+  it("view of a repository that is missing, or private to someone else, is the same exit-1 message", async () => {
+    const hidden = await nsit(repo("view", "ada/tools"), { configDir: graceDir });
+    const missing = await nsit(repo("view", "ada/does-not-exist"), { configDir: graceDir });
+    const bareMissing = await nsit(repo("view", "tools"), { configDir: graceDir });
+    for (const result of [hidden, missing, bareMissing]) {
+      expect(result.code, result.stderr).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("nsit: repository not found or no access\n");
+    }
+    // A public repository is visible to everyone.
+    const open = await nsit(repo("view", "ada/open"), { configDir: graceDir });
+    expect(open.code, open.stderr).toBe(0);
+    expect(open.stdout).toContain("ada/open (public)");
+    expect(open.stdout).toContain("Open source");
+  });
+
+  it("view with something that is not a repository is a usage error (exit 2)", async () => {
+    for (const input of ["a/b/c", "https://example.com/", `${ins.base}/ada/tools/tree/main`, "ro cket"]) {
+      const result = await nsit(repo("view", input), { configDir: adaDir });
+      expect(result.code, `view ${JSON.stringify(input)}: ${result.stderr}`).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(oneLine(result.stderr), result.stderr).toBe(true);
+    }
+  });
+
+  it("list --owner shows only what the caller may see of that owner's repositories", async () => {
+    const asGrace = await nsit(repo("list", "--owner", "ada", "--jq", ".[].full_name"), { configDir: graceDir });
+    expect(asGrace.code, asGrace.stderr).toBe(0);
+    expect(asGrace.stdout).toBe('"ada/open"\n');
+
+    const asAda = await nsit(repo("list", "--owner", "ada", "--jq", ".[].full_name"), { configDir: adaDir });
+    expect(asAda.code, asAda.stderr).toBe(0);
+    expect(asAda.stdout.trimEnd().split("\n").sort()).toEqual(['"ada/open"', '"ada/tools"']);
+
+    const nobody = await nsit(repo("list", "--owner", "nobody"), { configDir: adaDir });
+    expect(nobody.code, nobody.stderr).toBe(1);
+    expect(nobody.stderr).toBe("nsit: User nobody not found\n");
+  });
+
+  it("works with only NSIT_TOKEN: the account is asked of the server, and NSIT_TOKEN's owner wins over the saved account", async () => {
+    // No config at all: a bare name is resolved with the owner of the token.
+    const agent = newToken("agent");
+    const bare = await nsit(repo("view", "tools"), { env: { NSIT_TOKEN: agent } });
+    expect(bare.code, bare.stderr).toBe(0);
+    expect(bare.stdout).toContain("ada/tools (private)");
+
+    const made = await nsit(repo("create", "agent-made"), { env: { NSIT_TOKEN: agent } });
+    expect(made.code, made.stderr).toBe(0);
+    expect(getRepo(ins.deps.db, "ada", "agent-made")!.isPrivate).toBe(true);
+
+    // Signed in as ada, but NSIT_TOKEN is grace's: "tools" now means grace/tools.
+    const graceToken = createAccessToken(ins.deps.db, grace.id, "agent");
+    secrets.add(graceToken);
+    const mixed = await nsit(repo("view", "tools"), { configDir: adaDir, env: { NSIT_TOKEN: graceToken } });
+    expect(mixed.code, mixed.stderr).toBe(1);
+    expect(mixed.stderr).toBe("nsit: repository not found or no access\n");
+  });
+
+  it("NSIT_TOKEN is not sent to a server other than the selected one, even when a URL names it (exit 3)", async () => {
+    const agent = newToken("agent");
+    const result = await nsit(repo("view", "https://other.example/ada/tools"), { env: { NSIT_TOKEN: agent }, timeoutMs: 5_000 });
+    expect(result.code, result.stderr).toBe(3);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("NSIT_TOKEN");
+    expect(result.stderr).toContain("--host");
+    expect(oneLine(result.stderr), result.stderr).toBe(true);
+  });
+
+  it("never prints a token, in the output or in an error", async () => {
+    // Every command above ran through `nsit()`, which scans its transcript; this adds the odd ones.
+    const odd = await nsit(repo("view", `https://ada:${adaToken}@other.example/ada/tools`), { configDir: adaDir, timeoutMs: 5_000 });
+    expect(odd.code, odd.stderr).toBe(2);
+    expect(odd.stdout + odd.stderr).not.toContain(adaToken);
+    const bad = await nsit(["repo", "list", "--host", `http://ada:${adaToken}@127.0.0.1:9`], { configDir: adaDir, timeoutMs: 5_000 });
+    expect(bad.code, bad.stderr).toBe(2);
+    expect(bad.stdout + bad.stderr).not.toContain(adaToken);
   });
 });
