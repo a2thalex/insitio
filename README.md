@@ -146,6 +146,8 @@ There is no command to delete a repository: tokens are not scoped, so an agent h
 - Data goes to stdout; progress, hints and errors go to stderr.
 - Nothing prompts when stdin or stdout is not a terminal.
 - Color and progress appear only on a terminal, and `NO_COLOR` or `--no-color` turns color off. `-q` hides progress and hints.
+- Network use follows your machine's proxy settings. Git traffic (`clone`, `push`, `pull`) uses `http.proxy` from your git configuration, then `HTTPS_PROXY` / `HTTP_PROXY`, and skips hosts listed in `NO_PROXY`; the API calls (`auth`, `repo`) use the same environment variables. A server on a loopback address (`localhost`, `127.0.0.1`) is always reached directly, never through a proxy.
+- Timeouts for git traffic: connecting gives up after 30 seconds, and on Linux and macOS a server that connects and then says nothing is given up on after 10 minutes. On Windows git traffic goes through WinHTTP, whose connect limit is 60 seconds, and it has no limit for a server that connects and then goes silent: `clone`, `push` or `pull` can then wait indefinitely, so press Ctrl-C.
 
 The fields of `--json` for the main commands. The names are exact, and a field that is said to be null is still there:
 

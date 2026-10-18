@@ -46,11 +46,11 @@ name: nsit release
 #   * Only the last job (release) can write to the repository.
 #
 # Supply chain
-#   Every `uses:` below names a tag or branch, which its owner can move. The one third-party action,
-#   dtolnay/rust-toolchain, is used the same way in all three build jobs (`@stable`, with `targets:`) and
-#   should be pinned to a full commit SHA. That is not done here because a SHA cannot be verified without
-#   reaching GitHub. When it is pinned, also pass `toolchain: stable`: today the ref name `@stable` is
-#   what selects the toolchain.
+#   The one third-party action, dtolnay/rust-toolchain, is pinned to a full commit SHA (the tip of its
+#   `master` branch on 2026-10-18, as the trailing comment says) in all three build jobs, with
+#   `toolchain: stable` as an explicit input because the ref no longer names the toolchain. The other
+#   `uses:` below are GitHub's own actions and name a tag, which its owner can move. To update the pin,
+#   look up the new `master` commit and change it in this file and in ci.yml together.
 on:
   push:
     tags: ["nsit-v*"]
@@ -188,9 +188,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # TODO: pin to a commit SHA (see "Supply chain" at the top).
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-18
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
       # +crt-static links the Visual C++ and Universal C runtimes into the exe, so a clean Windows
@@ -270,9 +270,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      # TODO: pin to a commit SHA (see "Supply chain" at the top).
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-18
         with:
+          toolchain: stable
           targets: x86_64-unknown-linux-musl
 
       # CC_... names the compiler outright rather than leaving it to be found. LIBZ_SYS_STATIC makes
@@ -361,9 +361,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # TODO: pin to a commit SHA (see "Supply chain" at the top).
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-18
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Build

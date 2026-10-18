@@ -51,8 +51,11 @@ jobs:
           cache: npm
 
       # git is on every runner and is only used by the tests (nsit itself needs no git).
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to a commit of dtolnay's `master` branch; the toolchain is the explicit input, since the
+      # ref no longer names it.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-18
         with:
+          toolchain: stable
           components: clippy, rustfmt
 
       # The crate lives in cli/, so the cache is keyed on cli/Cargo.lock and keeps cli/target. A
@@ -94,9 +97,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The toolchain is a `with:` input on @master, the form dtolnay's own crates use for a fixed
-      # version in their CI.
-      - uses: dtolnay/rust-toolchain@master
+      # The toolchain is a `with:` input, the form dtolnay's own crates use for a fixed version in
+      # their CI. Pinned to the same commit as the test job above.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-18
         with:
           toolchain: "1.89.0"
 
