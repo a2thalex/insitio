@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import type { IncomingMessage } from "node:http";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { repoDir } from "../src/git/storage.js";
 import { decideDevice, findPendingByUserCode } from "../src/services/devices.js";
-import { getRepo } from "../src/services/repos.js";
-import { createAccessToken, createUser, listAccessTokens, type User } from "../src/services/users.js";
+import { createRepo, getRepo } from "../src/services/repos.js";
+import { createAccessToken, createUser, getUserByName, listAccessTokens, type User } from "../src/services/users.js";
 import vitestConfig from "../vitest.config.js";
 import { NSIT_TIMEOUT_MS, nsitBin, runNsit, startInsitio, startNsit, tmpDir, type Insitio, type NsitOptions, type NsitResult } from "./helpers.js";
 
@@ -664,13 +666,13 @@ const execFileAsync = promisify(execFile);
 /**
  * The "home" the nsit processes see. libgit2 looks for ~/.gitconfig (HOME, or USERPROFILE on
  * Windows) and does not read GIT_CONFIG_GLOBAL, so this is how a test gives nsit a git identity,
- * and keeps the developer's own git configuration out. `autocrlf` is off so file contents are
- * exactly what the test wrote.
+ * and keeps the developer's own git configuration out. `autocrlf` is off unless asked for, so
+ * file contents are exactly what the test wrote.
  */
-function homeWith(identity: boolean): Record<string, string | undefined> {
+function homeWith(identity: boolean, autocrlf = false): Record<string, string | undefined> {
   const home = tmpDir();
   const user = identity ? "[user]\n\tname = Local Tester\n\temail = tester@example.com\n" : "";
-  writeFileSync(join(home, ".gitconfig"), `${user}[core]\n\tautocrlf = false\n`);
+  writeFileSync(join(home, ".gitconfig"), `${user}[core]\n\tautocrlf = ${autocrlf}\n`);
   return { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, XDG_CONFIG_HOME: undefined };
 }
 
@@ -864,5 +866,354 @@ describe("nsit init <name> against a server", () => {
     expect(result.code, result.stderr).toBe(3);
     expect(result.stderr).toBe(`nsit: not signed in to ${hostKey}; run nsit auth login\n`);
     expect(existsSync(join(cwd, "nobody-home"))).toBe(false);
+  });
+});
+
+// ---- nsit clone --------------------------------------------------------------------------------
+
+/** What a repository seeded on the server holds: file name to text or bytes. */
+type Seed = Record<string, string | Buffer>;
+
+/**
+ * A repository ada owns on the server, holding `files` in one commit on `main`. Real git (with
+ * core.autocrlf off, so the bytes are exactly these) builds the commit, and pushes it straight into
+ * the bare repository on the server's disk.
+ */
+async function seedRepo(name: string, files: Seed, isPrivate = true): Promise<void> {
+  await createRepo(ins.deps, ada, { name, description: "", isPrivate, initReadme: false });
+  const work = tmpDir();
+  await realGit(work, "init", "-q", "-b", "main");
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(work, path)), { recursive: true });
+    writeFileSync(join(work, path), content);
+  }
+  await realGit(work, "add", "-A");
+  await realGit(work, "commit", "-q", "-m", "Seed");
+  await realGit(work, "push", "-q", repoDir(ins.deps.config.dataDir, "ada", name), "HEAD:refs/heads/main");
+}
+
+/** Real git reading `home`'s .gitconfig (and no system one): the same core.autocrlf nsit sees. */
+async function gitSeeing(home: Record<string, string | undefined>, cwd: string, ...args: string[]): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-c", "credential.helper=", ...args], {
+      cwd,
+      env: { ...gitEnv, GIT_CONFIG_GLOBAL: join(home.HOME!, ".gitconfig") },
+      encoding: "utf8",
+    });
+    return stdout;
+  } catch (err) {
+    throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${(err as { stderr?: string }).stderr ?? err}`);
+  }
+}
+
+/** Every file under `dir`, as paths. */
+const filesUnder = (dir: string) =>
+  readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name));
+
+const same = (a: string, b: string) => realpathSync(a) === realpathSync(b);
+
+describe("nsit clone", () => {
+  const SEED: Seed = { "README.md": "# tools\n", "src/main.txt": "hello\n", "docs/ünï côdé.txt": "accented\n" };
+  const CLEAN = { branch: "main", upstream: "origin/main", ahead: 0, behind: 0, staged: [], unstaged: [], untracked: [], conflicted: [] };
+  let configDir: string;
+
+  const clone = (...args: string[]) => ["clone", ...args, "--host", ins.base];
+
+  async function repoStatus(dir: string, env: NsitOptions["env"]) {
+    const result = await nsit(["-C", dir, "status", "--json"], { env });
+    expect(result.code, result.stderr).toBe(0);
+    return JSON.parse(result.stdout);
+  }
+
+  beforeAll(async () => {
+    configDir = tmpDir();
+    await signIn(configDir);
+    await seedRepo("clone-tools", SEED);
+  });
+
+  it("clones a private repository with NSIT_TOKEN: the files are there, origin is the plain URL, and no token reaches .git", async () => {
+    const cwd = tmpDir();
+    const token = newToken("agent");
+    const env = { ...homeWith(true), NSIT_TOKEN: token };
+    const result = await nsit(clone("ada/clone-tools"), { cwd, env });
+    expect(result.code, result.stderr).toBe(0);
+    const dir = join(cwd, "clone-tools");
+    expect(result.stdout).toMatch(/^Cloned ada\/clone-tools into .*clone-tools\n$/);
+    expect(result.stderr).toBe("");
+
+    for (const [path, content] of Object.entries(SEED)) expect(readFileSync(join(dir, path), "utf8"), path).toBe(content);
+
+    const config = readFileSync(join(dir, ".git", "config"), "utf8");
+    expect(config).toContain(`url = ${ins.base}/ada/clone-tools.git`);
+    expect(config, "no token in .git/config").not.toMatch(/ins_/);
+    expect(config, "no user name or token in the URL").not.toMatch(/\/\/[^/\s]*@/);
+    for (const file of filesUnder(join(dir, ".git"))) {
+      expect(readFileSync(file).includes(token), `the token is in ${file}`).toBe(false);
+    }
+
+    // The default branch is checked out and tracks origin/main, so push and pull need no -u.
+    expect(await repoStatus(dir, env)).toEqual(CLEAN);
+    // Real git reads the clone the same way.
+    await realGit(dir, "fsck", "--strict");
+    expect(await realGit(dir, "log", "--format=%s")).toBe("Seed\n");
+    expect((await realGit(dir, "branch", "--show-current")).trim()).toBe("main");
+    expect((await realGit(dir, "rev-parse", "--abbrev-ref", "main@{upstream}")).trim()).toBe("origin/main");
+    expect(await realGit(dir, "status", "--porcelain")).toBe("");
+  });
+
+  it("without a token it exits 3 at once with a sign-in hint, never waits for input, and creates nothing", async () => {
+    const cwd = tmpDir();
+    for (const args of [["ada/clone-tools"], ["clone-tools"], ["ada/clone-tools", "target dir"], [`${ins.base}/ada/clone-tools.git`]]) {
+      const started = performance.now();
+      // No NSIT_TOKEN, no config, stdin open and silent: a read would hang.
+      const result = await nsit(clone(...args), { cwd, env: homeWith(true), stdin: "open", timeoutMs: 5_000 });
+      expect(result.code, `clone ${args.join(" ")}: ${result.stderr}`).toBe(3);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(`nsit: not signed in to ${hostKey}; run nsit auth login\n`);
+      expect(performance.now() - started).toBeLessThan(5_000);
+    }
+    expect(readdirSync(cwd)).toEqual([]);
+  });
+
+  it("NSIT_TOKEN is not sent to another server, even when a URL names it (exit 3), and nothing is created", async () => {
+    const cwd = tmpDir();
+    const result = await nsit(clone("https://other.example/ada/clone-tools"), { cwd, env: { ...homeWith(true), NSIT_TOKEN: newToken("agent") }, timeoutMs: 5_000 });
+    expect(result.code, result.stderr).toBe(3);
+    expect(result.stderr).toBe("nsit: NSIT_TOKEN is sent only to the selected host, and other.example is not it\n");
+    expect(readdirSync(cwd)).toEqual([]);
+  });
+
+  it("a repository that is missing, or private to someone else, is the same exit-1 message, and creates nothing", async () => {
+    const grace = getUserByName(ins.deps.db, "grace") ?? createUser(ins.deps.db, { username: "grace", password: "longenough", email: "grace@example.com" });
+    const graceToken = createAccessToken(ins.deps.db, grace.id, "e2e");
+    secrets.add(graceToken);
+    const cwd = tmpDir();
+    const cases: [string, NsitOptions["env"]][] = [
+      ["nobody/missing", { NSIT_TOKEN: newToken("agent") }],
+      ["missing-bare-name", { NSIT_TOKEN: newToken("agent") }],
+      ["ada/clone-tools", { NSIT_TOKEN: graceToken }],
+    ];
+    for (const [repo, env] of cases) {
+      const result = await nsit(clone(repo), { cwd, env: { ...homeWith(true), ...env } });
+      expect(result.code, `${repo}: ${result.stderr}`).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("nsit: repository not found or no access\n");
+    }
+    expect(readdirSync(cwd)).toEqual([]);
+  });
+
+  it("(Review Focus 3) with core.autocrlf=true a fresh clone is clean: nothing unstaged, and commit has nothing to commit", async () => {
+    // One text file with LF, one with CRLF, and a binary that has CR LF bytes in it.
+    const files: Seed = { "lf.txt": "alpha\nbeta\n", "crlf.txt": "one\r\ntwo\r\n", "bin/data.bin": Buffer.from([0x00, 0x0d, 0x0a, 0x01, 0x0a]) };
+    await seedRepo("crlf-repo", files);
+    // libgit2 does not read GIT_CONFIG_GLOBAL: its global git configuration is this home's .gitconfig.
+    const home = homeWith(true, true);
+    const env = { ...home, NSIT_TOKEN: newToken("agent") };
+    const cwd = tmpDir();
+    const result = await nsit(clone("ada/crlf-repo"), { cwd, env });
+    expect(result.code, result.stderr).toBe(0);
+    const dir = join(cwd, "crlf-repo");
+
+    // The conversion really happened on checkout: the LF-in-repository file has CRLF in the working
+    // tree. The CRLF file was not converted twice, and the binary was left alone.
+    expect(readFileSync(join(dir, "lf.txt")), "LF text became CRLF").toEqual(Buffer.from("alpha\r\nbeta\r\n"));
+    expect(readFileSync(join(dir, "crlf.txt")), "CRLF text stayed CRLF").toEqual(Buffer.from("one\r\ntwo\r\n"));
+    expect(readFileSync(join(dir, "bin", "data.bin")), "binary untouched").toEqual(files["bin/data.bin"]);
+
+    // Yet nothing counts as changed.
+    expect(await repoStatus(dir, env)).toEqual(CLEAN);
+    const head = (await realGit(dir, "rev-parse", "HEAD")).trim();
+    const commit = await nsit(["-C", dir, "commit", "-m", "x"], { env });
+    expect(commit.code, commit.stderr).toBe(0);
+    expect(commit.stdout).toBe("nothing to commit\n");
+    expect((await realGit(dir, "rev-parse", "HEAD")).trim(), "no commit was made").toBe(head);
+    // Real git, reading the same configuration, agrees that the checkout is clean.
+    const gitStatus = await gitSeeing(home, dir, "status", "--porcelain");
+    expect(gitStatus).toBe("");
+    expect(await gitSeeing(home, dir, "rev-list", "--count", "HEAD")).toBe("1\n");
+
+    const bytes = (name: string) => JSON.stringify(readFileSync(join(dir, name)).toString("latin1"));
+    console.info(
+      [
+        "Review Focus 3 evidence (HOME/.gitconfig has core.autocrlf=true):",
+        `  working tree: lf.txt=${bytes("lf.txt")} crlf.txt=${bytes("crlf.txt")} bin/data.bin=${bytes("bin/data.bin")}`,
+        `  nsit status --json: ${JSON.stringify(await repoStatus(dir, env))}`,
+        `  nsit commit -m x: exit ${commit.code}, stdout ${JSON.stringify(commit.stdout)}`,
+        `  real git status --porcelain (same home): ${JSON.stringify(gitStatus)}`,
+      ].join("\n"),
+    );
+  });
+
+  it("the home's core.autocrlf decides the line endings on checkout (the control for the test above)", async () => {
+    const env = { ...homeWith(true, false), NSIT_TOKEN: newToken("agent") };
+    const cwd = tmpDir();
+    const result = await nsit(clone("ada/crlf-repo"), { cwd, env });
+    expect(result.code, result.stderr).toBe(0);
+    const dir = join(cwd, "crlf-repo");
+    // With conversion off, every byte is what the repository holds.
+    expect(readFileSync(join(dir, "lf.txt"))).toEqual(Buffer.from("alpha\nbeta\n"));
+    expect(readFileSync(join(dir, "crlf.txt"))).toEqual(Buffer.from("one\r\ntwo\r\n"));
+    expect(await repoStatus(dir, env)).toEqual(CLEAN);
+  });
+
+  it("an empty repository clones to an unborn main with origin set and tracking configured", async () => {
+    await createRepo(ins.deps, ada, { name: "empty-one", description: "", isPrivate: true, initReadme: false });
+    const env = { ...homeWith(true), NSIT_TOKEN: newToken("agent") };
+    const cwd = tmpDir();
+    const result = await nsit(clone("ada/empty-one", "--json"), { cwd, env });
+    expect(result.code, result.stderr).toBe(0);
+    const dir = join(cwd, "empty-one");
+    const json = JSON.parse(result.stdout);
+    expect(Object.keys(json).sort()).toEqual(["default_branch", "dir", "name", "owner"]);
+    expect(json).toMatchObject({ owner: "ada", name: "empty-one", default_branch: "main" });
+    expect(same(json.dir, dir)).toBe(true);
+    // Stdout is the data; the explanation goes to stderr.
+    expect(result.stderr).toMatch(/^The repository is empty: .*nsit commit.*\n$/);
+
+    expect(readFileSync(join(dir, ".git", "HEAD"), "utf8")).toBe("ref: refs/heads/main\n");
+    const config = readFileSync(join(dir, ".git", "config"), "utf8");
+    expect(config).toContain(`url = ${ins.base}/ada/empty-one.git`);
+    expect(config).not.toMatch(/ins_/);
+    // libgit2 starts an empty clone on the branch init.defaultBranch names (master, unless set),
+    // with tracking settings for it. Only the server's default branch keeps any. (An empty
+    // [branch "master"] header can stay in the file: libgit2 removes settings, not sections, and
+    // git reads an empty section as nothing.)
+    expect((await realGit(dir, "config", "--get-regexp", "^branch\\.")).trimEnd().split("\n")).toEqual([
+      "branch.main.remote origin",
+      "branch.main.merge refs/heads/main",
+    ]);
+    expect((await realGit(dir, "config", "branch.main.remote")).trim()).toBe("origin");
+    expect((await realGit(dir, "config", "branch.main.merge")).trim()).toBe("refs/heads/main");
+    expect(await repoStatus(dir, env)).toEqual({ ...CLEAN, upstream: null });
+
+    // The unborn main is a real branch: the first commit lands on it.
+    writeFileSync(join(dir, "first.txt"), "one\n");
+    const commit = await nsit(["-C", dir, "commit", "-m", "first"], { env });
+    expect(commit.code, commit.stderr).toBe(0);
+    expect(commit.stdout).toMatch(/^\[main [0-9a-f]{7}\] first\n/);
+    expect((await realGit(dir, "log", "--format=%s")).trim()).toBe("first");
+  });
+
+  it("(Review Focus 1) clones into a directory with spaces and an accent: as [dir] from the working directory, and with -C", async () => {
+    const name = "Vidéo Ink - OG Edition";
+    const env = homeWith(true);
+
+    // [dir] is relative to the working directory.
+    const cwd = tmpDir();
+    const relative = await nsit(clone("ada/clone-tools", name), { cwd, configDir, env });
+    expect(relative.code, relative.stderr).toBe(0);
+    expect(relative.stdout).toMatch(/^Cloned ada\/clone-tools into .*Vidéo Ink - OG Edition\n$/);
+    const first = join(cwd, name);
+    expect(readFileSync(join(first, "docs", "ünï côdé.txt"), "utf8")).toBe("accented\n");
+
+    // -C names the directory it is run from; [dir] is relative to that, and the process stays elsewhere.
+    const parent = tmpDir();
+    const elsewhere = tmpDir();
+    const viaC = await nsit(["-C", parent, ...clone("ada/clone-tools", name, "--json")], { cwd: elsewhere, configDir, env });
+    expect(viaC.code, viaC.stderr).toBe(0);
+    const second = join(parent, name);
+    expect(same(JSON.parse(viaC.stdout).dir, second)).toBe(true);
+    expect(readdirSync(elsewhere)).toEqual([]);
+
+    for (const dir of [first, second]) {
+      expect(await repoStatus(dir, env)).toEqual(CLEAN);
+      await realGit(dir, "fsck", "--strict");
+      expect(await realGit(dir, "show", "HEAD:docs/ünï côdé.txt")).toBe("accented\n");
+    }
+  });
+
+  it("refuses a directory that has anything in it (exit 2) and leaves it exactly as it was; an empty one is fine, and so is .", async () => {
+    const env = homeWith(true);
+    const cwd = tmpDir();
+    mkdirSync(join(cwd, "taken"));
+    writeFileSync(join(cwd, "taken", "keep.txt"), "mine\n");
+    writeFileSync(join(cwd, "afile"), "not a directory\n");
+    for (const target of ["taken", "afile"]) {
+      const result = await nsit(clone("ada/clone-tools", target), { cwd, configDir, env });
+      expect(result.code, `${target}: ${result.stderr}`).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(oneLine(result.stderr), result.stderr).toBe(true);
+    }
+    expect(readdirSync(join(cwd, "taken"))).toEqual(["keep.txt"]);
+    expect(readFileSync(join(cwd, "taken", "keep.txt"), "utf8")).toBe("mine\n");
+    expect(readFileSync(join(cwd, "afile"), "utf8")).toBe("not a directory\n");
+    // The same for the working directory itself, which is not empty now.
+    const dot = await nsit(clone("ada/clone-tools", "."), { cwd, configDir, env });
+    expect(dot.code, dot.stderr).toBe(2);
+    expect(readdirSync(cwd).sort()).toEqual(["afile", "taken"]);
+
+    // An empty directory is cloned into (git does the same), by name or as the working directory.
+    mkdirSync(join(cwd, "empty"));
+    const empty = await nsit(clone("ada/clone-tools", "empty"), { cwd, configDir, env });
+    expect(empty.code, empty.stderr).toBe(0);
+    expect(existsSync(join(cwd, "empty", "README.md"))).toBe(true);
+    const here = tmpDir();
+    const inPlace = await nsit(clone("ada/clone-tools", "."), { cwd: here, configDir, env });
+    expect(inPlace.code, inPlace.stderr).toBe(0);
+    expect(existsSync(join(here, "README.md"))).toBe(true);
+    expect(existsSync(join(here, ".git", "config"))).toBe(true);
+  });
+
+  it("names the repository three ways, prints --json and --jq, and the clone is the same each time", async () => {
+    const env = homeWith(true);
+    const cwd = tmpDir();
+    const byPair = await nsit(clone("ada/clone-tools", "a", "--json"), { cwd, configDir, env });
+    expect(byPair.code, byPair.stderr).toBe(0);
+    expect(Object.keys(JSON.parse(byPair.stdout)).sort()).toEqual(["default_branch", "dir", "name", "owner"]);
+    expect(JSON.parse(byPair.stdout)).toMatchObject({ owner: "ada", name: "clone-tools", default_branch: "main" });
+    // A bare name is yours; the URL may or may not end in .git.
+    for (const [input, target] of [["clone-tools", "b"], [`${ins.base}/ada/clone-tools.git`, "c"], [`${ins.base}/ada/clone-tools`, "d"]]) {
+      const result = await nsit(clone(input!, target!, "--jq", ".owner + \"/\" + .name"), { cwd, configDir, env });
+      expect(result.code, `${input}: ${result.stderr}`).toBe(0);
+      expect(result.stdout).toBe("ada/clone-tools\n");
+    }
+    for (const target of ["a", "b", "c", "d"]) {
+      expect(readFileSync(join(cwd, target, "src", "main.txt"), "utf8")).toBe("hello\n");
+      expect(readFileSync(join(cwd, target, ".git", "config"), "utf8")).toContain(`url = ${ins.base}/ada/clone-tools.git`);
+    }
+    const quiet = await nsit(clone("ada/clone-tools", "e", "-q"), { cwd, configDir, env });
+    expect(quiet.code, quiet.stderr).toBe(0);
+    expect(quiet.stderr).toBe("");
+  });
+
+  it("a clone that fails midway removes what nsit made, and nothing else (exit 1, no token in the message)", async () => {
+    // The server knows the repository, but its bare repository is gone: the lookup works, git does not.
+    await createRepo(ins.deps, ada, { name: "broken", description: "", isPrivate: true, initReadme: false });
+    rmSync(repoDir(ins.deps.config.dataDir, "ada", "broken"), { recursive: true, force: true });
+    const env = homeWith(true);
+    const cwd = tmpDir();
+    mkdirSync(join(cwd, "keep"));
+    writeFileSync(join(cwd, "keep", "mine.txt"), "mine\n");
+    mkdirSync(join(cwd, "empty"));
+
+    // Every attempt must get as far as asking the server's git endpoint for the refs: that is what
+    // makes this a clone that failed midway, and not one that never began.
+    const asked: string[] = [];
+    const record = (req: IncomingMessage) => void asked.push(req.url ?? "");
+    ins.server.on("request", record);
+    const attempts = [["broken"], ["broken", "deep/er/dir"], ["broken", "keep/new"], ["broken", "empty"]];
+    try {
+      for (const args of attempts) {
+        const before = asked.filter((url) => url.startsWith("/ada/broken.git/info/refs")).length;
+        const result = await nsit(clone(...args), { cwd, configDir, env });
+        expect(result.code, `${args.join(" ")}: ${result.stderr}`).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toMatch(/^nsit: /);
+        expect(result.stderr).not.toContain("not implemented");
+        expect(oneLine(result.stderr), result.stderr).toBe(true);
+        const after = asked.filter((url) => url.startsWith("/ada/broken.git/info/refs")).length;
+        expect(after, `${args.join(" ")} never reached the git endpoint`).toBeGreaterThan(before);
+      }
+    } finally {
+      ins.server.off("request", record);
+    }
+    // What did not exist before is gone, parents nsit would have made included...
+    expect(readdirSync(cwd).sort()).toEqual(["empty", "keep"]);
+    expect(readdirSync(join(cwd, "keep"))).toEqual(["mine.txt"]);
+    // ...and a directory that was there is still there, and empty.
+    expect(readdirSync(join(cwd, "empty"))).toEqual([]);
+    expect(readFileSync(join(cwd, "keep", "mine.txt"), "utf8")).toBe("mine\n");
   });
 });

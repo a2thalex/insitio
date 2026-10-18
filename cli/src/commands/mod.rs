@@ -4,11 +4,13 @@
 //! `commit`, `log`, `branch`, `switch`, `readme`) take the directory they act
 //! in as `base`: the process directory, or `-C <dir>` resolved against it once
 //! (`working_dir`). They never change the process directory, so everything they
-//! read or write is explicit.
+//! read or write is explicit. `clone` takes it too: the directory a relative
+//! `[dir]` is taken from.
 
 pub mod add;
 pub mod auth;
 pub mod branch;
+pub mod clone;
 pub mod commit;
 pub mod init;
 pub mod log;

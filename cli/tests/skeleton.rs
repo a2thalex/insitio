@@ -1,8 +1,9 @@
 //! Runs the real `nsit` binary: version string, usage errors, the network
-//! commands that are still stubs, and the rule that a bad `--jq` fails before
-//! any command runs. The local commands are in `tests/local.rs`.
+//! commands that are still stubs, signed-out behavior, and the rule that a bad
+//! `--jq` fails before any command runs. The local commands are in `tests/local.rs`.
 
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -78,10 +79,9 @@ fn help_lists_every_v1_command_and_exits_zero() {
 
 #[test]
 fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
-    // `auth`, `repo` and the local commands are implemented (tests/nsit.e2e.test.ts and
-    // tests/local.rs); the three that talk to a git server are still stubs.
+    // `auth`, `repo`, `clone` and the local commands are implemented (tests/nsit.e2e.test.ts
+    // and tests/local.rs); the two that still talk to a git server are stubs.
     let invocations: &[&[&str]] = &[
-        &["clone", "ada/demo", "target"],
         &["pull"],
         &["pull", "--abort"],
         &["push", "-u", "main", "--force-with-lease"],
@@ -108,10 +108,63 @@ fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
     }
 }
 
+/// Run `nsit <args> --host http://127.0.0.1:9` the way an agent with nobody signed
+/// in would: stdin is an open pipe that nobody writes to or closes (a read would
+/// block), the host is a port nothing listens on (a request would fail), and the
+/// working directory is `work`. It must exit within 5 s; returns what it
+/// answered: the exit code, stdout and stderr.
+fn run_signed_out(args: &[&str], work: &Path) -> (Option<i32>, String, String) {
+    let config = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nsit"))
+        .args(args)
+        .args(["--host", "http://127.0.0.1:9"])
+        .current_dir(work)
+        .env("NSIT_CONFIG_DIR", config.path())
+        .env("NSIT_NO_KEYCHAIN", "1")
+        .env_remove("NSIT_HOST")
+        .env_remove("NSIT_TOKEN")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run nsit");
+    // Keeping the pipe's write end open (`_stdin`) is what makes a read block.
+    let _stdin = child.stdin.take();
+    let label = format!("nsit {}", args.join(" "));
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            panic!("{label} did not exit within 5 s: it is waiting for something");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (mut out, mut err) = (String::new(), String::new());
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    (status.code(), out, err)
+}
+
+const SIGN_IN_HINT: &str = "nsit: not signed in to 127.0.0.1:9; run nsit auth login
+";
+
 /// Review Focus 2: nobody is signed in and stdin is an open pipe that nobody
 /// writes to or closes (an agent's). Each `nsit repo` command must exit 3 with
-/// a sign-in hint at once, not wait for input, and not touch the network (the
-/// host here is a port nothing listens on).
+/// a sign-in hint at once, not wait for input, and not touch the network.
 #[test]
 fn repo_commands_signed_out_exit_3_at_once_and_never_read_stdin() {
     let invocations: &[&[&str]] = &[
@@ -123,52 +176,38 @@ fn repo_commands_signed_out_exit_3_at_once_and_never_read_stdin() {
         &["repo", "view", "tools"],
     ];
     for args in invocations {
-        let config = tempfile::tempdir().unwrap();
-        let started = Instant::now();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nsit"))
-            .args(*args)
-            .args(["--host", "http://127.0.0.1:9"])
-            .env("NSIT_CONFIG_DIR", config.path())
-            .env("NSIT_NO_KEYCHAIN", "1")
-            .env_remove("NSIT_HOST")
-            .env_remove("NSIT_TOKEN")
-            .env("NO_COLOR", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("run nsit");
-        // Keeping the pipe's write end open (`_stdin`) is what makes a read block.
-        let _stdin = child.stdin.take();
+        let work = tempfile::tempdir().unwrap();
+        let (code, out, err) = run_signed_out(args, work.path());
         let label = format!("nsit {}", args.join(" "));
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if started.elapsed() > Duration::from_secs(5) {
-                let _ = child.kill();
-                panic!("{label} did not exit within 5 s: it is waiting for something");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let (mut out, mut err) = (String::new(), String::new());
-        child
-            .stdout
-            .take()
-            .unwrap()
-            .read_to_string(&mut out)
-            .unwrap();
-        child
-            .stderr
-            .take()
-            .unwrap()
-            .read_to_string(&mut err)
-            .unwrap();
-        assert_eq!(status.code(), Some(3), "{label}: {err}");
+        assert_eq!(code, Some(3), "{label}: {err}");
         assert_eq!(out, "", "{label}");
+        assert_eq!(err, SIGN_IN_HINT, "{label}");
+    }
+}
+
+/// Review Focus 2 for `nsit clone`: the same, and it makes no directory either,
+/// not the one it would clone into nor the one a missing parent would need.
+#[test]
+fn clone_signed_out_exits_3_at_once_never_reads_stdin_and_makes_nothing() {
+    let invocations: &[&[&str]] = &[
+        &["clone", "ada/tools"],
+        &["clone", "tools"],
+        &["clone", "ada/tools", "target"],
+        &["clone", "ada/tools", "deep/er/target"],
+        &["clone", "http://127.0.0.1:9/ada/tools.git"],
+        &["clone", "ada/tools", "--json"],
+    ];
+    for args in invocations {
+        let work = tempfile::tempdir().unwrap();
+        let (code, out, err) = run_signed_out(args, work.path());
+        let label = format!("nsit {}", args.join(" "));
+        assert_eq!(code, Some(3), "{label}: {err}");
+        assert_eq!(out, "", "{label}");
+        assert_eq!(err, SIGN_IN_HINT, "{label}");
         assert_eq!(
-            err, "nsit: not signed in to 127.0.0.1:9; run nsit auth login\n",
-            "{label}"
+            std::fs::read_dir(work.path()).unwrap().count(),
+            0,
+            "{label} left something in the working directory"
         );
     }
 }

@@ -17,6 +17,7 @@ use crate::error::{one_line, NsitError};
 use crate::output::Out;
 use crate::repo_ref::{
     needs_default_owner, parse_repo_ref, signed_in_login, token_for_repo, validate_repo_name,
+    RepoRef,
 };
 
 /// Longest description shown in a table row.
@@ -120,16 +121,7 @@ fn repos_table(repos: &[RepoJson], color: bool) -> String {
 // ---- view --------------------------------------------------------------------------
 
 fn view(host: &str, args: &RepoViewArgs, out: &Out) -> Result<(), NsitError> {
-    let base = base_url(host)?;
-    // A bare name is yours: that needs to know who you are. Signed out is
-    // reported here, with no network traffic.
-    let default_owner = if needs_default_owner(&args.repo) {
-        let (token, source) = token_for(host, None)?;
-        signed_in_login(host, source, &token)?
-    } else {
-        String::new()
-    };
-    let target = parse_repo_ref(&args.repo, &default_owner, &base)?;
+    let target = named_repo(host, &args.repo)?;
     // The token for the server the repository is on, not for the selected one.
     let (token, _) = token_for_repo(host, &target)?;
     let repo = Api::new(&target.host, Some(token))?
@@ -138,8 +130,22 @@ fn view(host: &str, args: &RepoViewArgs, out: &Out) -> Result<(), NsitError> {
     out.data(&repo, view_text)
 }
 
+/// The repository `input` names (`name`, `owner/name` or a URL) on the server
+/// selected with `host`. A bare name is yours, which needs to know who you are:
+/// signed out is reported here, with no network traffic.
+pub(super) fn named_repo(host: &str, input: &str) -> Result<RepoRef, NsitError> {
+    let base = base_url(host)?;
+    let default_owner = if needs_default_owner(input) {
+        let (token, source) = token_for(host, None)?;
+        signed_in_login(host, source, &token)?
+    } else {
+        String::new()
+    };
+    parse_repo_ref(input, &default_owner, &base)
+}
+
 /// A repository you may not see looks exactly like one that is not there.
-fn not_found(err: NsitError) -> NsitError {
+pub(super) fn not_found(err: NsitError) -> NsitError {
     match err {
         NsitError::Api { status: 404, .. } => NsitError::Api {
             status: 404,

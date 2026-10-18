@@ -13,7 +13,7 @@
 //! both call it), `readme` (the starter README) and `origin` (`origin` as
 //! a repository on the selected host). No command module is needed by another.
 //!
-//! What the network commands (`clone`, `pull`, `push`) will call is marked
+//! `clone` calls `run_remote`. What `pull` and `push` will call is marked
 //! `allow(dead_code)` / `allow(unused_imports)`; the allows go away with the
 //! callers.
 
@@ -28,8 +28,9 @@ pub mod stage;
 
 // What the git commands import from `crate::git`. `run_remote` is the only
 // way onto the network: its credential step stays private to `auth`.
-#[allow(unused_imports)]
-pub use auth::{remote_error, run_remote, RemoteAccess};
+pub use auth::run_remote;
+#[allow(unused_imports)] // Task 10 (push)
+pub use auth::{remote_error, RemoteAccess};
 
 use std::path::Path;
 

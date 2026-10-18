@@ -69,15 +69,14 @@ fn remote_callbacks<'a>(
 
 /// The callbacks for one operation, wrapped so that they can only become
 /// fetch or push options that refuse off-site redirects.
-#[allow(dead_code)] // built by `run_remote`, used by Tasks 9 and 10
 pub struct RemoteAccess<'a> {
     callbacks: RemoteCallbacks<'a>,
 }
 
-#[allow(dead_code)] // Tasks 9 (fetch) and 10 (push)
 impl<'a> RemoteAccess<'a> {
-    /// Options for `Remote::fetch` / `Repository::clone`-style fetches:
-    /// these callbacks, and no redirect to another host.
+    /// Options for `Remote::fetch`, and for `RepoBuilder::fetch_options` (which
+    /// is how `nsit clone` gets its credentials): these callbacks, and no
+    /// redirect to another host.
     pub fn fetch_options(self) -> FetchOptions<'a> {
         let mut options = FetchOptions::new();
         options
@@ -88,6 +87,7 @@ impl<'a> RemoteAccess<'a> {
 
     /// Options for `Remote::push`: these callbacks, and no redirect to
     /// another host.
+    #[allow(dead_code)] // Task 10 (push)
     pub fn push_options(self) -> PushOptions<'a> {
         let mut options = PushOptions::new();
         options
@@ -110,7 +110,6 @@ impl<'a> RemoteAccess<'a> {
 ///     remote.fetch(&["+refs/heads/*:refs/remotes/origin/*"], Some(&mut options), None)
 /// })?;
 /// ```
-#[allow(dead_code)] // Tasks 9 and 10
 pub fn run_remote<T>(
     target: &RepoRef,
     selected_host: &str,

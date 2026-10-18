@@ -22,7 +22,6 @@ const MAX_NAME_LEN: usize = 100;
 
 /// A repository on an Insitio server, as the user named it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // `clone_url` is first read by `nsit clone` (Task 9)
 pub struct RepoRef {
     pub owner: String,
     pub name: String,
@@ -41,7 +40,6 @@ pub struct RepoRef {
 
 impl RepoRef {
     /// The canonical `host[:port]` of `host`, as used for stored tokens.
-    #[allow(dead_code)] // used by `run_remote` (Tasks 9 and 10) and in messages
     pub fn host_key(&self) -> String {
         host_key_for(&self.host).unwrap_or_else(|_| self.host.clone())
     }

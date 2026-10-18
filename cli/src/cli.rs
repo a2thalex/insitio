@@ -125,8 +125,12 @@ pub struct CloneArgs {
     /// `name` (yours), `owner/name`, or a full URL
     pub repo: String,
 
+    // Not called `dir`: clap tells arguments apart by name, and the global
+    // `-C <DIR>` flag already is `dir`, so a positional of that name would take
+    // over its value (a test guards this).
     /// Directory to clone into (default: the repository name)
-    pub dir: Option<PathBuf>,
+    #[arg(value_name = "DIR")]
+    pub directory: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -281,6 +285,75 @@ mod tests {
             assert!(cli.global.json && cli.global.quiet);
             assert_eq!(cli.global.host.as_deref(), Some("h.example"));
         }
+    }
+
+    /// Where each global flag's value ends up: clap tells arguments apart by
+    /// name, so a subcommand's own argument called `dir` would be the same
+    /// argument as `-C`, and its value would be read as `-C`'s.
+    #[test]
+    fn no_subcommand_argument_shares_a_name_with_a_global_flag() {
+        fn collisions(
+            command: &clap::Command,
+            globals: &[String],
+            path: &str,
+            found: &mut Vec<String>,
+        ) {
+            for sub in command.get_subcommands() {
+                let here = format!("{path} {}", sub.get_name());
+                for arg in sub.get_arguments().filter(|a| !a.is_global_set()) {
+                    if globals.iter().any(|g| g == arg.get_id().as_str()) {
+                        found.push(format!("{here}: {}", arg.get_id()));
+                    }
+                }
+                collisions(sub, globals, &here, found);
+            }
+        }
+        let root = Cli::command();
+        let globals: Vec<String> = root
+            .get_arguments()
+            .filter(|a| a.is_global_set())
+            .map(|a| a.get_id().to_string())
+            .collect();
+        assert!(globals.contains(&"dir".to_string()), "{globals:?}");
+        let mut found = Vec::new();
+        collisions(&root, &globals, "nsit", &mut found);
+        assert!(
+            found.is_empty(),
+            "shares a name with a global flag: {found:?}"
+        );
+    }
+
+    #[test]
+    fn clone_directory_is_not_the_c_flag() {
+        let Command::Clone(plain) = parse(&["clone", "ada/demo", "target"]).unwrap().command else {
+            panic!("not clone")
+        };
+        assert_eq!(plain.repo, "ada/demo");
+        assert_eq!(plain.directory, Some(PathBuf::from("target")));
+
+        // Together, in either place, each lands in its own field.
+        for args in [
+            &["-C", "elsewhere", "clone", "ada/demo", "target"][..],
+            &["clone", "ada/demo", "target", "-C", "elsewhere"],
+            &["clone", "-C", "elsewhere", "ada/demo", "target"],
+        ] {
+            let cli = parse(args).unwrap();
+            assert_eq!(cli.global.dir, Some(PathBuf::from("elsewhere")), "{args:?}");
+            let Command::Clone(clone) = cli.command else {
+                panic!("not clone")
+            };
+            assert_eq!(clone.directory, Some(PathBuf::from("target")), "{args:?}");
+        }
+
+        // Without a directory argument, -C is only -C, and the other way round.
+        let cli = parse(&["-C", "elsewhere", "clone", "ada/demo"]).unwrap();
+        let Command::Clone(clone) = cli.command else {
+            panic!("not clone")
+        };
+        assert_eq!(clone.directory, None);
+        assert_eq!(cli.global.dir, Some(PathBuf::from("elsewhere")));
+        let cli = parse(&["clone", "ada/demo", "target"]).unwrap();
+        assert_eq!(cli.global.dir, None, "a directory to clone into is not -C");
     }
 
     #[test]
