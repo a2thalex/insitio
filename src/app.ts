@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { apiV1 } from "./api/v1.js";
 import type { Deps } from "./deps.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "./services/errors.js";
 import type { Env } from "./web/env.js";
@@ -26,6 +27,9 @@ const MAX_FORM_BYTES = 2 * 1024 * 1024;
 export function buildApp(deps: Deps): Hono<Env> {
   const app = new Hono<Env>();
   staticRoutes(app);
+  // The JSON API authenticates with bearer tokens and has its own middleware, so it
+  // sits ahead of the cookie session, CSRF guard and HTML error pages below.
+  app.route("/api/v1", apiV1(deps));
   // Forms are small; cap bodies before anything parses them. Git pushes bypass Hono entirely.
   app.use("*", bodyLimit({ maxSize: MAX_FORM_BYTES, onError: (c) => renderError(c, 413, "That request was too large.") }));
   app.use("*", loadSession(deps));
