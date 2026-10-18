@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
-# Ships the committed code (HEAD) to the VM and runs setup.sh there. SSH goes through IAP.
-# Usage: deploy/deploy.sh   (override with PROJECT, ZONE, VM, DOMAIN, ACCOUNT)
+# Ships the committed code (HEAD) to a Google Cloud VM and runs setup.sh there. SSH goes through IAP.
+#
+# Five environment variables are required, and none has a default, so nothing about anyone's
+# project or account is baked into the repository:
+#   PROJECT  Google Cloud project id
+#   ZONE     zone the VM runs in
+#   VM       name of the VM
+#   DOMAIN   public host name Caddy serves (its DNS record must already point at the VM)
+#   ACCOUNT  Google account gcloud runs as
+#
+# Usage: PROJECT=my-project ZONE=us-central1-a VM=my-vm DOMAIN=git.example.com ACCOUNT=you@example.com deploy/deploy.sh
 set -euo pipefail
 
-PROJECT=${PROJECT:-iam-bot-git}
-ZONE=${ZONE:-us-central1-a}
-VM=${VM:-gitfkd-1}
-DOMAIN=${DOMAIN:-git.iam.bot}
-ACCOUNT=${ACCOUNT:-gregory@iam.bot}
+missing=()
+for var in PROJECT ZONE VM DOMAIN ACCOUNT; do
+  if [ -z "${!var:-}" ]; then missing+=("$var"); fi
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "deploy.sh: required environment variable(s) not set: ${missing[*]}" >&2
+  echo "usage: PROJECT=my-project ZONE=us-central1-a VM=my-vm DOMAIN=git.example.com ACCOUNT=you@example.com deploy/deploy.sh" >&2
+  exit 2
+fi
+
 G=(gcloud --project="$PROJECT" --account="$ACCOUNT" --quiet)
 
 cd "$(git rev-parse --show-toplevel)"

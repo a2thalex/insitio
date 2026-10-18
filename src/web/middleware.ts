@@ -36,9 +36,14 @@ function sameToken(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-/** Rejects state-changing requests that do not echo the CSRF token. */
+/**
+ * Rejects state-changing requests that do not echo the CSRF token. The JSON API
+ * under /api/ is exempt: it authenticates with bearer tokens, never cookies, so
+ * a forged cross-site request carries no credentials.
+ */
 export function csrfGuard(onFail: (c: Context<Env>) => Response | Promise<Response>): MiddlewareHandler<Env> {
   return async (c, next) => {
+    if (c.req.path.startsWith("/api/")) return next();
     if (c.req.method !== "GET" && c.req.method !== "HEAD") {
       let token = c.req.header("x-csrf-token");
       const type = c.req.header("content-type") ?? "";

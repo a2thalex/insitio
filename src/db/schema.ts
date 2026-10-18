@@ -116,6 +116,31 @@ const MIGRATIONS = [
   );
   create index issue_events_issue on issue_events (issue_id);
   `,
+  `
+  create table device_codes (
+    id integer primary key,
+    device_code_hash text not null unique,
+    user_code_hash text not null unique,
+    client_name text not null,
+    status text not null default 'pending' check (status in ('pending', 'approved', 'denied', 'consumed')),
+    user_id integer references users(id) on delete cascade,
+    interval integer not null default 5,
+    last_poll_at integer,
+    expires_at integer not null,
+    created_at integer not null
+  );
+  `,
+  // startDevice sweeps old rows (expires_at < x) and counts open ones (expires_at > x) on every call.
+  `
+  create index device_codes_expires_at on device_codes (expires_at);
+  `,
+  // The source that asked for a code (an IPv4 address or an IPv6 /48, see addressBucket), so that startDevice
+  // can cap the open codes of one source. Null for rows made before this column existed. The sweep removes
+  // a row (and with it the address) an hour after it expires.
+  `
+  alter table device_codes add column bucket text;
+  create index device_codes_bucket on device_codes (bucket, expires_at);
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

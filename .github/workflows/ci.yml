@@ -1,0 +1,112 @@
+name: CI
+
+# The Insitio server (TypeScript) and nsit (Rust) are tested together: the server's end-to-end tests
+# build and drive the real nsit binary, and nsit is only worth anything if it works on all three
+# desktop systems. So every leg runs everything: formatting, lints and unit tests for nsit, the
+# TypeScript type check, and the full vitest suite (which includes the 2,000-commit, 20 MB push and
+# clone check).
+#
+# Triggers: every pull request, every push to main, and "Run workflow" by hand (workflow_dispatch). A
+# branch that has no pull request yet is only built when someone runs it by hand from the Actions tab.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch or pull request makes an older run pointless, but a run on main is
+# a record of that commit and is never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  # The tests never touch a real credential store (they set this themselves too); this is the net
+  # under any test or step that forgets to.
+  NSIT_NO_KEYCHAIN: "1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # A cold run compiles libgit2 (and OpenSSL on Linux) from source: minutes, not seconds.
+    timeout-minutes: 60
+    strategy:
+      # One system failing says nothing about the others, so let all three finish.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24 is what deploy/setup.sh installs on the server; package.json needs 22.13 or later
+      # (node:sqlite).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # git is on every runner and is only used by the tests (nsit itself needs no git).
+      # Pinned to a commit of dtolnay's `master` branch; the toolchain is the explicit input, since the
+      # ref no longer names it.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-18
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      # The crate lives in cli/, so the cache is keyed on cli/Cargo.lock and keeps cli/target. A
+      # failed run still saves what it built: the dependencies are most of the compile time.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+          cache-on-failure: true
+
+      - name: Install server dependencies
+        run: npm ci
+
+      - name: Format (nsit)
+        run: cargo fmt --manifest-path cli/Cargo.toml --check
+
+      # --locked: build with exactly the versions in Cargo.lock, and fail if the lock file is out of date.
+      - name: Lint (nsit)
+        run: cargo clippy --locked --manifest-path cli/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test (nsit)
+        run: cargo test --locked --manifest-path cli/Cargo.toml
+
+      - name: Type check (server and tests)
+        run: npm run typecheck
+
+      # Builds the debug nsit binary (also with --locked: tests/helpers.ts adds it when CI is set; the
+      # dependencies are already compiled by the steps above) and runs it against a real server in
+      # every end-to-end test.
+      - name: Test (server, and nsit against it)
+        run: npm test
+
+  # cli/Cargo.toml declares rust-version 1.89. Nothing else builds with that compiler, so without this
+  # job the number would be a claim; with it, a dependency or a piece of code that needs something newer
+  # fails here, and not for the first person who tries an older toolchain.
+  rust-version:
+    name: rust-version 1.89 (cargo check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain is a `with:` input, the form dtolnay's own crates use for a fixed version in
+      # their CI. Pinned to the same commit as the test job above.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-18
+        with:
+          toolchain: "1.89.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+          cache-on-failure: true
+
+      - name: Check with the declared rust-version
+        run: cargo check --locked --manifest-path cli/Cargo.toml --all-targets

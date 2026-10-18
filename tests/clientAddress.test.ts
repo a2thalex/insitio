@@ -1,8 +1,76 @@
 import { describe, it, expect } from "vitest";
-import { clientAddress } from "../src/clientAddress.js";
+import { addressBucket, clientAddress } from "../src/clientAddress.js";
 import { loadConfig } from "../src/config.js";
 
 const LOOPBACK = ["127.0.0.1", "::1"];
+
+describe("addressBucket", () => {
+  it("keeps IPv4 addresses (and the unknown placeholder) as they are", () => {
+    expect(addressBucket("203.0.113.9")).toBe("203.0.113.9");
+    expect(addressBucket("unknown")).toBe("unknown");
+  });
+
+  it("turns an IPv4-mapped IPv6 address into the IPv4 address", () => {
+    expect(addressBucket("::ffff:203.0.113.9")).toBe("203.0.113.9");
+    expect(addressBucket("::FFFF:cb00:7109")).toBe("203.0.113.9");
+    expect(addressBucket("0:0:0:0:0:ffff:cb00:7109")).toBe("203.0.113.9");
+  });
+
+  it("buckets IPv6 addresses by /64, however they are written", () => {
+    const bucket = addressBucket("2001:db8:1:2::1");
+    expect(addressBucket("2001:db8:1:2:aaaa:bbbb:cccc:dddd")).toBe(bucket);
+    expect(addressBucket("2001:0DB8:0001:0002:0:0:0:99")).toBe(bucket);
+    expect(addressBucket("2001:db8:1:2::")).toBe(bucket);
+    expect(addressBucket("2001:db8:1:2::1%eth0")).toBe(bucket);
+    expect(addressBucket("2001:db8:1:3::1")).not.toBe(bucket);
+    expect(addressBucket("2001:db8:2:2::1")).not.toBe(bucket);
+    expect(addressBucket("2001:db9:1:2::1")).not.toBe(bucket);
+  });
+
+  it("copes with :: covering part of the /64 prefix", () => {
+    expect(addressBucket("2001:db8::1")).toBe(addressBucket("2001:db8:0:0:7::2"));
+    expect(addressBucket("2001:db8::1")).not.toBe(addressBucket("2001:db8:0:1::1"));
+    expect(addressBucket("::1")).toBe(addressBucket("0:0:0:0:9::"));
+    expect(addressBucket("::")).toBe(addressBucket("::1"));
+  });
+
+  it("never collides an IPv6 bucket with an IPv4 address", () => {
+    expect(addressBucket("2001:db8:1:2::1")).not.toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+  });
+
+  it("passes anything that is not an address through unchanged", () => {
+    expect(addressBucket("not-an-address")).toBe("not-an-address");
+    expect(addressBucket("1:2:3:4:5:6:7:8:9")).toBe("1:2:3:4:5:6:7:8:9");
+    expect(addressBucket("1::2::3")).toBe("1::2::3");
+    expect(addressBucket("")).toBe("");
+  });
+});
+
+describe("addressBucket with a /48 (the unit of the pending device-code cap)", () => {
+  it("is the /64 bucket unless a /48 is asked for", () => {
+    expect(addressBucket("2001:db8:1:2::1")).toBe(addressBucket("2001:db8:1:2::1", 64));
+    expect(addressBucket("2001:db8:1:2::1")).not.toBe(addressBucket("2001:db8:1:2::1", 48));
+  });
+
+  it("groups every /64 of a /48 together, however the addresses are written", () => {
+    const bucket = addressBucket("2001:db8:1:2::1", 48);
+    expect(addressBucket("2001:db8:1:3::1", 48)).toBe(bucket);
+    expect(addressBucket("2001:db8:1:ffff:aaaa:bbbb:cccc:dddd", 48)).toBe(bucket);
+    expect(addressBucket("2001:DB8:0001::", 48)).toBe(bucket);
+    expect(addressBucket("2001:db8:1::1%eth0", 48)).toBe(bucket);
+    expect(addressBucket("2001:db8:2:2::1", 48)).not.toBe(bucket);
+    expect(addressBucket("2001:db9:1:2::1", 48)).not.toBe(bucket);
+    expect(addressBucket("2001:db8::1", 48)).toBe(addressBucket("2001:db8:0:7::2", 48));
+    expect(addressBucket("2001:db8::1", 48)).not.toBe(addressBucket("2001:db8:1::1", 48));
+  });
+
+  it("still treats IPv4, IPv4-mapped IPv6 and non-addresses as they are", () => {
+    expect(addressBucket("203.0.113.9", 48)).toBe("203.0.113.9");
+    expect(addressBucket("::ffff:203.0.113.9", 48)).toBe("203.0.113.9");
+    expect(addressBucket("unknown", 48)).toBe("unknown");
+    expect(addressBucket("1::2::3", 48)).toBe("1::2::3");
+  });
+});
 
 describe("clientAddress", () => {
   it("ignores X-Forwarded-For from untrusted peers", () => {

@@ -1,0 +1,59 @@
+[package]
+name = "nsit"
+version = "0.1.0"
+edition = "2021"
+# The lowest Rust the locked dependencies build with. Windows and macOS need 1.88 (keyring, the
+# ICU crates behind `url`); Linux needs 1.89: keyring's Secret Service path pulls in uuid 1.28
+# (rust-version 1.89.0) through zbus and aes 0.9 (1.89) through secret-service. From
+# `cargo metadata`'s rust_version over every package in Cargo.lock; raise it when an update does.
+rust-version = "1.89"
+description = "nsit: the Insitio command-line tool for people and agents, used instead of git"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "nsit"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+dirs = "7"
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }
+# The machine's name, shown on the approval page as "nsit on <name>".
+hostname = "0.4"
+jaq-core = "3.1"
+jaq-json = "2.0"
+jaq-std = "3.0"
+# OS credential store: Windows Credential Manager, macOS Keychain, and on other
+# Unix the Secret Service over D-Bus through the pure-Rust zbus (keyring's
+# default `v1` feature; no libdbus, so the musl build stays static).
+keyring = "4.2"
+# Opens the approval page in the browser, on a terminal only.
+open = "5"
+# The secret guard's content patterns (linear-time, so a hostile file cannot stall a commit).
+regex = "1.13"
+# rustls only (no OpenSSL / native-tls). 30 s timeouts are set on the client.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "http2", "system-proxy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "1.1"
+url = "2"
+
+# Token file safety checks on Unix: who owns the config dir, and O_NOFOLLOW.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# libgit2 over HTTPS uses OpenSSL on Linux; build it from source so the musl
+# release binary stays static. Windows and macOS use their native TLS stacks.
+[target.'cfg(target_os = "linux")'.dependencies]
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https", "vendored-openssl"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

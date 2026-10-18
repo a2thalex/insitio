@@ -20,7 +20,7 @@ const USERNAME_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 // Top-level URL segments a username must not shadow.
 const RESERVED = new Set([
   "login", "logout", "join", "new", "settings", "site-admin", "static", "api", "explore", "search",
-  "dashboard", "notifications", "about", "help", "issues", "pulls",
+  "dashboard", "notifications", "about", "help", "issues", "pulls", "download",
 ]);
 const SESSION_DAYS = 30;
 const DAY = 86400;
@@ -219,13 +219,30 @@ export function createAccessToken(db: DatabaseSync, userId: number, name: string
   return token;
 }
 
-export function userForAccessToken(db: DatabaseSync, username: string, token: string): User | null {
+function findAccessToken(db: DatabaseSync, token: string): { user: User; tokenId: number } | null {
   const r = db
     .prepare("select t.id as token_id, u.* from access_tokens t join users u on u.id = t.user_id where t.token_hash = ?")
     .get(sha256Hex(token)) as Row | undefined;
-  if (!r || r.username.toLowerCase() !== username.toLowerCase()) return null;
-  db.prepare("update access_tokens set last_used_at = ? where id = ?").run(now(), r.token_id);
-  return toUser(r);
+  return r ? { user: toUser(r), tokenId: r.token_id } : null;
+}
+
+function touchAccessToken(db: DatabaseSync, tokenId: number): void {
+  db.prepare("update access_tokens set last_used_at = ? where id = ?").run(now(), tokenId);
+}
+
+/** Git HTTP: the token must belong to the username in the Basic credentials. */
+export function userForAccessToken(db: DatabaseSync, username: string, token: string): User | null {
+  const found = findAccessToken(db, token);
+  if (!found || found.user.username.toLowerCase() !== username.toLowerCase()) return null;
+  touchAccessToken(db, found.tokenId);
+  return found.user;
+}
+
+/** API: whoever owns the token. */
+export function userForBearerToken(db: DatabaseSync, token: string): { user: User; tokenId: number } | null {
+  const found = findAccessToken(db, token);
+  if (found) touchAccessToken(db, found.tokenId);
+  return found;
 }
 
 export function listAccessTokens(db: DatabaseSync, userId: number): AccessToken[] {

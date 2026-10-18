@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { apiV1 } from "./api/v1.js";
 import type { Deps } from "./deps.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "./services/errors.js";
 import type { Env } from "./web/env.js";
@@ -16,6 +17,8 @@ import { issueRoutes } from "./web/routes/issues.js";
 import { pullRoutes } from "./web/routes/pulls.js";
 import { repoSettingsRoutes } from "./web/routes/repoSettings.js";
 import { userRoutes } from "./web/routes/users.js";
+import { deviceRoutes } from "./web/routes/device.js";
+import { downloadRoutes } from "./web/routes/downloads.js";
 
 const MAX_FORM_BYTES = 2 * 1024 * 1024;
 
@@ -26,6 +29,9 @@ const MAX_FORM_BYTES = 2 * 1024 * 1024;
 export function buildApp(deps: Deps): Hono<Env> {
   const app = new Hono<Env>();
   staticRoutes(app);
+  // The JSON API authenticates with bearer tokens and has its own middleware, so it
+  // sits ahead of the cookie session, CSRF guard and HTML error pages below.
+  app.route("/api/v1", apiV1(deps));
   // Forms are small; cap bodies before anything parses them. Git pushes bypass Hono entirely.
   app.use("*", bodyLimit({ maxSize: MAX_FORM_BYTES, onError: (c) => renderError(c, 413, "That request was too large.") }));
   app.use("*", loadSession(deps));
@@ -38,9 +44,13 @@ export function buildApp(deps: Deps): Hono<Env> {
   });
 
   authRoutes(deps, app);
+  // /login/device is two segments deep, so it must come before the /:owner/:repo routes below.
+  deviceRoutes(deps, app);
   settingsRoutes(deps, app);
   adminRoutes(deps, app);
   homeRoutes(deps, app);
+  // /download, /install.ps1 and /install.sh are single-segment paths like /:owner, so they come before userRoutes.
+  downloadRoutes(deps, app);
   newRepoRoutes(deps, app);
   codeRoutes(deps, app);
   issueRoutes(deps, app);
