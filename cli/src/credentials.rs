@@ -48,7 +48,7 @@ pub enum TokenSource {
 
 impl TokenSource {
     /// Short stable name, for `--json` output: the variant name (`"Env"`,
-    /// `"Keychain"`, `"File"`), which is what the plan's e2e tests look for.
+    /// `"Keychain"`, `"File"`), which is what the end-to-end tests look for.
     pub fn as_str(self) -> &'static str {
         match self {
             TokenSource::Env => "Env",
@@ -139,8 +139,9 @@ pub(crate) fn host_entry<'c>(config: &'c Config, key: &str) -> Option<&'c HostCo
         .map(|(_, entry)| entry)
 }
 
-/// The signed-in user for a host according to the config file.
-fn configured_user(key: &str) -> Result<Option<String>, NsitError> {
+/// The signed-in user for the host with this canonical key (`host_key_for`), according to the
+/// config file; `None` when it has no entry (or one without a user).
+pub(crate) fn configured_user(key: &str) -> Result<Option<String>, NsitError> {
     let config = Config::load()?;
     Ok(host_entry(&config, key)
         .map(|entry| entry.user.clone())

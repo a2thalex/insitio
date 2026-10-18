@@ -513,6 +513,53 @@ fn switch_restores_files_and_refuses_to_overwrite_changes_in_that_directory() {
 }
 
 #[test]
+fn switch_never_overwrites_an_ignored_file_and_refuses_in_the_middle_of_a_merge_with_exit_2() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.unicode_repo();
+    sandbox.ok(&dir, &["switch", "-c", "feature"]);
+    write(&dir, "settings.local", "from the feature branch\n");
+    sandbox.ok(&dir, &["commit", "-m", "feature settings"]);
+    sandbox.ok(&dir, &["switch", "main"]);
+    assert!(!dir.join("settings.local").exists());
+
+    // On main the same name is the person's own file, which they keep out of git's sight
+    // (locally, in .git/info/exclude), as people do with local settings and build output.
+    let info = dir.join(".git").join("info");
+    std::fs::create_dir_all(&info).unwrap();
+    std::fs::write(info.join("exclude"), "settings.local\n").unwrap();
+    write(&dir, "settings.local", "my own settings\n");
+    assert!(
+        !stdout(&sandbox.ok(&dir, &["status"])).contains("settings.local"),
+        "ignored, so status does not show it"
+    );
+    let refused = sandbox.nsit(&dir, &["switch", "feature"]);
+    assert_eq!(code(&refused), 1, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("settings.local"),
+        "{}",
+        stderr(&refused)
+    );
+    assert_eq!(read(&dir, "settings.local"), "my own settings\n");
+    assert_eq!(sandbox.json(&dir, &["status"])["branch"], "main");
+
+    // In the middle of a merge nothing is switched: a usage error, as `nsit pull` says too.
+    std::fs::remove_file(dir.join("settings.local")).unwrap();
+    std::fs::write(
+        dir.join(".git").join("MERGE_HEAD"),
+        format!("{}\n", head_sha(&dir)),
+    )
+    .unwrap();
+    let during = sandbox.nsit(&dir, &["switch", "feature"]);
+    assert_eq!(code(&during), 2, "{}", stderr(&during));
+    assert!(
+        stderr(&during).contains("merge is in progress"),
+        "{}",
+        stderr(&during)
+    );
+    assert_eq!(sandbox.json(&dir, &["status"])["branch"], "main");
+}
+
+#[test]
 fn switching_to_a_branch_that_is_not_there_is_exit_2_with_a_hint() {
     let sandbox = Sandbox::new();
     let dir = sandbox.unicode_repo();
@@ -602,6 +649,52 @@ fn init_readme_in_that_directory_writes_and_commits_only_the_readme() {
     assert_eq!(again["readme"], false);
     assert_eq!(again["commit"], Value::Null);
     assert_eq!(read(&dir, "README.md"), readme);
+}
+
+#[test]
+fn init_readme_in_an_existing_repository_commits_only_the_readme_and_leaves_staged_work_staged() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.unicode_repo();
+    write(&dir, "a.txt", "changed and staged\n");
+    write(&dir, "new.txt", "new and staged\n");
+    sandbox.ok(&dir, &["add", "a.txt", "new.txt"]);
+    let before = head_sha(&dir);
+
+    let done = sandbox.json(&dir, &["init", "--readme"]);
+    assert_eq!(done["created"], false);
+    assert_eq!(done["readme"], true);
+    assert_eq!(done["commit"].as_str().unwrap(), head_sha(&dir));
+    assert_ne!(head_sha(&dir), before);
+
+    // The commit has the README on top of what was committed: none of the staged work.
+    let files = committed(&dir);
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    assert_eq!(names, ["README.md", "a.txt"]);
+    assert_eq!(files["a.txt"], "one\n", "the staged change did not go in");
+    let log = sandbox.json(&dir, &["log"]);
+    assert_eq!(log[0]["subject"], "Add README");
+
+    // It is all still staged, and the README is not shown as changed.
+    let status = sandbox.json(&dir, &["status"]);
+    let staged_now = strings(&status["staged"]);
+    assert!(
+        staged_now.iter().any(|path| path.contains("new.txt")),
+        "{status}"
+    );
+    assert!(
+        staged_now.iter().any(|path| path.contains("a.txt")),
+        "{status}"
+    );
+    assert!(
+        !staged_now.iter().any(|path| path.contains("README.md")),
+        "{status}"
+    );
+    assert_eq!(
+        strings(&status["unstaged"]),
+        Vec::<String>::new(),
+        "{status}"
+    );
+    assert!(staged(&dir).contains(&"new.txt".to_string()));
 }
 
 #[test]

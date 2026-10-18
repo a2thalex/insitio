@@ -12,7 +12,8 @@
 //!    `NSIT_TOKEN` is never offered to a server other than the selected one),
 //!    before anything touches the network;
 //! 2. builds the credentials and progress callbacks, and hands them over as
-//!    options that refuse redirects to other hosts; and
+//!    options that refuse redirects to other hosts and follow the machine's
+//!    proxy settings (`uses_system_proxy`; libgit2 reads none unless told to); and
 //! 3. turns every git error into the right `NsitError`, so a refused login is
 //!    exit 3 with a sign-in hint instead of a bare libgit2 message.
 //!
@@ -25,13 +26,13 @@ use std::io::{self, IsTerminal};
 use std::rc::Rc;
 
 use git2::{
-    Cred, CredentialType, ErrorClass, ErrorCode, FetchOptions, PushOptions, PushUpdate,
-    RemoteCallbacks, RemoteRedirect,
+    Cred, CredentialType, ErrorClass, ErrorCode, FetchOptions, ProxyOptions, PushOptions,
+    PushUpdate, RemoteCallbacks, RemoteRedirect,
 };
 use url::Url;
 
 use super::progress::{install_progress, progress_wanted, write_to_stderr, Sink};
-use crate::config::is_loopback;
+use crate::config::{is_loopback, scheme_allowed};
 use crate::credentials::{host_key, host_key_for};
 use crate::error::NsitError;
 use crate::output::Out;
@@ -71,6 +72,8 @@ fn remote_callbacks<'a>(
 /// fetch or push options that refuse off-site redirects.
 pub struct RemoteAccess<'a> {
     callbacks: RemoteCallbacks<'a>,
+    /// Whether this operation follows the proxy the machine names: see `uses_system_proxy`.
+    system_proxy: bool,
 }
 
 impl<'a> RemoteAccess<'a> {
@@ -81,6 +84,7 @@ impl<'a> RemoteAccess<'a> {
         let mut options = FetchOptions::new();
         options
             .remote_callbacks(self.callbacks)
+            .proxy_options(proxy_options(self.system_proxy))
             .follow_redirects(RemoteRedirect::None);
         options
     }
@@ -107,6 +111,7 @@ impl<'a> RemoteAccess<'a> {
         let mut options = PushOptions::new();
         options
             .remote_callbacks(callbacks)
+            .proxy_options(proxy_options(self.system_proxy))
             .follow_redirects(RemoteRedirect::None);
         options
     }
@@ -132,7 +137,77 @@ pub fn run_remote<T>(
     op: impl FnOnce(RemoteAccess<'_>) -> Result<T, git2::Error>,
 ) -> Result<T, NsitError> {
     let callbacks = remote_callbacks(target, selected_host, out)?;
-    op(RemoteAccess { callbacks }).map_err(|err| remote_error(err, &target.host))
+    let access = RemoteAccess {
+        callbacks,
+        system_proxy: uses_system_proxy(target),
+    };
+    op(access).map_err(|err| remote_error(err, &target.host))
+}
+
+/// How long libgit2 waits for a TCP connection to a server, in milliseconds.
+const CONNECT_TIMEOUT_MS: i32 = 30_000;
+
+/// How long libgit2 waits for the server to read or send the next piece of data, in
+/// milliseconds. An *idle* limit, not a limit on the whole operation: a push of gigabytes is
+/// fine as long as bytes keep moving. It is long because the server says nothing while it
+/// unpacks and indexes what it was sent, which for a very large push can take minutes.
+const IDLE_TIMEOUT_MS: i32 = 10 * 60 * 1000;
+
+/// Give libgit2's network sockets a connect timeout and an idle timeout. libgit2 defaults both
+/// to 0, which means for ever: a server that accepts the connection and then says nothing
+/// would hang `clone`, `push` and `pull` until somebody kills them.
+///
+/// Call it **once, first thing in `main`**, before anything else uses libgit2 and while the
+/// process has one thread: libgit2 keeps these in two plain global variables that it reads
+/// without any locking.
+///
+/// **Which transports it reaches** (checked in libgit2 1.9.7, the vendored copy):
+///
+/// * The two settings live in `git_socket_stream` (`streams/socket.c`), which reads them when
+///   it makes a stream. Everything that opens a socket by itself goes through it: the TLS
+///   streams of the OpenSSL build (Linux) and of SecureTransport (macOS), and libgit2's own
+///   plain-HTTP client (a loopback test server). The connect timeout bounds `connect`; the
+///   idle timeout bounds each wait for the socket to become readable or writable.
+/// * **Not the WinHTTP transport**, which is what a Windows build uses for both `https` and
+///   `http` (`transports/winhttp.c`, `GIT_WINHTTP`). It never opens a socket of its own and
+///   sets its own limits with `WinHttpSetTimeouts`: 60 s to connect, and no limit (infinite)
+///   to resolve, send or receive. So on Windows a connect is bounded at 60 s whatever is set
+///   here, and a server that connects and then stalls is not timed out by libgit2.
+pub fn set_network_timeouts() -> Result<(), NsitError> {
+    // SAFETY: `git2::opts` writes libgit2 globals without synchronization, so it must not run
+    // concurrently with other libgit2 calls or threads. This is called once, at the very start
+    // of `main`, before any other libgit2 call and before nsit has started a thread.
+    unsafe {
+        git2::opts::set_server_connect_timeout_in_milliseconds(CONNECT_TIMEOUT_MS)?;
+        git2::opts::set_server_timeout_in_milliseconds(IDLE_TIMEOUT_MS)?;
+    }
+    Ok(())
+}
+
+/// Does git traffic to `target` go through the proxy the machine names (`http.proxy` in the
+/// git configuration, then `HTTPS_PROXY`/`HTTP_PROXY`, minus `NO_PROXY`)?
+///
+/// Yes, for every server but a loopback one: the same rule as the API client, which uses the
+/// system proxy except for a loopback server (`api::build_client`). That keeps a developer's
+/// proxy out of the way of a local test server, and means `auth`, `repo`, `clone`, `push` and
+/// `pull` all reach a server the same way.
+fn uses_system_proxy(target: &RepoRef) -> bool {
+    !is_loopback(&target.clone_url)
+}
+
+/// The proxy options of a fetch or push. libgit2 reads no proxy setting unless it is told to
+/// (`git_proxy_t` defaults to none, and then `HTTPS_PROXY`, `NO_PROXY` and `http.proxy` are all
+/// ignored); `auto` makes it look them up for the server it connects to, and honor `NO_PROXY`.
+///
+/// Nothing here sets proxy credentials (libgit2 asks for them through a callback of its own,
+/// separate from the one that hands out the token, and nsit sets none): the token can only ever
+/// be offered to the server, never to a proxy in front of it.
+fn proxy_options(system_proxy: bool) -> ProxyOptions<'static> {
+    let mut options = ProxyOptions::new();
+    if system_proxy {
+        options.auto();
+    }
+    options
 }
 
 /// What a failed fetch or push should say. libgit2 reports "the server
@@ -187,14 +262,8 @@ impl CredentialProvider {
     /// libgit2 may offer: ssh keys, the system's default credentials).
     fn provide(&mut self, url: &str, allowed: CredentialType) -> Result<Cred, git2::Error> {
         // The same rule as for the host itself: https, or http only on loopback.
-        let on_our_host = Url::parse(url).is_ok_and(|u| {
-            let scheme_ok = match u.scheme() {
-                "https" => true,
-                "http" => is_loopback(&u),
-                _ => false,
-            };
-            scheme_ok && host_key(&u) == self.host_key
-        });
+        let on_our_host =
+            Url::parse(url).is_ok_and(|u| scheme_allowed(&u) && host_key(&u) == self.host_key);
         if !on_our_host {
             // Not an authentication failure: nothing was tried, and nothing sent.
             return Err(git2::Error::new(
@@ -250,6 +319,7 @@ mod tests {
     use crate::config::Config;
     use crate::credentials::{store_token, TOKEN_ENV};
     use crate::repo_ref::parse_repo_ref;
+    use crate::test_env::EnvGuard;
     use crate::test_support::{
         base64, fetch_with, host_entry_for, isolated_env, out_with, serve_once, source_repo,
         StubServer,
@@ -679,6 +749,221 @@ mod tests {
             .err()
             .expect("plain http to a remote host");
         assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+    }
+
+    #[test]
+    fn libgit2_gets_a_connect_timeout_and_an_idle_timeout() {
+        use git2::opts::{
+            get_server_connect_timeout_in_milliseconds, get_server_timeout_in_milliseconds,
+            set_server_connect_timeout_in_milliseconds, set_server_timeout_in_milliseconds,
+        };
+        // SAFETY: these two libgit2 globals are only ever written with these same values (by
+        // this test and by `main`), and read as plain integers. The test puts back what it found.
+        unsafe {
+            let connect = get_server_connect_timeout_in_milliseconds().unwrap();
+            let idle = get_server_timeout_in_milliseconds().unwrap();
+            set_server_connect_timeout_in_milliseconds(0).unwrap();
+            set_server_timeout_in_milliseconds(0).unwrap();
+
+            set_network_timeouts().unwrap();
+            assert_eq!(
+                get_server_connect_timeout_in_milliseconds().unwrap(),
+                30_000,
+                "connecting to a server that does not answer gives up after 30 s"
+            );
+            assert_eq!(
+                get_server_timeout_in_milliseconds().unwrap(),
+                600_000,
+                "a server that goes quiet is given 10 minutes (it may be indexing a big push)"
+            );
+
+            set_server_connect_timeout_in_milliseconds(connect).unwrap();
+            set_server_timeout_in_milliseconds(idle).unwrap();
+        }
+    }
+
+    // ---- proxies ---------------------------------------------------------------------
+    //
+    // libgit2 sends git traffic through a proxy only when the fetch or push options say
+    // `auto`; without that it never reads `HTTPS_PROXY`, `NO_PROXY` or `http.proxy`, and
+    // behind a proxy-only network `auth` and `repo` (which use the system proxy) work while
+    // `clone`, `push` and `pull` cannot reach the server. A proxy shows itself here as a
+    // `CONNECT <host>:443` it is asked for: what libgit2 sends a proxy to reach an https server.
+
+    /// Stands in for a proxy: records what it is asked for and refuses every request.
+    fn proxy_stub() -> StubServer {
+        StubServer::start(|_| {
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+        })
+    }
+
+    /// `env` for a machine whose proxy is `proxy`, by every variable libgit2 reads.
+    fn behind(env: EnvGuard, proxy: &StubServer) -> EnvGuard {
+        let url = proxy.host();
+        env.set("https_proxy", &url)
+            .set("HTTPS_PROXY", &url)
+            .set("http_proxy", &url)
+            .set("HTTP_PROXY", &url)
+            .unset("no_proxy")
+            .unset("NO_PROXY")
+    }
+
+    /// An `http.proxy` in the machine's git configuration beats the environment. These tests
+    /// then cannot tell which proxy was used, so the ones that depend on the environment
+    /// do not run there (they would also talk to that proxy).
+    fn machine_names_a_git_proxy() -> bool {
+        git2::Config::open_default().is_ok_and(|config| config.get_string("http.proxy").is_ok())
+    }
+
+    /// A fetch and a push of `repo` to `target`, and a clone of it: the three ways nsit goes
+    /// to the network, each through `run_remote`. They fail (nothing real is listening);
+    /// where they went is what the caller looks at.
+    fn try_fetch_and_push(target: &RepoRef, host: &str, repo: &Repository) {
+        let out = out_with(false, false);
+        let _ = run_remote(target, host, &out, |access| {
+            fetch_all(access, repo, target.clone_url.as_str())
+        });
+        let _ = run_remote(target, host, &out, |access| {
+            let mut remote = repo.remote_anonymous(target.clone_url.as_str())?;
+            let mut options = access.push_options(|_| Ok(()), |_, _| Ok(()));
+            remote.push(&["refs/heads/main:refs/heads/main"], Some(&mut options))
+        });
+    }
+
+    fn try_clone(target: &RepoRef, host: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = run_remote(target, host, &out_with(false, false), |access| {
+            let mut builder = git2::build::RepoBuilder::new();
+            builder.fetch_options(access.fetch_options());
+            builder.clone(target.clone_url.as_str(), &dir.path().join("clone"))
+        });
+    }
+
+    fn asked_for(proxy: &StubServer) -> Vec<String> {
+        proxy
+            .requests()
+            .into_iter()
+            .map(|seen| seen.request_line)
+            .collect()
+    }
+
+    #[test]
+    fn only_a_loopback_server_is_kept_off_the_system_proxy() {
+        for host in [
+            "https://git.iam.bot",
+            "https://other.example:8443",
+            // Loopback is exactly localhost, 127.0.0.1 and [::1] (as for the API client).
+            "https://127.0.0.2",
+        ] {
+            assert!(uses_system_proxy(&repo_on(host)), "{host}");
+        }
+        for host in [
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+            "http://[::1]:3000",
+            "https://localhost",
+        ] {
+            assert!(!uses_system_proxy(&repo_on(host)), "{host}");
+        }
+    }
+
+    #[test]
+    fn fetch_clone_and_push_go_through_the_proxy_the_environment_names() {
+        let dir = tempfile::tempdir().unwrap();
+        if machine_names_a_git_proxy() {
+            eprintln!("skipped: this machine's git configuration sets http.proxy");
+            return;
+        }
+        let proxy = proxy_stub();
+        let _env = behind(isolated_env(dir.path()), &proxy);
+        // A name that never resolves: only the proxy can be what it reaches.
+        let host = "https://git.proxytest.invalid";
+        sign_in_to(host, "ada", "ins_stored_token");
+        let target = repo_on(host);
+        let (_repo_dir, repo) = empty_repo();
+
+        try_fetch_and_push(&target, host, &repo);
+        let after_fetch_and_push = asked_for(&proxy);
+        try_clone(&target, host);
+        let all = asked_for(&proxy);
+
+        assert!(
+            after_fetch_and_push.len() >= 2,
+            "a fetch and a push must each ask the proxy: {after_fetch_and_push:?}"
+        );
+        assert!(
+            all.len() > after_fetch_and_push.len(),
+            "a clone must ask the proxy too: {all:?}"
+        );
+        for line in &all {
+            assert!(
+                line.starts_with("CONNECT git.proxytest.invalid:443 "),
+                "{line}"
+            );
+        }
+        // The token is only ever offered to the server, which the proxy never let us reach.
+        assert!(proxy.requests().iter().all(|s| s.authorization.is_none()));
+    }
+
+    #[test]
+    fn http_proxy_in_the_git_configuration_is_honored_too() {
+        let dir = tempfile::tempdir().unwrap();
+        // The environment says nothing here, and what the repository says wins over the
+        // machine's own configuration.
+        let proxy = proxy_stub();
+        let _env = isolated_env(dir.path())
+            .unset("https_proxy")
+            .unset("HTTPS_PROXY")
+            .unset("http_proxy")
+            .unset("HTTP_PROXY");
+        let host = "https://git.proxytest.invalid";
+        sign_in_to(host, "ada", "ins_stored_token");
+        let target = repo_on(host);
+        let (_repo_dir, repo) = empty_repo();
+        repo.config()
+            .unwrap()
+            .set_str("http.proxy", &proxy.host())
+            .unwrap();
+
+        try_fetch_and_push(&target, host, &repo);
+        let asked = asked_for(&proxy);
+        assert!(asked.len() >= 2, "{asked:?}");
+        assert!(
+            asked
+                .iter()
+                .all(|line| line.starts_with("CONNECT git.proxytest.invalid:443 ")),
+            "{asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_loopback_server_is_reached_directly_even_when_a_proxy_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = proxy_stub();
+        let _env = behind(isolated_env(dir.path()), &proxy);
+        let server = StubServer::refusing();
+        sign_in_to(&server.host(), "ada", "ins_stored_token");
+        let target = repo_on(&server.host());
+        let (_repo_dir, repo) = empty_repo();
+        // Even a proxy named in the repository's own configuration is not used for it.
+        repo.config()
+            .unwrap()
+            .set_str("http.proxy", &proxy.host())
+            .unwrap();
+
+        try_fetch_and_push(&target, &server.host(), &repo);
+        try_clone(&target, &server.host());
+
+        assert!(
+            !server.requests().is_empty(),
+            "the server itself was reached"
+        );
+        assert_eq!(
+            proxy.connections_after(SETTLE),
+            0,
+            "the proxy was never asked: {:?}",
+            asked_for(&proxy)
+        );
     }
 
     #[test]

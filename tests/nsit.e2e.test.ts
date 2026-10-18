@@ -1091,6 +1091,27 @@ describe("nsit clone", () => {
     expect(await realGit(dir, "status", "--porcelain")).toBe("");
   });
 
+  it("with NSIT_TOKEN, clone, pull and push never read nsit.toml: a damaged one changes nothing", async () => {
+    await seedRepo("env-token-config", { "a.txt": "base\n" });
+    const configDir = tmpDir();
+    writeFileSync(join(configDir, "nsit.toml"), "this is = not [valid toml");
+    // Nothing is signed in on this machine: the token is the agent's own, and the config is unreadable.
+    const env = { ...homeWith(true), NSIT_TOKEN: newToken("agent") };
+    const cwd = tmpDir();
+    const result = await nsit(clone("ada/env-token-config", "work"), { cwd, configDir, env });
+    expect(result.code, result.stderr).toBe(0);
+    const dir = join(cwd, "work");
+    expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("base\n");
+
+    const pulled = await nsit(["-C", dir, "pull", "--host", ins.base], { configDir, env });
+    expect(pulled.code, pulled.stderr).toBe(0);
+    expect(pulled.stdout).toBe("Already up to date\n");
+    const pushed = await nsit(["-C", dir, "push", "--host", ins.base], { configDir, env });
+    expect(pushed.code, pushed.stderr).toBe(0);
+    // The file is exactly as it was: nsit did not try to repair it either.
+    expect(readFileSync(join(configDir, "nsit.toml"), "utf8")).toBe("this is = not [valid toml");
+  });
+
   it("without a token it exits 3 at once with a sign-in hint, never waits for input, and creates nothing", async () => {
     const cwd = tmpDir();
     for (const args of [["ada/clone-tools"], ["clone-tools"], ["ada/clone-tools", "target dir"], [`${ins.base}/ada/clone-tools.git`]]) {
@@ -2078,7 +2099,8 @@ describe("nsit pull", () => {
       expect(refused.code, refused.stderr).toBe(2);
       expect(refused.stdout).toBe("");
       expect(refused.stderr).toMatch(/^nsit: cannot abort the merge: changes to extra\.txt, keep\.txt were made after the pull stopped/);
-      expect(refused.stderr).toContain("commit or revert them first");
+      // The advice is something a person can do in the middle of a merge (not "commit them first").
+      expect(refused.stderr).toContain("put them back as they were before the pull (or save a copy elsewhere), then run nsit pull --abort again");
       expect(refused.stderr).not.toContain("scratch.txt");
       expect(oneLine(refused.stderr), refused.stderr).toBe(true);
       // Nothing moved: the merge is still waiting, with its conflict, and so are the edits.
@@ -2104,6 +2126,100 @@ describe("nsit pull", () => {
       expect(workingFiles(b.dir)).toEqual(filesBefore);
       expect(existsSync(mergeHead)).toBe(false);
       expect(readFileSync(join(b.dir, "scratch.txt"), "utf8")).toBe("untracked\n");
+    },
+    SLOW,
+  );
+
+  it(
+    "pull --abort refuses to overwrite a file you made where the merge deleted one, untracked or ignored (exit 2, it is named); once it is moved the abort puts the deleted file back",
+    async () => {
+      const { a, b } = await twoClones("pull-abort-deleted", { "a.txt": "base\n", "keep.txt": "keep\n", "gone.txt": "the merge deletes this\n" });
+      await publish(a, "a.txt", "from a\n", "A edits a.txt");
+      rmSync(join(a.dir, "gone.txt"));
+      const deleted = await nsitIn(a, "commit", "-m", "A deletes gone.txt");
+      expect(deleted.code, deleted.stderr).toBe(0);
+      await pushIn(a);
+      const mine = await commitIn(b, "a.txt", "from b\n", "B edits a.txt");
+
+      const conflict = await pullIn(b);
+      expect(conflict.code, conflict.stderr).toBe(4);
+      expect(existsSync(join(b.dir, "gone.txt")), "the merge took it away").toBe(false);
+
+      for (const ignored of [false, true]) {
+        // The person makes a file of that name again: untracked, or hidden from git (a local ignore rule).
+        writeFileSync(join(b.dir, "gone.txt"), "my own work\n");
+        if (ignored) {
+          mkdirSync(join(b.dir, ".git", "info"), { recursive: true });
+          writeFileSync(join(b.dir, ".git", "info", "exclude"), "gone.txt\n", { flag: "a" });
+          await realGit(b.dir, "check-ignore", "-q", "gone.txt"); // exits 1 (and so rejects) unless it is ignored
+          expect(await realGit(b.dir, "status", "--porcelain")).not.toContain("?? gone.txt");
+        } else {
+          expect(await realGit(b.dir, "status", "--porcelain")).toContain("?? gone.txt");
+        }
+        const before = { head: await ref(b.dir, "HEAD"), index: await realGit(b.dir, "ls-files", "--stage"), files: workingFiles(b.dir) };
+
+        const refused = await pullIn(b, "--abort");
+        expect(refused.code, refused.stderr).toBe(2);
+        expect(refused.stdout).toBe("");
+        expect(refused.stderr).toMatch(/^nsit: cannot abort the merge: gone\.txt would be overwritten/);
+        expect(refused.stderr).toContain("run nsit pull --abort again");
+        expect(oneLine(refused.stderr), refused.stderr).toBe(true);
+        expect(readFileSync(join(b.dir, "gone.txt"), "utf8")).toBe("my own work\n");
+        expect(merging(b)).toBe(true);
+        expect({ head: await ref(b.dir, "HEAD"), index: await realGit(b.dir, "ls-files", "--stage"), files: workingFiles(b.dir) }).toEqual(before);
+
+        if (!ignored) rmSync(join(b.dir, "gone.txt"));
+      }
+
+      // Moved out of the way, the abort goes through and puts the deleted file back as it was.
+      rmSync(join(b.dir, "gone.txt"));
+      const done = await pullIn(b, "--abort");
+      expect(done.code, done.stderr).toBe(0);
+      expect(await ref(b.dir, "HEAD")).toBe(mine);
+      expect(readFileSync(join(b.dir, "gone.txt"), "utf8")).toBe("the merge deletes this\n");
+      expect(merging(b)).toBe(false);
+    },
+    SLOW,
+  );
+
+  it(
+    "a clone of an empty repository pulls the first commit another clone pushed: the unborn branch fast-forwards to it",
+    async () => {
+      await createRepo(ins.deps, ada, { name: "pull-unborn", description: "", isPrivate: true, initReadme: false });
+      const a = await cloneOf("ada/pull-unborn", adaDir);
+      const b = await cloneOf("ada/pull-unborn", adaDir);
+      for (const [work, who, email] of [[a, "Clone A", "a@example.com"], [b, "Clone B", "b@example.com"]] as const) {
+        await realGit(work.dir, "config", "user.name", who);
+        await realGit(work.dir, "config", "user.email", email);
+      }
+      expect(await ref(a.dir, "HEAD"), "A has no commit yet").toBe("");
+      // Nothing on the server yet: the branch it tracks is not there.
+      const nothingYet = await pullIn(a);
+      expect(nothingYet.code, nothingYet.stderr).toBe(1);
+      expect(await ref(a.dir, "HEAD")).toBe("");
+
+      const theirs = await publish(b, "first.txt", "from b\n", "B's first commit");
+      const result = await pullIn(a);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toBe(`Fast-forwarded main to ${theirs.slice(0, 7)}\n`);
+      expect(result.stderr, "nothing but data off a terminal").toBe("");
+      expect(await ref(a.dir, "HEAD")).toBe(theirs);
+      expect(await ref(a.dir, "refs/heads/main")).toBe(theirs);
+      expect(await ref(a.dir, "refs/remotes/origin/main")).toBe(theirs);
+      expect(readFileSync(join(a.dir, "first.txt"), "utf8")).toBe("from b\n");
+      // There was no commit before, so there is no ORIG_HEAD to leave.
+      expect(await ref(a.dir, "ORIG_HEAD")).toBe("");
+      expect(await realGit(a.dir, "status", "--porcelain")).toBe("");
+      expect(await statusOf(a)).toMatchObject({ branch: "main", upstream: "origin/main", ahead: 0, behind: 0, conflicted: [] });
+      await realGit(a.dir, "fsck", "--strict");
+
+      // From here it is an ordinary clone: asked again there is nothing to do, and a later commit comes over too.
+      const again = await pullIn(a);
+      expect(again.code, again.stderr).toBe(0);
+      expect(again.stdout).toBe("Already up to date\n");
+      const next = await publish(b, "second.txt", "again\n", "B's second commit");
+      const second = await pullIn(a, "--json");
+      expect(JSON.parse(second.stdout)).toEqual({ result: "fast_forward", head: next, conflicts: [] });
     },
     SLOW,
   );

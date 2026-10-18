@@ -3,15 +3,21 @@
 //! **What it does.** `reset --hard` to where the merge started (`ORIG_HEAD`, or `HEAD` when that
 //! is missing or is not a commit) and `cleanup_state`. The files and the index go back to exactly
 //! what they were before the pull: **your conflict resolutions are thrown away**, and so is any
-//! other change to a file the merge touched. Files that are not tracked are left alone.
+//! other change to a file the merge touched. Files that are not tracked are left alone (see the
+//! second refusal below for the one way the reset could still reach one).
 //!
-//! **What it refuses to do.** A hard reset would also revert a tracked file the merge never
-//! touched if somebody edited it, staged it or deleted it *after the pull stopped* (a pull that
-//! has to merge starts only with the tracked files committed, so such a change can only be from
-//! then). That is work the abort was never meant to destroy, and nothing at that point warns about
-//! it, so before it resets, `abort` works out the **merge set** and refuses (exit 2, naming the
-//! files, nothing changed) when any tracked file *outside* it differs from where the merge
-//! started, in the index or in the working directory.
+//! **What it refuses to do.** Before it resets, `abort` refuses (exit 2, naming the files,
+//! nothing changed) in two cases, because a hard reset would destroy work without a word:
+//!
+//! * A hard reset would revert a tracked file the merge never touched if somebody edited it,
+//!   staged it or deleted it *after the pull stopped* (a pull that has to merge starts only with
+//!   the tracked files committed, so such a change can only be from then). `abort` works out the
+//!   **merge set** and refuses when any tracked file *outside* it differs from where the merge
+//!   started, in the index or in the working directory.
+//! * A hard reset puts back the files the merge deleted, and a *forced* checkout writes over
+//!   whatever is there. A file recreated at such a path since (untracked, or ignored, which is
+//!   as good as invisible) would be overwritten, so `abort` refuses while one is (see
+//!   `untracked_in_the_way`). Untracked files anywhere else are left alone, as promised.
 //!
 //! **The merge set** is what the merge changed: the paths whose content differs between the
 //! commit the merge started from and the merge's own result, plus every path that is in
@@ -21,12 +27,16 @@
 //! would include files only our own side changed, which the merge leaves as they are.)
 
 use std::collections::BTreeSet;
+use std::io;
+use std::path::Path;
 
 use git2::build::CheckoutBuilder;
-use git2::{Commit, DiffDelta, DiffOptions, Oid, Repository, RepositoryState, ResetType};
+use git2::{
+    Commit, Delta, DiffDelta, DiffOptions, FileMode, Oid, Repository, RepositoryState, ResetType,
+};
 
 use super::orig_head;
-use super::paths::{display, listed, RawPath};
+use super::paths::{display, in_workdir, listed, raw_name, workdir, RawPath};
 use super::stage::{conflicted_paths, head_commit, merge_heads};
 use crate::error::NsitError;
 
@@ -55,8 +65,18 @@ pub fn abort(repo: &Repository) -> Result<Oid, NsitError> {
     if !outside.is_empty() {
         return Err(NsitError::Usage(format!(
             "cannot abort the merge: changes to {} were made after the pull stopped and are not \
-             part of the merge, so aborting would lose them; commit or revert them first",
+             part of the merge, so aborting would lose them; put them back as they were before \
+             the pull (or save a copy elsewhere), then run nsit pull --abort again",
             listed(&outside)
+        )));
+    }
+    let in_the_way = untracked_in_the_way(repo, &target)?;
+    if !in_the_way.is_empty() {
+        return Err(NsitError::Usage(format!(
+            "cannot abort the merge: {} would be overwritten, because the merge deleted files at \
+             those paths and aborting puts them back, and what is there now is not tracked (or \
+             is ignored); move yours elsewhere, then run nsit pull --abort again",
+            listed(&in_the_way)
         )));
     }
 
@@ -161,6 +181,93 @@ fn edits_outside_the_merge(repo: &Repository, base: &Commit<'_>) -> Result<Vec<S
     Ok(outside.iter().map(|path| display(path)).collect())
 }
 
+/// The untracked **and ignored** files of the working directory that the reset would
+/// overwrite, sorted: at every path the target has a file at and the index does not (the merge
+/// deleted it, and the reset puts it back), whatever is there now is somebody's own file; and
+/// so is a file where a directory has to be made for one, and a directory holding such a file
+/// where one has to be written. `edits_outside_the_merge` never lists these (they are not
+/// tracked), and a forced checkout, which the reset is, replaces them without a word.
+///
+/// A path the index has in any stage is tracked, and what the reset does to it is part of
+/// undoing the merge.
+fn untracked_in_the_way(repo: &Repository, target: &Commit<'_>) -> Result<Vec<String>, NsitError> {
+    let root = workdir(repo)?;
+    let mut current = repo.index()?;
+    current.read(true)?;
+    let tracked: BTreeSet<RawPath> = current.iter().map(|entry| entry.path).collect();
+    let diff = repo.diff_tree_to_index(Some(&target.tree()?), Some(&current), None)?;
+    let mut in_the_way = BTreeSet::new();
+    for delta in diff.deltas() {
+        // In the target's tree and not in the index. (Not a submodule: nsit does not make them.)
+        if delta.status() != Delta::Deleted || delta.old_file().mode() == FileMode::Commit {
+            continue;
+        }
+        if let Some(path) = delta.old_file().path_bytes() {
+            in_the_way.extend(blocked_at(root, path, &tracked));
+        }
+    }
+    Ok(in_the_way.iter().map(|path| display(path)).collect())
+}
+
+/// What stands in the way of writing the file `path` (raw, forward slashes, under `root`): the
+/// path of the untracked thing that the write would replace, if there is one. Each leading
+/// directory is looked at in turn, because a file where a directory goes is in the way too.
+fn blocked_at(root: &Path, path: &[u8], tracked: &BTreeSet<RawPath>) -> Option<RawPath> {
+    let slashes = path
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'/')
+        .map(|(at, _)| at);
+    for end in slashes.chain([path.len()]) {
+        let part = &path[..end];
+        let on_disk = in_workdir(root, part)?;
+        let meta = match on_disk.symlink_metadata() {
+            Ok(meta) => meta,
+            // Nothing here, so nothing below it either.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+            // Cannot look: that is not "free".
+            Err(_) => return Some(part.to_vec()),
+        };
+        if meta.is_dir() {
+            if end == path.len() && holds_untracked(&on_disk, part, tracked) {
+                return Some(part.to_vec());
+            }
+            continue;
+        }
+        // A file or a symlink: the reset replaces it, unless it is tracked (then replacing it
+        // is part of the merge being undone).
+        return (!tracked.contains(part)).then(|| part.to_vec());
+    }
+    None
+}
+
+/// Does the directory `dir` (at `rel`) hold a file that the index does not have? A directory that
+/// cannot be read is taken to.
+fn holds_untracked(dir: &Path, rel: &[u8], tracked: &BTreeSet<RawPath>) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let mut child = rel.to_vec();
+        child.push(b'/');
+        child.extend(raw_name(&entry.file_name()));
+        // `file_type` does not follow symbolic links: a link is a file here, as it is to git.
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        let untracked = if is_dir {
+            holds_untracked(&entry.path(), &child, tracked)
+        } else {
+            !tracked.contains(&child)
+        };
+        if untracked {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -168,8 +275,9 @@ mod tests {
     use super::*;
     use crate::git::pull::{integrate, Pulled};
     use crate::test_support::{
-        all_refs, commit_file, diverged_with_conflict, fetch_main, files, head, index_on_disk, me,
-        merge_state, no_changes, orig_head_text, theirs, two_clones, write_file,
+        all_refs, clone_main, commit_file, delete_file, diverged_with_conflict, fetch_main, files,
+        head, index_on_disk, me, merge_state, no_changes, orig_head_text, push_main, server_at,
+        theirs, two_clones, work_repo, write_file,
     };
 
     /// A pull that stopped on a conflict in a.txt (and brought added.txt in cleanly). `ours` is
@@ -348,7 +456,16 @@ mod tests {
             assert_eq!(err.exit_code(), 2, "case {n}");
             let text = err.to_string();
             assert!(text.contains(name), "case {n}: {text}");
-            assert!(text.contains("commit or revert"), "case {n}: {text}");
+            // Advice that can be followed in the middle of a merge: not "commit them first".
+            assert!(
+                text.contains("put them back as they were before the pull"),
+                "case {n}: {text}"
+            );
+            assert!(
+                text.contains("run nsit pull --abort again"),
+                "case {n}: {text}"
+            );
+            assert!(!text.contains("commit"), "case {n}: {text}");
             assert!(!text.contains('\n'), "case {n}: {text:?}");
             assert!(
                 !text.contains("scratch.txt"),
@@ -371,6 +488,147 @@ mod tests {
             assert!(merge_state(&two).is_empty(), "case {n}");
             assert_eq!(files(&two)["scratch.txt"], "untracked\n", "case {n}");
         }
+    }
+
+    /// A pull that stopped on a conflict in a.txt, in which the merge also deleted each of
+    /// `deleted` (files our side has and their side removed; the merge takes them out of the
+    /// working directory). `ours` is where the pull started.
+    fn stopped_after_the_merge_deleted(dir: &Path, deleted: &[&str]) -> (Repository, Oid) {
+        let server = server_at(dir);
+        let one = work_repo(dir, "one", &server);
+        commit_file(&one, "a.txt", "base\n");
+        for name in deleted {
+            write_file(&one, name, "mine to lose\n");
+            commit_file(&one, name, "mine to lose\n");
+        }
+        push_main(&one, &server);
+        let two = clone_main(dir, "two", &server);
+        commit_file(&one, "a.txt", "theirs\n");
+        for name in deleted {
+            delete_file(&one, name);
+        }
+        push_main(&one, &server);
+        commit_file(&two, "a.txt", "ours\n");
+        let ours = head(&two);
+        let tip = fetch_main(&two, &server);
+        let pulled = integrate(&two, "main", &theirs(tip), me).unwrap();
+        assert!(matches!(pulled, Pulled::Conflict { .. }), "{pulled:?}");
+        for name in deleted {
+            assert!(
+                !two.workdir().unwrap().join(name).exists(),
+                "the merge took {name} away"
+            );
+        }
+        (two, ours)
+    }
+
+    /// Hide `name` from `repo` the way a person does locally: `.git/info/exclude`.
+    fn ignore(repo: &Repository, name: &str) {
+        let info = repo.path().join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("exclude"), format!("{name}\n")).unwrap();
+        assert!(repo.status_should_ignore(Path::new(name)).unwrap());
+    }
+
+    #[test]
+    fn abort_refuses_to_overwrite_a_file_you_made_where_the_merge_deleted_one() {
+        // The file is untracked, or it is ignored (and so not shown by status either).
+        for ignored in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (two, ours) = stopped_after_the_merge_deleted(dir.path(), &["gone.txt"]);
+            write_file(&two, "scratch.txt", "untracked, and in nobody's way\n");
+            write_file(&two, "gone.txt", "my own work\n");
+            if ignored {
+                ignore(&two, "gone.txt");
+            }
+            let before = state(&two);
+
+            let err = abort(&two).unwrap_err();
+            assert!(
+                matches!(err, NsitError::Usage(_)),
+                "ignored={ignored}: {err:?}"
+            );
+            assert_eq!(err.exit_code(), 2, "ignored={ignored}");
+            let text = err.to_string();
+            assert!(text.contains("gone.txt"), "ignored={ignored}: {text}");
+            assert!(
+                !text.contains("scratch.txt"),
+                "only files in the way are named: {text}"
+            );
+            assert!(!text.contains('\n'), "{text:?}");
+            assert!(
+                text.contains("run nsit pull --abort again"),
+                "it says how to go on: {text}"
+            );
+            assert_eq!(state(&two), before, "ignored={ignored}: nothing changed");
+            assert_eq!(two.state(), RepositoryState::Merge);
+            assert_eq!(
+                files(&two)["gone.txt"],
+                "my own work\n",
+                "ignored={ignored}"
+            );
+
+            // Once it is out of the way the abort goes through, and puts the file back.
+            std::fs::remove_file(two.workdir().unwrap().join("gone.txt")).unwrap();
+            assert_eq!(abort(&two).unwrap(), ours, "ignored={ignored}");
+            assert_eq!(
+                files(&two)["gone.txt"],
+                "mine to lose\n",
+                "ignored={ignored}"
+            );
+            assert_eq!(
+                files(&two)["scratch.txt"],
+                "untracked, and in nobody's way\n"
+            );
+            assert!(merge_state(&two).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_file_where_the_merge_deleted_a_directory_or_where_a_directory_has_to_go_is_in_the_way_too()
+    {
+        // The merge deleted `dir/inner.txt` (and with it the directory), and a *file* called
+        // `dir` was made since: the abort would have to replace it with the directory.
+        let dir = tempfile::tempdir().unwrap();
+        let (two, ours) = stopped_after_the_merge_deleted(dir.path(), &["dir/inner.txt"]);
+        write_file(&two, "dir", "a file where a directory goes\n");
+        let before = state(&two);
+        let err = abort(&two).unwrap_err();
+        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+        assert!(err.to_string().contains("dir"), "{err}");
+        assert_eq!(state(&two), before);
+        std::fs::remove_file(two.workdir().unwrap().join("dir")).unwrap();
+        assert_eq!(abort(&two).unwrap(), ours);
+        assert_eq!(files(&two)["dir/inner.txt"], "mine to lose\n");
+
+        // The merge deleted the file `docs`, and a *directory* with a file of yours in it was
+        // made there since: the abort would have to replace it with the file.
+        let dir = tempfile::tempdir().unwrap();
+        let (two, ours) = stopped_after_the_merge_deleted(dir.path(), &["docs"]);
+        write_file(&two, "docs/mine.txt", "my notes\n");
+        let before = state(&two);
+        let err = abort(&two).unwrap_err();
+        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+        assert!(err.to_string().contains("docs"), "{err}");
+        assert_eq!(state(&two), before);
+        assert_eq!(files(&two)["docs/mine.txt"], "my notes\n");
+        std::fs::remove_dir_all(two.workdir().unwrap().join("docs")).unwrap();
+        assert_eq!(abort(&two).unwrap(), ours);
+        assert_eq!(files(&two)["docs"], "mine to lose\n");
+    }
+
+    #[test]
+    fn untracked_files_beside_what_the_merge_deleted_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (two, ours) = stopped_after_the_merge_deleted(dir.path(), &["dir/inner.txt"]);
+        // Next to the file the abort puts back, but not in its way.
+        write_file(&two, "dir/other.txt", "mine\n");
+        write_file(&two, "scratch.txt", "mine too\n");
+        assert_eq!(abort(&two).unwrap(), ours);
+        let found = files(&two);
+        assert_eq!(found["dir/inner.txt"], "mine to lose\n");
+        assert_eq!(found["dir/other.txt"], "mine\n");
+        assert_eq!(found["scratch.txt"], "mine too\n");
     }
 
     #[test]

@@ -14,6 +14,9 @@
 //!
 //! A merge in progress (`MERGE_HEAD`, left by `nsit pull`) is finished by the
 //! same call: two parents, and the merge state is cleared.
+//!
+//! `Staging::Only` commits a few named files on top of `HEAD` and leaves everything else that
+//! is staged as it was (`nsit init --readme`): see `commit_only`.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -25,7 +28,7 @@ use super::paths::{display, RawPath};
 use super::secrets::{allowed_paths, check_recordable, record_allowances, scan_index};
 use super::stage::{
     changed_paths, conflicted_paths, current_branch, entries_at, entry, head_commit, merge_heads,
-    read_start, stage_all,
+    read_start, stage_all, stage_paths,
 };
 use crate::error::NsitError;
 
@@ -39,6 +42,12 @@ pub enum Staging {
     Everything,
     /// Commit the index as it is (`nsit commit --staged`).
     AsStaged,
+    /// Commit just these repository-relative files, as they are in the working directory, on
+    /// top of `HEAD` (`nsit init --readme`: the README and nothing else). Everything else
+    /// that is staged is neither committed nor unstaged, and a merge in progress is not
+    /// finished by it (git refuses a partial commit then too). All the checks, the secret guard
+    /// included, look at what this commit would hold: `HEAD`'s tree with these files.
+    Only(&'static [&'static str]),
 }
 
 /// One commit to make.
@@ -100,15 +109,80 @@ pub fn commit_changes(
     request: &Request,
 ) -> Result<Outcome, NsitError> {
     let mut index = repo.index()?;
+    match request.staging {
+        Staging::Only(paths) => commit_only(repo, who, request, &mut index, paths),
+        Staging::Everything | Staging::AsStaged => commit_in(repo, who, request, &mut index, true),
+    }
+}
+
+/// `Staging::Only`: the checks and the commit work on a scratch index, `HEAD`'s tree with `paths`
+/// staged on top of it, so what else is staged takes no part. The scratch index is never
+/// written: the repository's own index (what the person staged) is read back from the disk,
+/// and when the commit was made `paths` are staged in it, so that they stand committed and
+/// everything else stays exactly as it was staged.
+///
+/// The scratch index is made in the repository's own in-memory index (an index that has no
+/// repository cannot read the working files), which is why it is read back from disk at the end,
+/// whatever happened.
+fn commit_only(
+    repo: &Repository,
+    who: &Signature<'_>,
+    request: &Request,
+    index: &mut Index,
+    paths: &[&str],
+) -> Result<Outcome, NsitError> {
+    if !request.allow_secret.is_empty() {
+        return Err(NsitError::Other(
+            "--allow-secret cannot go with a commit of only some files (this is a bug in nsit)"
+                .into(),
+        ));
+    }
+    if !merge_heads(repo)?.is_empty() {
+        return Err(NsitError::Usage(
+            "a merge is in progress: finish it with nsit commit, or abandon it with \
+             nsit pull --abort, before committing just some files"
+                .into(),
+        ));
+    }
+    let wanted: Vec<String> = paths.iter().map(|path| path.to_string()).collect();
+    let scratch = (|| -> Result<(), NsitError> {
+        match head_commit(repo)? {
+            Some(head) => index.read_tree(&head.tree()?)?,
+            None => index.clear()?,
+        }
+        stage_paths(repo, index, &wanted)?;
+        Ok(())
+    })();
+    let outcome = scratch.and_then(|()| commit_in(repo, who, request, index, false));
+    // Back to what is on the disk, which nothing above wrote: what the person staged.
+    let restored = index.read(true);
+    let outcome = outcome?;
+    restored?;
+    if matches!(outcome, Outcome::Committed(_)) {
+        stage_paths(repo, index, &wanted)?;
+        index.write()?;
+    }
+    Ok(outcome)
+}
+
+/// `commit_changes` on `index`, which is written to the disk at the end when `write_index` (not
+/// for the scratch index of `commit_only`).
+fn commit_in(
+    repo: &Repository,
+    who: &Signature<'_>,
+    request: &Request,
+    index: &mut Index,
+    write_index: bool,
+) -> Result<Outcome, NsitError> {
     let head = head_commit(repo)?;
     let merging = merge_heads(repo)?;
-    let in_conflict = conflicted_paths(&index)?;
+    let in_conflict = conflicted_paths(index)?;
 
     if request.staging == Staging::Everything {
-        stage_all(&mut index)?;
+        stage_all(index)?;
     }
     // Still unresolved after staging: only `--staged` can leave conflicts.
-    let unresolved = conflicted_paths(&index)?;
+    let unresolved = conflicted_paths(index)?;
     if !unresolved.is_empty() {
         return Err(NsitError::Conflict(shown(&unresolved)));
     }
@@ -121,7 +195,7 @@ pub fn commit_changes(
         Some(oid) => Some(repo.find_commit(*oid)?.tree()?),
         None => None,
     };
-    let candidates = changed_paths(repo, &index, merged_tree.as_ref().or(head_tree.as_ref()))?;
+    let candidates = changed_paths(repo, index, merged_tree.as_ref().or(head_tree.as_ref()))?;
 
     // Staging a file with conflict markers resolves it as far as the index is
     // concerned, and so does `nsit add`; committing the markers is almost never
@@ -132,7 +206,7 @@ pub fn commit_changes(
     // documentation that shows what a conflict looks like must not block the merge.
     let mut to_check: BTreeSet<RawPath> = in_conflict.into_iter().collect();
     if !merging.is_empty() {
-        let differs_from_head: BTreeSet<RawPath> = changed_paths(repo, &index, head_tree.as_ref())?
+        let differs_from_head: BTreeSet<RawPath> = changed_paths(repo, index, head_tree.as_ref())?
             .into_iter()
             .collect();
         to_check.extend(
@@ -142,21 +216,21 @@ pub fn commit_changes(
                 .cloned(),
         );
     }
-    let marked = with_conflict_markers(repo, &index, &to_check.into_iter().collect::<Vec<_>>())?;
+    let marked = with_conflict_markers(repo, index, &to_check.into_iter().collect::<Vec<_>>())?;
     if !marked.is_empty() {
         return Err(NsitError::Conflict(shown(&marked)));
     }
 
     // The guard. `--allow-secret` paths are let through here, before they are
     // recorded: nothing is written for a commit that is still refused.
-    let pending = pending_allowances(repo, &index, &request.allow_secret)?;
-    let hits = scan_index(repo, &index, &candidates, &pending)?;
+    let pending = pending_allowances(repo, index, &request.allow_secret)?;
+    let hits = scan_index(repo, index, &candidates, &pending)?;
     if !hits.is_empty() {
         return Err(NsitError::SecretGuard(hits));
     }
     // Past the guard: record the allowances in one write and stage the file in
     // this same index, so they travel with this commit.
-    let backup = record_allowances(repo, &mut index, &pending)?;
+    let backup = record_allowances(repo, index, &pending)?;
 
     // The allow file is now changed in the working directory. Until a commit exists
     // anything that goes wrong (and "nothing to commit") takes the change back, so a
@@ -166,7 +240,7 @@ pub fn commit_changes(
         repo,
         who,
         request,
-        &mut index,
+        index,
         head.as_ref(),
         head_tree.as_ref(),
         &merging,
@@ -193,7 +267,9 @@ pub fn commit_changes(
     }
     // Only now does the index reach the disk: if the commit had failed, the
     // index file would still be what it was before.
-    index.write()?;
+    if write_index {
+        index.write()?;
+    }
     Ok(Outcome::Committed(Committed {
         id,
         branch: current_branch(repo),

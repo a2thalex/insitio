@@ -1,7 +1,7 @@
 //! Command-line grammar: global flags and every v1 subcommand.
 //!
-//! The subcommands only declare their flags here. Each later task fills in
-//! the body of the commands it owns.
+//! The subcommands only declare their flags here; what each one does is in
+//! its module under `commands`.
 
 use std::path::PathBuf;
 

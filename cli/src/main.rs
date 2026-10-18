@@ -36,6 +36,9 @@ fn main() {
 }
 
 fn run(cli: &Cli) -> Result<(), NsitError> {
+    // Before anything else (a libgit2 setting that must be changed while nothing else is
+    // using libgit2): a server that stops answering must not hang a clone, push or pull.
+    git::set_network_timeouts()?;
     // Resolve output settings first so a bad `--jq` fails (exit 2) before
     // any command has side effects.
     let g = &cli.global;
@@ -58,5 +61,29 @@ fn run(cli: &Cli) -> Result<(), NsitError> {
         Command::Clone(args) => commands::clone::run(args, g, &out, &base()?),
         Command::Push(args) => commands::push::run(args, g, &out, &base()?),
         Command::Pull(args) => commands::pull::run(args, g, &out, &base()?),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// libgit2's socket timeouts are global settings that may only be changed before anything
+    /// else uses libgit2, so `run` sets them first, ahead of anything a command can do. Rust has
+    /// no way to call `main`, so this reads the source, as `git::auth`'s test of its own entry
+    /// point does.
+    #[test]
+    fn run_sets_libgit2s_timeouts_before_anything_else() {
+        let source = include_str!("main.rs");
+        let (production, _) = source
+            .rsplit_once("\n#[cfg(test)]\nmod tests")
+            .expect("the tests module is at the end");
+        let call = production
+            .find("git::set_network_timeouts()?")
+            .expect("run must set the network timeouts");
+        let run = production.find("fn run(").expect("run exists");
+        let first_work = production.find("Out::new(").expect("run builds its output");
+        assert!(
+            run < call && call < first_work,
+            "the timeouts are set at the start of run, before anything else"
+        );
     }
 }

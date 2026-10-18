@@ -87,6 +87,27 @@ pub(crate) fn commit_file(repo: &Repository, name: &str, content: &str) {
         .unwrap();
 }
 
+/// Delete `name` (a file, tracked) from the working directory and the index, and commit that on
+/// the current branch of `repo`.
+pub(crate) fn delete_file(repo: &Repository, name: &str) {
+    std::fs::remove_file(repo.workdir().unwrap().join(name)).unwrap();
+    let mut index = repo.index().unwrap();
+    index.remove_path(Path::new(name)).unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = Signature::now("Test", "test@example.com").unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.commit(
+        Some("HEAD"),
+        &sig,
+        &sig,
+        &format!("delete {name}"),
+        &tree,
+        &[&parent],
+    )
+    .unwrap();
+}
+
 /// Write `rel` (made with its directories) in the working directory of `repo`.
 pub(crate) fn write_file(repo: &Repository, rel: &str, content: impl AsRef<[u8]>) {
     let path = repo.workdir().unwrap().join(rel);

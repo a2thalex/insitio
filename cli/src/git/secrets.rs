@@ -280,30 +280,7 @@ impl AllowFileBackup {
     }
 }
 
-/// Let `path` through the guard on its own: record it (see `record_allowances`),
-/// stage `.nsit-allow-secrets` and write the repository's index.
-#[allow(dead_code)] // the plan's entry point; `commit` uses `record_allowances`, which leaves the index file to it
-pub fn allow(repo: &Repository, path: &str) -> Result<(), NsitError> {
-    let mut index = repo.index()?;
-    let backup = record_allowances(repo, &mut index, &[path.to_string()])?;
-    if let Err(e) = index.write() {
-        return Err(match backup {
-            Some(backup) => backup.restore_after(e.into()),
-            None => e.into(),
-        });
-    }
-    Ok(())
-}
-
 // ---- scanning ------------------------------------------------------------------------
-
-/// `scan_index` over the repository's own index (the one in memory, which is
-/// what a command has filled and not yet written).
-#[allow(dead_code)] // the plan's entry point; `commit` passes the index it holds to `scan_index`
-pub fn scan(repo: &Repository, candidates: &[RawPath]) -> Result<Vec<SecretHit>, NsitError> {
-    let index = repo.index()?;
-    scan_index(repo, &index, candidates, &[])
-}
 
 /// Check the staged files at `candidates` (raw repository-relative paths) in
 /// `index` against the guard. Paths allowed in the staged `.nsit-allow-secrets`,
@@ -376,6 +353,28 @@ mod tests {
         candidates: &[RawPath],
     ) -> Result<Vec<SecretHit>, NsitError> {
         scan_index(repo, index, candidates, &[])
+    }
+
+    /// `scan_index` over the repository's own index (the one in memory, which is what a
+    /// command has filled and not yet written).
+    fn scan(repo: &Repository, candidates: &[RawPath]) -> Result<Vec<SecretHit>, NsitError> {
+        let index = repo.index()?;
+        scan_index(repo, &index, candidates, &[])
+    }
+
+    /// Let `path` through the guard on its own: record it (see `record_allowances`), stage
+    /// `.nsit-allow-secrets` and write the repository's index. (`commit` records allowances
+    /// in the index it holds and writes that itself, after the commit.)
+    fn allow(repo: &Repository, path: &str) -> Result<(), NsitError> {
+        let mut index = repo.index()?;
+        let backup = record_allowances(repo, &mut index, &[path.to_string()])?;
+        if let Err(e) = index.write() {
+            return Err(match backup {
+                Some(backup) => backup.restore_after(e.into()),
+                None => e.into(),
+            });
+        }
+        Ok(())
     }
 
     // ---- names ---------------------------------------------------------------------

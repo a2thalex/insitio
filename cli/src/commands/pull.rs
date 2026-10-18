@@ -19,8 +19,9 @@
 //!   the pull** (`reset --hard` to where the merge started, `ORIG_HEAD`, and the merge state is
 //!   cleared); untracked files are not touched. It says so in its help, in the hint a conflict
 //!   prints, and in its own output. It refuses (exit 2, naming the files, nothing changed) when a
-//!   tracked file the merge did not touch was changed after the pull stopped, and without a merge
-//!   in progress it is exit 2 and changes nothing: see `git::abort`.
+//!   tracked file the merge did not touch was changed after the pull stopped, or when a file of
+//!   yours (untracked or ignored) is where a file the merge deleted has to be put back; without a
+//!   merge in progress it is exit 2 and changes nothing: see `git::abort`.
 //! * A merge commit is made by the person pulling: `user.name` and `user.email` from the git
 //!   configuration, then the name and email nsit saved at sign-in (as for `nsit commit`).
 //! * Progress goes to stderr, and only on a terminal.

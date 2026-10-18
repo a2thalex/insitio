@@ -13,8 +13,8 @@
 use url::Url;
 
 use crate::api::Api;
-use crate::config::{base_url, Config};
-use crate::credentials::{host_entry, host_key_for, token_for, TokenSource};
+use crate::config::base_url;
+use crate::credentials::{configured_user, host_key, host_key_for, token_for, TokenSource};
 use crate::error::NsitError;
 
 /// The longest repository name the server accepts.
@@ -120,6 +120,28 @@ fn normalized(base: &Url) -> Url {
         base.set_path(&path);
     }
     base
+}
+
+/// The repository a server names by the clone URL it sent (the API's `clone_url`): the server's
+/// own spelling of owner and name, and the URL `origin` is to be set to.
+///
+/// `asked_host` is the server that was asked. The URL is read like any repository URL (no user
+/// name or password, https or loopback) and **must be on that server**, because that is the only
+/// server the token may go to: a server that names a repository somewhere else is not believed.
+/// Nothing the server sent is echoed back.
+pub fn server_named_repo(clone_url: &str, asked_host: &str) -> Result<RepoRef, NsitError> {
+    let asked = base_url(asked_host)?;
+    let named = parse_repo_ref(clone_url, "", &asked).map_err(|_| {
+        NsitError::Other("the server sent a repository URL that nsit will not use".into())
+    })?;
+    if named.host != normalized(&asked).as_str() {
+        return Err(NsitError::Other(format!(
+            "the server says this repository is at a different address than {}; nsit will not \
+             send your token there",
+            host_key(&asked)
+        )));
+    }
+    Ok(named)
 }
 
 /// The name to create a repository with: the server's rule, and no `.git` at
@@ -238,38 +260,43 @@ fn strip_dot_git(name: &str) -> &str {
 /// name someone else), so the server is asked, once, with `GET /api/v1/user`,
 /// and then `host` receives the token. **`host` must be a server this token
 /// may go to**: use `token_for_repo` to get the token for it first.
+///
+/// The config (`nsit.toml`) is read only for a token nsit stored: with `NSIT_TOKEN` it says
+/// nothing that is used, so an agent whose config directory cannot be found, or whose
+/// `nsit.toml` is damaged, is not stopped by it.
 pub fn signed_in_login(host: &str, source: TokenSource, token: &str) -> Result<String, NsitError> {
-    login_for(source, configured_login(host)?, || {
-        Ok(Api::new(host, Some(token.to_string()))?.user()?.login)
-    })
+    login_for(
+        source,
+        || configured_user(&host_key_for(host)?),
+        || Ok(Api::new(host, Some(token.to_string()))?.user()?.login),
+    )
 }
 
-/// The account the config remembers for `host`, if any.
-fn configured_login(host: &str) -> Result<Option<String>, NsitError> {
-    let key = host_key_for(host)?;
-    let config = Config::load()?;
-    Ok(host_entry(&config, &key)
-        .map(|entry| entry.user.clone())
-        .filter(|user| !user.is_empty()))
-}
-
+/// `configured` is the account the config remembers for the host (looked up only when `source`
+/// is a token nsit stored, never for `NSIT_TOKEN`); `ask` asks the server.
 fn login_for(
     source: TokenSource,
-    configured: Option<String>,
+    configured: impl FnOnce() -> Result<Option<String>, NsitError>,
     ask: impl FnOnce() -> Result<String, NsitError>,
 ) -> Result<String, NsitError> {
-    match (source, configured) {
-        (TokenSource::Keychain | TokenSource::File, Some(user)) => Ok(user),
-        _ => ask(),
+    match source {
+        TokenSource::Env => ask(),
+        TokenSource::Keychain | TokenSource::File => match configured()? {
+            Some(user) => Ok(user),
+            None => ask(),
+        },
     }
 }
 
 /// The token for the server `target` lives on, and where it came from. A
 /// token nsit stored is looked up under that server's own name. `NSIT_TOKEN`
 /// counts only when the repository is on the server selected with `--host` /
-/// `NSIT_HOST` (or the default): a full URL for some other server must not get
-/// a token meant for the one you chose, so an agent cannot be talked into
-/// mailing it elsewhere. Reads local configuration only; no network.
+/// `NSIT_HOST` (or the default): it goes to that host and never to one taken
+/// from a URL, an `origin` or anything a server sent, so a repository URL for
+/// some other server does not get a token meant for the one you chose. (What
+/// this does not do is vouch for the selected host itself: that is what the
+/// person or the agent's environment said.) Reads local configuration only; no
+/// network.
 pub fn token_for_repo(
     selected_host: &str,
     target: &RepoRef,
@@ -647,34 +674,147 @@ mod tests {
         }
     }
 
+    // ---- the repository a server names ---------------------------------------------
+
+    #[test]
+    fn the_servers_clone_url_is_used_when_it_is_the_same_server() {
+        // The server's spelling wins: the asked host can be a base URL (a clone has that) or the
+        // bare name of the selected host (what `nsit init` has).
+        for asked in ["https://git.iam.bot/", "https://git.iam.bot", "GIT.iam.bot"] {
+            let named = server_named_repo("https://git.iam.bot/ada/tools.git", asked)
+                .unwrap_or_else(|e| panic!("{asked}: {e}"));
+            assert_eq!(
+                (named.owner.as_str(), named.name.as_str()),
+                ("ada", "tools")
+            );
+            assert_eq!(
+                named.clone_url.as_str(),
+                "https://git.iam.bot/ada/tools.git"
+            );
+            assert_eq!(named.host, "https://git.iam.bot/");
+        }
+        // A server below a path prefix, and a loopback test server.
+        let named = server_named_repo(
+            "https://example.com/insitio/ada/tools.git",
+            "https://example.com/insitio",
+        )
+        .unwrap();
+        assert_eq!(named.host, "https://example.com/insitio/");
+        let named = server_named_repo(
+            "http://127.0.0.1:3000/ada/tools.git",
+            "http://127.0.0.1:3000",
+        )
+        .unwrap();
+        assert_eq!(named.host_key(), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn a_clone_url_on_another_server_or_with_credentials_is_refused_and_never_echoed() {
+        for url in [
+            "https://evil.example/ada/tools.git",
+            "https://git.iam.bot:8443/ada/tools.git",
+            "http://git.iam.bot/ada/tools.git",
+            "https://ada:ins_stolen_secret@git.iam.bot/ada/tools.git",
+            "https://ins_stolen_secret@git.iam.bot/ada/tools.git",
+            "ssh://git@git.iam.bot/ada/tools.git",
+            "file:///ada/tools.git",
+            "not a url",
+            "",
+        ] {
+            let err = server_named_repo(url, "https://git.iam.bot/").unwrap_err();
+            assert!(matches!(err, NsitError::Other(_)), "{url:?}: {err:?}");
+            assert_eq!(err.exit_code(), 1);
+            assert!(!err.to_string().contains("ins_stolen_secret"), "{err}");
+            assert!(!err.to_string().contains("evil.example"), "{err}");
+            assert!(!err.to_string().contains('\n'), "{err}");
+        }
+        // The different address is said in so many words, naming the server that was asked.
+        let err =
+            server_named_repo("https://evil.example/ada/tools.git", "git.iam.bot").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("different address than git.iam.bot"),
+            "{err}"
+        );
+        // A host nsit would not talk to is the usage error `base_url` makes of it.
+        let err =
+            server_named_repo("https://git.iam.bot/ada/x.git", "http://git.iam.bot").unwrap_err();
+        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+    }
+
     // ---- who the token belongs to ------------------------------------------------
 
     #[test]
     fn tokens_nsit_stored_belong_to_the_account_in_the_config_without_asking() {
         for source in [TokenSource::Keychain, TokenSource::File] {
-            let login = login_for(source, Some("grace".into()), || {
-                panic!("must not ask the server")
-            })
+            let login = login_for(
+                source,
+                || Ok(Some("grace".into())),
+                || panic!("must not ask the server"),
+            )
             .unwrap();
             assert_eq!(login, "grace");
         }
     }
 
     #[test]
-    fn an_environment_token_belongs_to_whoever_the_server_says() {
-        // Even with an account in the config: NSIT_TOKEN may be someone else's.
-        let login = login_for(TokenSource::Env, Some("grace".into()), || Ok("ada".into())).unwrap();
-        assert_eq!(login, "ada");
-        let login = login_for(TokenSource::Env, None, || Ok("ada".into())).unwrap();
+    fn an_environment_token_belongs_to_whoever_the_server_says_and_the_config_is_not_read() {
+        // Even with an account in the config: NSIT_TOKEN may be someone else's. The config is
+        // not even looked at.
+        let login = login_for(
+            TokenSource::Env,
+            || panic!("NSIT_TOKEN does not need the config"),
+            || Ok("ada".into()),
+        )
+        .unwrap();
         assert_eq!(login, "ada");
         // With no config entry to read, a stored token also needs the server.
-        let login = login_for(TokenSource::File, None, || Ok("ada".into())).unwrap();
+        let login = login_for(TokenSource::File, || Ok(None), || Ok("ada".into())).unwrap();
         assert_eq!(login, "ada");
-        let err = login_for(TokenSource::Env, None, || {
-            Err(NsitError::Auth("rejected".into()))
-        })
+        let err = login_for(
+            TokenSource::Env,
+            || Ok(None),
+            || Err(NsitError::Auth("rejected".into())),
+        )
         .unwrap_err();
         assert_eq!(err.exit_code(), 3);
+        // A config that cannot be read stops a stored token (there is no account to use)...
+        let err = login_for(
+            TokenSource::Keychain,
+            || Err(NsitError::Other("nsit.toml is not valid".into())),
+            || panic!("must not ask the server"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not valid"), "{err}");
+    }
+
+    #[test]
+    fn nsit_token_works_with_a_damaged_config_file_or_no_config_directory() {
+        let (server, seen) = serve_once(r#"{"login":"ada","name":"","email":"","is_admin":false}"#);
+        let dir = tempfile::tempdir().unwrap();
+        // `nsit.toml` that is not TOML.
+        std::fs::write(dir.path().join("nsit.toml"), "this is = not [valid toml").unwrap();
+        let _env = isolated_env(dir.path());
+        assert!(Config::load().is_err(), "the config really is damaged");
+
+        let login = signed_in_login(&server, TokenSource::Env, "ins_envtoken").unwrap();
+        assert_eq!(login, "ada");
+        seen.join().unwrap();
+        // The same for a stored token is an error: the account it belongs to is in that file.
+        let err = signed_in_login("http://127.0.0.1:9", TokenSource::File, "ins_t").unwrap_err();
+        assert!(err.to_string().contains("nsit.toml"), "{err}");
+        drop(_env);
+
+        // No usable config directory at all (a relative NSIT_CONFIG_DIR is refused).
+        let (server, seen) = serve_once(r#"{"login":"ada","name":"","email":"","is_admin":false}"#);
+        let _env = isolated_env(dir.path()).set("NSIT_CONFIG_DIR", "not/absolute");
+        assert!(Config::load().is_err());
+        assert_eq!(
+            signed_in_login(&server, TokenSource::Env, "ins_envtoken").unwrap(),
+            "ada"
+        );
+        seen.join().unwrap();
+        assert!(signed_in_login("http://127.0.0.1:9", TokenSource::File, "ins_t").is_err());
     }
 
     #[test]

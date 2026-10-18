@@ -1,11 +1,10 @@
 //! The error type every nsit command returns, and its mapping to exit codes.
 
-use serde::Serialize;
-
 use crate::output::strip_controls;
 
-/// A file the secret guard refused to commit, and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A file the secret guard refused to commit, and why. Only ever shown as text
+/// (`secret_summary`), never as JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretHit {
     pub path: String,
     pub reason: String,
@@ -57,8 +56,8 @@ impl NsitError {
     pub fn exit_code(&self) -> i32 {
         match self {
             NsitError::Usage(_) => 2,
-            // Task 5 maps 401 to `Auth`; this keeps a raw 401 from slipping
-            // through as a general failure.
+            // The API client turns a 401 into `Auth` (with a sign-in hint); an `Api` error
+            // that still carries one keeps the exit code right all the same.
             NsitError::Auth(_) | NsitError::Api { status: 401, .. } => 3,
             // A refused login that reached us as a bare libgit2 error: `run_remote`
             // turns these into `Auth` with a hint, this keeps the exit code right

@@ -241,21 +241,15 @@ pub fn base_url(host: &str) -> Result<Url, NsitError> {
                 .into(),
         ));
     }
-    match url.scheme() {
-        "https" => {}
-        "http" if is_loopback(&url) => {}
-        "http" => {
-            return Err(NsitError::Usage(format!(
+    if !scheme_allowed(&url) {
+        return Err(NsitError::Usage(match url.scheme() {
+            "http" => format!(
                 "refusing to talk to {} over plain http: use https \
                  (http is only allowed for localhost, 127.0.0.1 and [::1])",
                 url.host_str().unwrap_or("that host")
-            )));
-        }
-        other => {
-            return Err(NsitError::Usage(format!(
-                "unsupported scheme {other:?}: the host must be https"
-            )));
-        }
+            ),
+            other => format!("unsupported scheme {other:?}: the host must be https"),
+        }));
     }
     if url.host().is_none() {
         return Err(NsitError::Usage("invalid host: no host name".into()));
@@ -266,6 +260,17 @@ pub fn base_url(host: &str) -> Result<Url, NsitError> {
         url.set_path(&path);
     }
     Ok(url)
+}
+
+/// May nsit talk to a server at `url`? `https`, always; plain `http` only on loopback (a test
+/// server). The one place this is decided: `base_url`, the credentials handed to libgit2 and the
+/// URLs opened in a browser all ask here.
+pub(crate) fn scheme_allowed(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => is_loopback(url),
+        _ => false,
+    }
 }
 
 /// Is this URL's host `localhost`, `127.0.0.1` or `[::1]`?
@@ -646,6 +651,30 @@ mod tests {
         ] {
             let url = base_url(host).unwrap_or_else(|e| panic!("{host} should be allowed: {e}"));
             assert_eq!(url.scheme(), "http", "{host}");
+        }
+    }
+
+    #[test]
+    fn the_scheme_rule_is_one_function_for_every_caller() {
+        let allowed = |text: &str| scheme_allowed(&Url::parse(text).unwrap());
+        for yes in [
+            "https://git.iam.bot/x",
+            "https://localhost/x",
+            "http://127.0.0.1:3000/x",
+            "http://localhost:3000/x",
+            "http://[::1]:3000/x",
+        ] {
+            assert!(allowed(yes), "{yes}");
+        }
+        for no in [
+            "http://git.iam.bot/x",
+            "http://127.0.0.2:3000/x",
+            "http://localhost.evil.example/x",
+            "ssh://git.iam.bot/x",
+            "ftp://127.0.0.1/x",
+            "file:///x",
+        ] {
+            assert!(!allowed(no), "{no}");
         }
     }
 

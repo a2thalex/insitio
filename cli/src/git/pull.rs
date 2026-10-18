@@ -32,8 +32,9 @@
 //! to overwrite what it would really overwrite.
 //!
 //! **Untracked and ignored files that are in the way are never overwritten**, by either kind of
-//! pull: the checkouts are told not to overwrite ignored files (libgit2 would otherwise replace
-//! an ignored file that is in the way of an incoming one), a file that is in the way is refused by
+//! pull: the checkouts start from `checkout::safe_options` (which tells libgit2 not to overwrite
+//! ignored files, as it otherwise would when one is in the way of an incoming one; `nsit switch`
+//! shares the fast-forward's `checkout::checkout_safely`), a file that is in the way is refused by
 //! name before anything changes, and files that are not in the way are not touched.
 //!
 //! **The secret guard does not run on the merge commit `pull` makes.** That commit is made here,
@@ -45,19 +46,18 @@
 //! (`nsit commit`). Nor can a secret slip in unchecked through a *staged* file: a new `.env` that
 //! is staged is an uncommitted change, and a pull that has to merge refuses to start over it.
 
-use std::cell::RefCell;
 use std::path::Path;
-use std::rc::Rc;
 
 use git2::build::CheckoutBuilder;
 use git2::{
-    AnnotatedCommit, AutotagOption, CheckoutNotificationType, Commit, ErrorCode, FetchOptions,
-    MergeAnalysis, MergeOptions, ObjectType, Oid, Repository, Signature, StatusOptions,
+    AnnotatedCommit, AutotagOption, Commit, ErrorCode, FetchOptions, MergeAnalysis, MergeOptions,
+    ObjectType, Oid, Repository, Signature, StatusOptions,
 };
 
 use super::auth::run_remote;
+use super::checkout::{checkout_safely, safe_options};
 use super::orig_head::OrigHead;
-use super::paths::{display, listed, slash};
+use super::paths::{display, listed};
 use super::push::{http_status, plain_failure};
 use super::stage::{conflicted_paths, head_commit};
 use super::upstream::Upstream;
@@ -304,16 +304,17 @@ fn fast_forward(
     // and the branch then moves. Undoing the checkout instead would need a forced checkout of
     // our commit, which would also throw away the unrelated uncommitted edits a fast-forward
     // carries, so it is not done. (A merge has no such corner: it rolls itself back.)
-    let moved = checkout_safely(repo, their_commit, branch).and_then(|()| {
-        repo.reference(
-            &format!("refs/heads/{branch}"),
-            their_commit.id(),
-            true,
-            "pull: Fast-forward",
-        )
-        .map(drop)
-        .map_err(NsitError::from)
-    });
+    let moved = checkout_safely(repo, their_commit, |files| overwrite_error(branch, files))
+        .and_then(|()| {
+            repo.reference(
+                &format!("refs/heads/{branch}"),
+                their_commit.id(),
+                true,
+                "pull: Fast-forward",
+            )
+            .map(drop)
+            .map_err(NsitError::from)
+        });
     if let Err(err) = moved {
         if let Some(orig) = orig {
             orig.restore();
@@ -324,32 +325,6 @@ fn fast_forward(
         branch: branch.to_string(),
         head: their_commit.id(),
     })
-}
-
-/// A safe checkout of `target` (no uncommitted change is replaced, and no ignored file either:
-/// libgit2 would otherwise overwrite an ignored file that is in the way of an incoming one). When
-/// one is in the way, nothing has been written and the error names the files.
-fn checkout_safely(repo: &Repository, target: &Commit<'_>, branch: &str) -> Result<(), NsitError> {
-    let in_the_way = Rc::new(RefCell::new(Vec::<String>::new()));
-    let sink = Rc::clone(&in_the_way);
-    let mut options = CheckoutBuilder::new();
-    options
-        .safe()
-        .overwrite_ignored(false)
-        .notify_on(CheckoutNotificationType::CONFLICT)
-        .notify(move |_, path, _, _, _| {
-            if let Some(path) = path {
-                sink.borrow_mut().push(slash(path));
-            }
-            true
-        });
-    match repo.checkout_tree(target.as_object(), Some(&mut options)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.code() == ErrorCode::Conflict => {
-            Err(overwrite_error(branch, &in_the_way.borrow()))
-        }
-        Err(e) => Err(e.into()),
-    }
 }
 
 /// "Pulling would overwrite ...", with the files named (or without them, when nothing says which).
@@ -410,10 +385,8 @@ fn merge(
     // conflict test shows, so a file in the way fails the whole merge before anything is written.
     // An ignored file in the way is not overwritten either (`overwrite_ignored(false)`; libgit2's
     // own pre-check of the merge looks at untracked files but not at ignored ones).
-    let mut checkout = CheckoutBuilder::new();
+    let mut checkout = safe_options();
     checkout
-        .safe()
-        .overwrite_ignored(false)
         .conflict_style_merge(true)
         .their_label(theirs.label);
     let mut options = MergeOptions::new();

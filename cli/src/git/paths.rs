@@ -36,6 +36,44 @@ pub fn display(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
 
+/// The name of the directory `dir`: the last part of its real path (so `.` and `-C ..` give the
+/// directory's own name), or of `dir` as it is when it cannot be resolved. `None` when there is
+/// no last part (a file system root).
+pub fn directory_name(dir: &Path) -> Option<String> {
+    let real = dir.canonicalize().ok();
+    let real = real.as_deref().unwrap_or(dir);
+    real.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// Where the raw repository path `raw` is under the working directory `root`, or `None` for a
+/// name this system cannot have as a file (not valid Unicode where file names must be).
+pub fn in_workdir(root: &Path, raw: &[u8]) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(root.join(std::ffi::OsStr::from_bytes(raw)))
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(raw).ok().map(|name| root.join(name))
+    }
+}
+
+/// A file's name as the bytes the index would store for it (invalid Unicode is replaced on
+/// systems where names are not bytes, so such a name matches nothing).
+pub fn raw_name(name: &std::ffi::OsStr) -> RawPath {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        name.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        name.to_string_lossy().as_bytes().to_vec()
+    }
+}
+
 /// The most file names an error line lists.
 const MAX_LISTED: usize = 10;
 
@@ -161,6 +199,28 @@ mod tests {
         assert_eq!(listed(&[]), "");
         let ten: Vec<String> = (0..10).map(|n| n.to_string()).collect();
         assert!(!listed(&ten).contains("more"));
+    }
+
+    #[test]
+    fn a_directory_is_named_by_its_real_path() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("Vidéo Ink - OG Edition");
+        std::fs::create_dir(&dir).unwrap();
+        assert_eq!(
+            directory_name(&dir).as_deref(),
+            Some("Vidéo Ink - OG Edition")
+        );
+        // Spelled with `..` (or `.`), it is still the directory's own name.
+        let roundabout = dir.join("..").join("Vidéo Ink - OG Edition").join(".");
+        assert_eq!(
+            directory_name(&roundabout).as_deref(),
+            Some("Vidéo Ink - OG Edition")
+        );
+        // A path that is not there is named as written.
+        assert_eq!(
+            directory_name(&parent.path().join("missing")).as_deref(),
+            Some("missing")
+        );
     }
 
     #[test]

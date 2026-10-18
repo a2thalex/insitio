@@ -24,6 +24,7 @@
 
 pub mod abort;
 pub mod auth;
+pub mod checkout;
 pub mod commit;
 pub mod orig_head;
 pub mod origin;
@@ -39,6 +40,7 @@ pub mod upstream;
 // What the git commands import from `crate::git`. `run_remote` is the only
 // way onto the network: its credential step stays private to `auth`.
 pub use auth::run_remote;
+pub use auth::set_network_timeouts;
 pub use auth::RemoteAccess;
 
 use std::path::Path;

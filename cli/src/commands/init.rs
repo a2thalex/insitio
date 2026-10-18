@@ -9,8 +9,10 @@
 //!   unless `--public`) and `origin` is set to its plain clone URL: never a URL
 //!   with a user name or token in it. Sign-in and the name are checked before
 //!   anything is created, so a mistake there leaves nothing behind.
-//! * `--readme` writes a starter README.md and commits just that file (not
-//!   whatever else the directory holds) as the first commit.
+//! * `--readme` writes a starter README.md and commits just that file as the
+//!   first commit: not whatever else the directory holds, and not what else is
+//!   staged in a repository that was already there (that stays staged, as it
+//!   was). The secret guard reads the README like any commit's files.
 //! * With a remote and at least one commit (`--readme` makes one) the current
 //!   branch is pushed, as `nsit push` would, so the repository is complete on
 //!   Insitio when init is done. With no commit yet there is nothing to push, and
@@ -36,15 +38,16 @@ use super::commit_signature;
 use super::repo::signed_in;
 use crate::api::Api;
 use crate::cli::{GlobalArgs, InitArgs};
-use crate::config::{base_url, resolve_host};
+use crate::config::resolve_host;
 use crate::error::NsitError;
 use crate::git::commit::{commit_changes, Outcome, Request, Staging};
 use crate::git::origin::origin_on;
+use crate::git::paths::directory_name;
 use crate::git::push::{push_branch, Mode};
 use crate::git::readme::{description_of, write_readme, Written, README};
-use crate::git::stage::{current_branch, head_commit, stage_paths};
+use crate::git::stage::{current_branch, head_commit};
 use crate::output::{for_display, Out};
-use crate::repo_ref::{parse_repo_ref, validate_repo_name, RepoRef};
+use crate::repo_ref::{server_named_repo, validate_repo_name, RepoRef};
 
 /// The branch a new repository starts on.
 const INITIAL_BRANCH: &str = "main";
@@ -281,12 +284,6 @@ fn plan(args: &InitArgs, base: &Path) -> Result<Plan, NsitError> {
     }
 }
 
-/// The last part of `dir`'s real path (`-C ..` and `.` resolved).
-fn directory_name(dir: &Path) -> Option<String> {
-    let real = dir.canonicalize().ok()?;
-    Some(real.file_name()?.to_string_lossy().into_owned())
-}
-
 /// The repository that is exactly in `dir`, or a new one there with branch
 /// `main`. The second value says whether it was made now. (This looks only at
 /// `dir`, not at the directories above it: a project inside another
@@ -335,10 +332,9 @@ fn wire_remote(
     }
     let made = api.create_repo(name, None, !public)?;
     // The server's answer is checked like any repository URL: no user name or
-    // token in it, https (or loopback). `origin` gets the cleaned form.
-    let target = parse_repo_ref(&made.clone_url, "", &base_url(host)?).map_err(|_| {
-        NsitError::Other("the server sent a repository URL that nsit will not use".into())
-    })?;
+    // token in it, https (or loopback), and on the server that was asked (as in
+    // `nsit clone`). `origin` gets the cleaned form.
+    let target = server_named_repo(&made.clone_url, host)?;
     repo.remote("origin", target.clone_url.as_str())?;
     Ok(Wired {
         json: RemoteJson {
@@ -369,8 +365,8 @@ fn first_readme_commit(
         return Ok((wrote, None));
     }
     let first = head_commit(repo)?.is_none();
-    let mut index = repo.index()?;
-    stage_paths(repo, &mut index, &[README.to_string()])?;
+    // Just the README: whatever else is staged in an existing repository is not part of this
+    // commit and stays staged, and the guard looks at what the commit holds.
     let request = Request {
         message: if first {
             "Initial commit\n"
@@ -378,7 +374,7 @@ fn first_readme_commit(
             "Add README\n"
         }
         .to_string(),
-        staging: Staging::AsStaged,
+        staging: Staging::Only(&[README]),
         allow_secret: Vec::new(),
     };
     match commit_changes(repo, who, &request)? {
@@ -481,6 +477,8 @@ fn describe(json: &InitJson, readme_asked: bool, tty: bool) -> String {
 mod tests {
     use super::*;
     use crate::cli::InitArgs;
+    use crate::config::base_url;
+    use crate::repo_ref::parse_repo_ref;
     use crate::test_support::{isolated_env, local_repo, out_with, StubServer};
 
     fn args(name: Option<&str>, remote: bool, readme: bool, public: bool) -> InitArgs {
@@ -622,24 +620,35 @@ mod tests {
         })
     }
 
+    /// A server that answers a create with a repository that is on itself (the way Insitio
+    /// does: its own base URL, then `path`).
+    fn answering_with_its_own_url(path: &'static str) -> StubServer {
+        let own = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let asked = std::sync::Arc::clone(&own);
+        let server = StubServer::start(move |_| {
+            let body = created_json(&format!("{}{path}", asked.lock().unwrap()));
+            format!(
+                "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        });
+        *own.lock().unwrap() = server.host();
+        server
+    }
+
     #[test]
     fn creating_the_remote_sets_origin_to_the_plain_clone_url() {
         let dir = tempfile::tempdir().unwrap();
         let repo = local_repo(dir.path());
-        let server = answering(created_json("https://git.example.invalid/ada/demo.git"));
+        let server = answering_with_its_own_url("/ada/demo.git");
+        let own_url = format!("{}/ada/demo.git", server.host());
         let api = Api::new(&server.host(), Some("ins_test_token_value".into())).unwrap();
         let wired = wire_remote(&repo, &api, &server.host(), "demo", false).unwrap();
         assert!(wired.json.created);
         assert_eq!(wired.json.private, Some(true));
-        assert_eq!(
-            wired.json.clone_url,
-            "https://git.example.invalid/ada/demo.git"
-        );
+        assert_eq!(wired.json.clone_url, own_url);
         let origin = repo.find_remote("origin").unwrap();
-        assert_eq!(
-            origin.url().unwrap(),
-            "https://git.example.invalid/ada/demo.git"
-        );
+        assert_eq!(origin.url().unwrap(), own_url);
         assert_eq!(
             origin.fetch_refspecs().unwrap().get(0).unwrap(),
             Some("+refs/heads/*:refs/remotes/origin/*")
@@ -837,6 +846,23 @@ mod tests {
         assert!(repo.find_remote("origin").is_err());
     }
 
+    #[test]
+    fn a_clone_url_on_another_server_is_refused_like_clone_does_and_origin_is_not_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        // The server that was asked answers with a repository that is somewhere else.
+        let server = answering(created_json("https://elsewhere.example/ada/demo.git"));
+        let api = Api::new(&server.host(), Some("ins_test_token_value".into())).unwrap();
+        let err = match wire_remote(&repo, &api, &server.host(), "demo", false) {
+            Err(err) => err,
+            Ok(_) => panic!("a repository on another server must not become origin"),
+        };
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+        assert!(err.to_string().contains("different address"), "{err}");
+        assert!(!err.to_string().contains("elsewhere.example"), "{err}");
+        assert!(repo.find_remote("origin").is_err());
+    }
+
     // ---- the README commit ---------------------------------------------------------
 
     #[test]
@@ -855,6 +881,114 @@ mod tests {
             tree.get_name("other.txt").is_none(),
             "only README.md is committed"
         );
+    }
+
+    /// Stage `name` with `content` (writing the file), without committing.
+    fn stage_file(repo: &Repository, name: &str, content: &str) {
+        std::fs::write(repo.workdir().unwrap().join(name), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(name)).unwrap();
+        index.write().unwrap();
+    }
+
+    #[test]
+    fn only_the_readme_is_committed_and_what_else_is_staged_stays_staged() {
+        // In a repository that has commits (a changed file, a new one) and in one that has none.
+        for existing in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = local_repo(dir.path());
+            if existing {
+                crate::test_support::commit_file(&repo, "a.txt", "committed\n");
+                stage_file(&repo, "a.txt", "changed and staged\n");
+            }
+            stage_file(&repo, "staged.txt", "new and staged\n");
+            let staged_before = crate::test_support::index_on_disk(&repo);
+
+            let (wrote, commit) = first_readme_commit(&repo, None, "git.iam.bot", &me()).unwrap();
+            assert!(wrote, "existing={existing}");
+            let made = repo.find_commit(commit.expect("a commit")).unwrap();
+            assert_eq!(made.parent_count(), usize::from(existing));
+
+            // The commit has the README and what was committed before: nothing that was staged.
+            let tree = made.tree().unwrap();
+            assert!(tree.get_name(README).is_some(), "existing={existing}");
+            assert!(
+                tree.get_name("staged.txt").is_none(),
+                "existing={existing}: a staged file went into the README commit"
+            );
+            if existing {
+                let a = repo
+                    .find_blob(tree.get_name("a.txt").unwrap().id())
+                    .unwrap();
+                assert_eq!(a.content(), b"committed\n", "a staged change went in");
+            }
+
+            // What was staged still is: the same entries, and the README is now committed.
+            let mut index = repo.index().unwrap();
+            index.read(true).unwrap();
+            let staged_after = crate::test_support::index_on_disk(&repo);
+            for entry in &staged_before {
+                assert!(
+                    staged_after.contains(entry),
+                    "existing={existing}: {entry:?}"
+                );
+            }
+            assert!(staged_after.iter().any(|(path, _, _)| path == README));
+            let status = repo.statuses(None).unwrap();
+            let state_of = |path: &str| {
+                status
+                    .iter()
+                    .find(|entry| entry.path_bytes() == path.as_bytes())
+                    .map(|entry| entry.status())
+            };
+            assert_eq!(
+                state_of("staged.txt"),
+                Some(git2::Status::INDEX_NEW),
+                "existing={existing}"
+            );
+            if existing {
+                assert_eq!(state_of("a.txt"), Some(git2::Status::INDEX_MODIFIED));
+            }
+            assert_eq!(state_of(README), None, "the README is committed and clean");
+        }
+    }
+
+    #[test]
+    fn the_secret_guard_still_reads_the_readme_and_a_refusal_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        crate::test_support::commit_file(&repo, "a.txt", "committed\n");
+        stage_file(&repo, "staged.txt", "new and staged\n");
+        let key = "# notes\n-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+        std::fs::write(dir.path().join(README), key).unwrap();
+        let (head, index) = (
+            repo.head().unwrap().target(),
+            crate::test_support::index_on_disk(&repo),
+        );
+
+        let err = first_readme_commit(&repo, None, "git.iam.bot", &me()).unwrap_err();
+        assert!(matches!(err, NsitError::SecretGuard(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 5);
+        assert!(err.to_string().contains(README), "{err}");
+        assert_eq!(repo.head().unwrap().target(), head, "nothing was committed");
+        assert_eq!(crate::test_support::index_on_disk(&repo), index);
+    }
+
+    #[test]
+    fn a_merge_in_progress_is_not_finished_by_a_commit_of_the_readme() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        crate::test_support::commit_file(&repo, "a.txt", "committed\n");
+        std::fs::write(
+            repo.path().join("MERGE_HEAD"),
+            format!("{}\n", repo.head().unwrap().target().unwrap()),
+        )
+        .unwrap();
+        let tip = repo.head().unwrap().target();
+        let err = first_readme_commit(&repo, None, "git.iam.bot", &me()).unwrap_err();
+        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+        assert!(err.to_string().contains("merge"), "{err}");
+        assert_eq!(repo.head().unwrap().target(), tip);
     }
 
     #[test]

@@ -1,26 +1,29 @@
 //! `nsit switch <branch> [-c]`: move to another branch, or make one first.
 //!
-//! The checkout is *safe*: it never replaces a change that is not committed.
+//! The checkout is *safe* (`git::checkout`, the same one `nsit pull` uses): it never
+//! replaces a change that is not committed, nor a file that is untracked or ignored.
 //! If the move would overwrite one (an edited file that differs on the other
-//! branch, an untracked file in the way of a tracked one), nothing is touched,
-//! `HEAD` stays where it is and the command fails (exit 1) naming the files.
+//! branch, an untracked or ignored file in the way of a tracked one), nothing is
+//! touched, `HEAD` stays where it is and the command fails (exit 1) naming the files.
 //! Changes the two branches agree on are carried over, as git does.
+//!
+//! While a merge (or any other operation) is in progress nothing is switched: that is a
+//! usage error, exit 2, as it is for `nsit pull`.
 //!
 //! `--json`: `{branch, created, sha}`.
 
-use std::cell::RefCell;
 use std::path::Path;
-use std::rc::Rc;
 
-use git2::build::CheckoutBuilder;
-use git2::{CheckoutNotificationType, Commit, ErrorCode, Repository, RepositoryState};
+use git2::{Repository, RepositoryState};
 use serde::Serialize;
 
 use super::branch::{check_name, create as create_branch, find_local};
 use crate::cli::{GlobalArgs, SwitchArgs};
 use crate::error::NsitError;
+use crate::git::abort::operation_name;
+use crate::git::checkout::checkout_safely;
 use crate::git::open_repo;
-use crate::git::paths::slash;
+use crate::git::paths::listed;
 use crate::git::stage::{current_branch, head_commit};
 use crate::output::{for_display, strip_controls, Out};
 
@@ -61,12 +64,24 @@ fn describe(done: &Switched, tty: bool) -> String {
 
 /// Make `name` the current branch, creating it from `HEAD` first with `create`.
 pub fn switch(repo: &Repository, name: &str, create: bool) -> Result<Switched, NsitError> {
-    if repo.state() != RepositoryState::Clean {
-        return Err(NsitError::Other(
-            "a merge is in progress: finish it with nsit commit, or abandon it with \
-             nsit pull --abort, before switching branches"
-                .into(),
-        ));
+    // A usage error (exit 2), as for `nsit pull` in the same state: nothing was asked wrongly of
+    // the repository, the person has to finish what is under way first.
+    match repo.state() {
+        RepositoryState::Clean => {}
+        RepositoryState::Merge => {
+            return Err(NsitError::Usage(
+                "a merge is in progress: finish it with nsit commit, or abandon it with \
+                 nsit pull --abort, before switching branches"
+                    .into(),
+            ));
+        }
+        other => {
+            return Err(NsitError::Usage(format!(
+                "the repository is in the middle of {}: finish or abort that before switching \
+                 branches",
+                operation_name(other)
+            )));
+        }
     }
     if create {
         return switch_to_new(repo, name);
@@ -86,7 +101,7 @@ pub fn switch(repo: &Repository, name: &str, create: bool) -> Result<Switched, N
             already_there: true,
         });
     }
-    checkout_safely(repo, &target, name)?;
+    checkout_safely(repo, &target, |files| overwrite_error(name, files))?;
     repo.set_head(&format!("refs/heads/{name}"))?;
     Ok(Switched {
         branch: name.to_string(),
@@ -125,40 +140,21 @@ fn switch_to_new(repo: &Repository, name: &str) -> Result<Switched, NsitError> {
     })
 }
 
-/// Check out `target` without losing any uncommitted change. On a conflict
-/// nothing has been written and the error names the files in the way.
-fn checkout_safely(repo: &Repository, target: &Commit<'_>, name: &str) -> Result<(), NsitError> {
-    let in_the_way = Rc::new(RefCell::new(Vec::<String>::new()));
-    let sink = Rc::clone(&in_the_way);
-    let mut options = CheckoutBuilder::new();
-    options
-        .safe()
-        .notify_on(CheckoutNotificationType::CONFLICT)
-        .notify(move |_, path, _, _, _| {
-            if let Some(path) = path {
-                sink.borrow_mut().push(slash(path));
-            }
-            true
-        });
-    match repo.checkout_tree(target.as_object(), Some(&mut options)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.code() == ErrorCode::Conflict => {
-            let files = in_the_way.borrow();
-            let files: Vec<String> = files.iter().map(|f| strip_controls(f)).collect();
-            Err(NsitError::Other(if files.is_empty() {
-                format!(
-                    "cannot switch to {name}: it would overwrite changes that are not committed"
-                )
-            } else {
-                format!(
-                    "cannot switch to {name}: it would overwrite changes that are not committed \
-                     in {}; commit them first",
-                    files.join(", ")
-                )
-            }))
-        }
-        Err(e) => Err(e.into()),
-    }
+/// "Cannot switch to ...", with the files in the way named (or without them, when libgit2 does
+/// not say which). The checkout itself is `git::checkout::checkout_safely`, the one `pull` uses.
+fn overwrite_error(name: &str, files: &[String]) -> NsitError {
+    let name = strip_controls(name);
+    NsitError::Other(if files.is_empty() {
+        format!(
+            "cannot switch to {name}: it would overwrite local changes; commit or move them first"
+        )
+    } else {
+        format!(
+            "cannot switch to {name}: it would overwrite local changes in {}; commit or move \
+             them first",
+            listed(files)
+        )
+    })
 }
 
 #[cfg(test)]
@@ -381,8 +377,86 @@ mod tests {
         assert_eq!(repo.state(), RepositoryState::Merge);
         let err = switch(&repo, "feature", false).unwrap_err();
         assert!(err.to_string().contains("merge is in progress"), "{err}");
-        assert!(switch(&repo, "x", true).is_err());
+        // A usage error, as it is for `nsit pull` in the same state.
+        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 2);
+        let err = switch(&repo, "x", true).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
         assert_eq!(on(&repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn another_operation_in_progress_is_named_for_what_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = two_branches(dir.path());
+        std::fs::write(
+            repo.path().join("CHERRY_PICK_HEAD"),
+            format!("{}\n", repo.head().unwrap().target().unwrap()),
+        )
+        .unwrap();
+        let err = switch(&repo, "feature", false).unwrap_err();
+        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 2);
+        let text = err.to_string();
+        assert!(text.contains("a cherry-pick"), "{text}");
+        assert!(!text.contains("merge is in progress"), "{text}");
+        assert_eq!(on(&repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn an_ignored_file_in_the_way_of_a_tracked_one_stops_the_switch_and_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = two_branches(dir.path());
+        // Hidden from git the way a person does it locally, and made by hand: a build output or
+        // a settings file. `feature` has a tracked file of that name.
+        let info = repo.path().join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("exclude"), "only-feature.txt\n").unwrap();
+        assert!(repo
+            .status_should_ignore(Path::new("only-feature.txt"))
+            .unwrap());
+        write(dir.path(), "only-feature.txt", "my local settings\n");
+
+        let err = switch(&repo, "feature", false).unwrap_err();
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+        assert!(err.to_string().contains("only-feature.txt"), "{err}");
+        assert_eq!(
+            read(dir.path(), "only-feature.txt"),
+            "my local settings\n",
+            "the ignored file was not overwritten"
+        );
+        assert_eq!(read(dir.path(), "f.txt"), "main\n", "nothing was written");
+        assert_eq!(on(&repo).as_deref(), Some("main"));
+
+        // Moved out of the way, the switch goes through.
+        std::fs::remove_file(dir.path().join("only-feature.txt")).unwrap();
+        switch(&repo, "feature", false).unwrap();
+        assert_eq!(read(dir.path(), "only-feature.txt"), "x\n");
+    }
+
+    #[test]
+    fn a_long_list_of_files_in_the_way_is_cut_like_pulls() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        commit_file(&repo, "f.txt", "main\n");
+        switch(&repo, "topic", true).unwrap();
+        for n in 0..12 {
+            commit_file(&repo, &format!("n{n:02}.txt"), "theirs\n");
+        }
+        switch(&repo, "main", false).unwrap();
+        for n in 0..12 {
+            write(dir.path(), &format!("n{n:02}.txt"), "mine\n");
+        }
+        let err = switch(&repo, "topic", false).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("n00.txt") && text.contains("n09.txt"),
+            "{text}"
+        );
+        assert!(!text.contains("n10.txt"), "{text}");
+        assert!(text.contains("and 2 more"), "{text}");
+        assert!(!text.contains('\n'), "{text:?}");
+        assert_eq!(read(dir.path(), "n05.txt"), "mine\n");
     }
 
     #[test]

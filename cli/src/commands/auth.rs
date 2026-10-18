@@ -20,7 +20,7 @@ use url::Url;
 
 use crate::api::{Api, DeviceCodeJson, DevicePoll, UserJson};
 use crate::cli::{AuthArgs, AuthCommand, GlobalArgs, LoginArgs};
-use crate::config::{config_dir, is_loopback, resolve_host, Config, HostConfig};
+use crate::config::{config_dir, resolve_host, scheme_allowed, Config, HostConfig};
 use crate::credentials::{
     delete_token, host_entry, host_key_for, store_token, token_for, TokenSource, TOKEN_ENV,
     TOKEN_FILE,
@@ -76,16 +76,16 @@ fn sign_in(host: &str, args: &LoginArgs, out: &Out) -> Result<(), NsitError> {
     };
     let source = save_login(host, &key, &user, &token)?;
     if source == TokenSource::File {
-        warn(&format!(
-            "no OS credential store is available here, so the token was saved to an \
+        out.warn(&format!(
+            "warning: no OS credential store is available here, so the token was saved to an \
              owner-only file: {}",
             config_dir()?.join(TOKEN_FILE).display()
         ));
     }
     if env_token_is_set() {
-        warn(&format!(
-            "{TOKEN_ENV} is set, so nsit keeps using it instead of the token just saved; \
-             unset it to use the saved one"
+        out.warn(&format!(
+            "warning: {TOKEN_ENV} is set, so nsit keeps using it instead of the token just \
+             saved; unset it to use the saved one"
         ));
     }
     let account = Account {
@@ -170,13 +170,8 @@ fn open_browser(uri: &str, out: &Out) {
 /// made-up scheme that would start a program is never opened.
 fn openable(uri: &str) -> Option<Url> {
     let url = Url::parse(uri).ok()?;
-    let scheme_ok = match url.scheme() {
-        "https" => true,
-        "http" => is_loopback(&url),
-        _ => false,
-    };
     let plain = url.host().is_some() && url.username().is_empty() && url.password().is_none();
-    (scheme_ok && plain).then_some(url)
+    (scheme_allowed(&url) && plain).then_some(url)
 }
 
 /// Wait for the user to approve the one-time code, polling every `interval`.
@@ -555,12 +550,6 @@ fn env_token_is_set() -> bool {
 /// A line on stderr. A closed stderr must not turn into a panic.
 fn say(line: &str) {
     let _ = writeln!(io::stderr(), "{line}");
-}
-
-/// A warning on stderr: something worth knowing that did not stop the command.
-/// Not hidden by `-q`, which is for progress and hints.
-fn warn(msg: &str) {
-    say(&format!("nsit: warning: {msg}"));
 }
 
 #[cfg(test)]

@@ -37,13 +37,13 @@ use serde::Serialize;
 use super::repo::{named_repo, not_found};
 use crate::api::{Api, RepoJson};
 use crate::cli::{CloneArgs, GlobalArgs};
-use crate::config::{base_url, resolve_host};
+use crate::config::resolve_host;
 use crate::error::NsitError;
 use crate::git::run_remote;
 use crate::git::stage::{current_branch, head_commit};
 use crate::git::upstream::{clear_upstream, set_upstream};
 use crate::output::{for_display, strip_controls, Out};
-use crate::repo_ref::{parse_repo_ref, token_for_repo, RepoRef};
+use crate::repo_ref::{server_named_repo, token_for_repo, RepoRef};
 
 /// The branch to use when the server names one that is not a branch name.
 const FALLBACK_BRANCH: &str = "main";
@@ -87,20 +87,19 @@ pub fn run(args: &CloneArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Res
     let repo = Api::new(&typed.host, Some(token))?
         .repo(&typed.owner, &typed.name)
         .map_err(not_found)?;
-    let target = server_ref(&repo, &typed)?;
+    // The repository as the server names it (its own spelling of owner and name, and the URL
+    // `origin` is set to), which must be on the server that was asked.
+    let target = server_named_repo(&repo.clone_url, &typed.host)?;
     let dest = Destination::check(destination(base, &target.name, args.directory.as_deref())?)?;
     let branch = default_branch(&repo);
 
-    match clone_repo(&target, &host, &branch, out, &dest)? {
-        Head::CheckedOut => {}
-        Head::Empty => {
-            out.info("The repository is empty: add files, run nsit commit, then nsit push.")
-        }
-        Head::Missing => out.info(&format!(
-            "warning: the default branch {} is not on the server, so nothing was checked out",
-            strip_controls(&branch)
-        )),
-    }
+    let head = clone_repo(&target, &host, &branch, out, &dest)?;
+    note_head(
+        head,
+        &branch,
+        |note| out.info(note),
+        |warning| out.warn(warning),
+    );
     let json = CloneJson {
         owner: target.owner,
         name: target.name,
@@ -108,6 +107,20 @@ pub fn run(args: &CloneArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Res
         default_branch: branch,
     };
     out.data(&json, |json| describe(json, out.tty))
+}
+
+/// What to tell the person about where `HEAD` ended up, when it is not the ordinary case. An empty
+/// repository is a hint (`info`, which `-q` silences); a default branch the server does not have
+/// means nothing was checked out, which they must hear whatever they asked for (`warn`).
+fn note_head(head: Head, branch: &str, info: impl FnOnce(&str), warn: impl FnOnce(&str)) {
+    match head {
+        Head::CheckedOut => {}
+        Head::Empty => info("The repository is empty: add files, run nsit commit, then nsit push."),
+        Head::Missing => warn(&format!(
+            "warning: the default branch {} is not on the server, so nothing was checked out",
+            strip_controls(branch)
+        )),
+    }
 }
 
 /// The directory to clone into: `dir` as typed, or the repository's `name`,
@@ -181,26 +194,6 @@ impl Destination {
             other => other,
         }
     }
-}
-
-/// The repository as the server names it, from its clone URL: the server's own
-/// spelling of owner and name, and the URL `origin` is set to.
-///
-/// The URL is read like any repository URL (no user name or password, https or
-/// loopback) and must be on the server that was asked, because that is the only
-/// server the token may go to. Nothing the server sent is echoed back.
-fn server_ref(repo: &RepoJson, typed: &RepoRef) -> Result<RepoRef, NsitError> {
-    let named = parse_repo_ref(&repo.clone_url, "", &base_url(&typed.host)?).map_err(|_| {
-        NsitError::Other("the server sent a repository URL that nsit will not use".into())
-    })?;
-    if named.host != typed.host {
-        return Err(NsitError::Other(format!(
-            "the server says this repository is at a different address than {}; nsit will not \
-             send your token there",
-            typed.host_key()
-        )));
-    }
-    Ok(named)
 }
 
 /// The server's default branch, or `main` if it is not a usable branch name.
@@ -524,49 +517,52 @@ mod tests {
         }
     }
 
-    fn typed(input: &str) -> RepoRef {
-        parse_repo_ref(input, "ada", &Url::parse("https://git.iam.bot/").unwrap()).unwrap()
-    }
-
     #[test]
-    fn the_servers_clone_url_is_used_when_it_is_the_same_server() {
-        // The server's spelling wins: here the case the user typed differs.
-        let named = server_ref(
-            &repo_json("https://git.iam.bot/ada/tools.git", "main"),
-            &typed("Ada/TOOLS"),
+    fn the_clone_url_the_server_sends_is_checked_by_the_shared_helper() {
+        // (The rules themselves are tested with `server_named_repo`.) Here: a clone of a
+        // repository typed in another spelling gets the server's own.
+        let typed = parse_repo_ref(
+            "Ada/TOOLS",
+            "ada",
+            &Url::parse("https://git.iam.bot/").unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            (named.owner.as_str(), named.name.as_str()),
-            ("ada", "tools")
-        );
+        let json = repo_json("https://git.iam.bot/ada/tools.git", "main");
+        let named = server_named_repo(&json.clone_url, &typed.host).unwrap();
         assert_eq!(
             named.clone_url.as_str(),
             "https://git.iam.bot/ada/tools.git"
         );
-        assert_eq!(named.host, "https://git.iam.bot/");
+        let other = repo_json("https://evil.example/ada/tools.git", "main");
+        assert!(server_named_repo(&other.clone_url, &typed.host).is_err());
     }
 
     #[test]
-    fn a_clone_url_on_another_server_or_with_credentials_is_refused_and_never_echoed() {
-        for url in [
-            "https://evil.example/ada/tools.git",
-            "https://git.iam.bot:8443/ada/tools.git",
-            "http://git.iam.bot/ada/tools.git",
-            "https://ada:ins_stolen_secret@git.iam.bot/ada/tools.git",
-            "https://ins_stolen_secret@git.iam.bot/ada/tools.git",
-            "ssh://git@git.iam.bot/ada/tools.git",
-            "file:///ada/tools.git",
-            "not a url",
-            "",
-        ] {
-            let err = server_ref(&repo_json(url, "main"), &typed("ada/tools")).unwrap_err();
-            assert!(matches!(err, NsitError::Other(_)), "{url:?}: {err:?}");
-            assert_eq!(err.exit_code(), 1);
-            assert!(!err.to_string().contains("ins_stolen_secret"), "{err}");
-            assert!(!err.to_string().contains("evil.example"), "{err}");
-            assert!(!err.to_string().contains('\n'), "{err}");
-        }
+    fn a_missing_default_branch_is_a_warning_that_q_does_not_hide_and_an_empty_repo_is_a_hint() {
+        use std::cell::RefCell;
+        let (notes, warnings) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
+        let say = |head| {
+            notes.borrow_mut().clear();
+            warnings.borrow_mut().clear();
+            note_head(
+                head,
+                "dev\u{1b}[31m",
+                |note| notes.borrow_mut().push(note.to_string()),
+                |warning| warnings.borrow_mut().push(warning.to_string()),
+            );
+        };
+        say(Head::Missing);
+        assert!(notes.borrow().is_empty(), "{:?}", notes.borrow());
+        assert_eq!(
+            warnings.borrow().as_slice(),
+            ["warning: the default branch dev[31m is not on the server, so nothing was checked out"]
+        );
+        say(Head::Empty);
+        assert!(warnings.borrow().is_empty());
+        assert_eq!(notes.borrow().len(), 1);
+        assert!(notes.borrow()[0].contains("The repository is empty"));
+        say(Head::CheckedOut);
+        assert!(notes.borrow().is_empty() && warnings.borrow().is_empty());
     }
 
     #[test]

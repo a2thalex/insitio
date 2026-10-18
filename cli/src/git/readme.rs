@@ -12,7 +12,7 @@ use std::path::Path;
 
 use git2::Repository;
 
-use super::paths::workdir;
+use super::paths::{directory_name, workdir};
 use crate::api::Api;
 use crate::error::{one_line, NsitError};
 use crate::repo_ref::{token_for_repo, RepoRef};
@@ -42,7 +42,7 @@ pub fn write_readme(
     }
     let title = match origin {
         Some(target) => target.name.clone(),
-        None => directory_name(root),
+        None => directory_name(root).unwrap_or_else(|| "project".to_string()),
     };
     let text = readme_text(&title, description, origin.map(|t| (&*t.owner, &*t.name)));
     let created = OpenOptions::new()
@@ -72,16 +72,6 @@ fn has_readme(root: &Path) -> Result<bool, NsitError> {
         }
     }
     Ok(false)
-}
-
-fn directory_name(root: &Path) -> String {
-    root.canonicalize()
-        .ok()
-        .as_deref()
-        .unwrap_or(root)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string())
 }
 
 /// The starter text. `repo` is `(owner, name)` when it is known; the clone
