@@ -26,6 +26,8 @@ jaq-std = "3.0"
 keyring = "4.2"
 # Opens the approval page in the browser, on a terminal only.
 open = "5"
+# The secret guard's content patterns (linear-time, so a hostile file cannot stall a commit).
+regex = "1.13"
 # rustls only (no OpenSSL / native-tls). 30 s timeouts are set on the client.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "http2", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }

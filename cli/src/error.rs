@@ -18,15 +18,12 @@ pub enum NsitError {
     #[error("{0}")]
     Auth(String),
     /// A merge stopped on conflicts in these paths (exit 4).
-    // The git commands construct the next three; the allows go away with them.
-    #[allow(dead_code)]
     #[error("{}", conflict_summary(.0))]
     Conflict(Vec<String>),
     /// The secret guard blocked a commit (exit 5).
-    #[allow(dead_code)]
     #[error("{}", secret_summary(.0))]
     SecretGuard(Vec<SecretHit>),
-    /// The server rejected a push (exit 6).
+    /// The server rejected a push (exit 6). First built by `nsit push`.
     #[allow(dead_code)]
     #[error("{0}")]
     Rejected(String),
@@ -90,16 +87,30 @@ fn conflict_summary(paths: &[String]) -> String {
     if paths.is_empty() {
         "merge conflict".to_string()
     } else {
-        format!("merge conflict in {}", paths.join(", "))
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.chars().filter(|c| !c.is_control()).collect())
+            .collect();
+        format!("merge conflict in {}", names.join(", "))
     }
 }
 
+/// Every refused path with its reason, and the way past the guard. File names
+/// come from the working directory, so control characters (terminal escapes
+/// included) are dropped from them.
 fn secret_summary(hits: &[SecretHit]) -> String {
     let list: Vec<String> = hits
         .iter()
-        .map(|h| format!("{} ({})", h.path, h.reason))
+        .map(|h| {
+            let path: String = h.path.chars().filter(|c| !c.is_control()).collect();
+            format!("{path} ({})", h.reason)
+        })
         .collect();
-    format!("blocked by the secret guard: {}", list.join(", "))
+    format!(
+        "blocked by the secret guard: {}; to commit a file anyway, add --allow-secret <path> \
+         for it (recorded in .nsit-allow-secrets)",
+        list.join(", ")
+    )
 }
 
 #[cfg(test)]
@@ -195,6 +206,18 @@ mod tests {
         .to_string();
         assert!(text.contains(".env") && text.contains("secret-looking file name"));
         assert!(text.contains("k.pem") && text.contains("private key header"));
+        assert!(text.contains("--allow-secret <path>"), "{text}");
+        assert!(!text.contains('\n'), "one line please: {text:?}");
+    }
+
+    #[test]
+    fn secret_guard_file_names_cannot_smuggle_terminal_escapes() {
+        let text = NsitError::SecretGuard(vec![SecretHit {
+            path: ".env\u{1b}[31m\nx".into(),
+            reason: "name matches .env".into(),
+        }])
+        .to_string();
+        assert!(!text.contains('\u{1b}') && !text.contains('\n'), "{text:?}");
     }
 
     #[test]

@@ -1494,6 +1494,7 @@ dependencies = [
  "keyring",
  "libc",
  "open",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

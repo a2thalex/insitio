@@ -6,17 +6,24 @@
 //! in `auth` and `progress`; every network operation goes through
 //! `auth::run_remote`. Naming a repository is `crate::repo_ref`.
 //!
-//! The commands that use most of this (`init`, `clone`, `commit`, `pull`,
-//! `push`) arrive in later tasks; until then what they will call is marked
-//! `allow(dead_code)` / `allow(unused_imports)`, and the allows go away with
-//! the callers.
+//! The local commands share three more modules: `paths` (what a person typed
+//! to a path in the repository), `stage` (staging and the questions about
+//! the repository's state) and `secrets` (the guard `commit` applies).
+//!
+//! What the network commands (`clone`, `pull`, `push`) will call is marked
+//! `allow(dead_code)` / `allow(unused_imports)`; the allows go away with the
+//! callers.
 
 pub mod auth;
+pub mod paths;
 pub mod progress;
+pub mod secrets;
+pub mod stage;
 
-// What the git commands import from `crate::git`.
+// What the git commands import from `crate::git`. `run_remote` is the only
+// way onto the network: its credential step stays private to `auth`.
 #[allow(unused_imports)]
-pub use auth::{remote_callbacks, remote_error, run_remote, RemoteAccess};
+pub use auth::{remote_error, run_remote, RemoteAccess};
 
 use std::path::Path;
 
@@ -32,7 +39,6 @@ use crate::error::NsitError;
 /// Outside any repository this is a usage error (exit 2) that says what to
 /// do. A `dir` that does not exist is reported as that, not as a missing
 /// repository.
-#[allow(dead_code)]
 pub fn open_repo(dir: &Path) -> Result<Repository, NsitError> {
     if !dir.is_dir() {
         return Err(NsitError::Usage(format!(
@@ -63,7 +69,6 @@ fn map_discover_error(err: git2::Error) -> NsitError {
 /// Each of the two is looked up on its own, so a git config that has only a
 /// name still gets the email from nsit. With neither source able to supply
 /// both, this is a usage error that says how to fix it.
-#[allow(dead_code)]
 pub fn signature(
     repo: &Repository,
     host_cfg: Option<&HostConfig>,

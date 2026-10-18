@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use git2::{FetchOptions, RemoteCallbacks, Repository, Signature};
+use git2::{FetchOptions, RemoteCallbacks, Repository, RepositoryInitOptions, Signature};
 
 use crate::config::HostConfig;
 use crate::credentials::{NO_KEYCHAIN_ENV, TOKEN_ENV};
@@ -43,6 +43,31 @@ pub(crate) fn out_with(tty: bool, quiet: bool) -> Out {
         color: false,
         quiet,
     }
+}
+
+/// An empty repository in `dir` on branch `main`, whose own config makes a
+/// test independent of the machine it runs on.
+///
+/// libgit2 also reads the system and global git configuration (a developer's
+/// `core.autocrlf=true`, a global excludes file that hides `.env`, their
+/// identity). `HOME` cannot be changed for that from inside the test process:
+/// libgit2 works out those locations once, when it starts. What the local
+/// file sets wins over them, so these tests get the same answers everywhere.
+pub(crate) fn local_repo(dir: &Path) -> Repository {
+    let mut options = RepositoryInitOptions::new();
+    options.initial_head("main");
+    let repo = Repository::init_opts(dir, &options).unwrap();
+    {
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+        config.set_str("core.autocrlf", "false").unwrap();
+        let no_excludes = repo.path().join("no-global-excludes");
+        config
+            .set_str("core.excludesfile", no_excludes.to_str().unwrap())
+            .unwrap();
+    }
+    repo
 }
 
 /// Write `name`, stage it and commit it on the current branch of `repo`.

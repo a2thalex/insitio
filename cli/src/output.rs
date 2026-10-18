@@ -58,7 +58,7 @@ impl Out {
     ) -> Result<Vec<String>, NsitError> {
         if let Some(expr) = &self.jq {
             let input = serde_json::to_vec(value).map_err(serialize_error)?;
-            return run_jq(expr, &input);
+            return run_jq(expr, &input, self.tty);
         }
         if self.json {
             let text = if self.tty {
@@ -161,8 +161,9 @@ fn compile_jq(expr: &str) -> Result<JqFilter, NsitError> {
 
 /// Run `expr` over one JSON document; each output becomes one line, by gh's
 /// rule: a string prints as its text (no quotes, nothing escaped), anything
-/// else (number, bool, null, array, object) as compact JSON.
-fn run_jq(expr: &str, input_json: &[u8]) -> Result<Vec<String>, NsitError> {
+/// else (number, bool, null, array, object) as compact JSON. On a terminal
+/// (`tty`) a raw string is cleaned of control characters first.
+fn run_jq(expr: &str, input_json: &[u8], tty: bool) -> Result<Vec<String>, NsitError> {
     let filter = compile_jq(expr)?;
     let input = jaq_json::read::parse_single(input_json)
         .map_err(|e| NsitError::Other(format!("cannot read output as JSON: {e}")))?;
@@ -171,7 +172,7 @@ fn run_jq(expr: &str, input_json: &[u8]) -> Result<Vec<String>, NsitError> {
     let mut lines = Vec::new();
     for item in filter.id.run((ctx, input)) {
         match item {
-            Ok(value) => lines.push(jq_line(&value)),
+            Ok(value) => lines.push(jq_line(&value, tty)),
             Err(exception) => match exception.get_err() {
                 // A syntax or compile error was already rejected up front
                 // (exit 2). This one depends on the data, and the command may
@@ -188,11 +189,33 @@ fn run_jq(expr: &str, input_json: &[u8]) -> Result<Vec<String>, NsitError> {
 
 /// One `--jq` result as printed: raw text for a string (a byte string, which
 /// jq's `@base64d` produces, counts as text), compact JSON for the rest.
-fn jq_line(value: &Val) -> String {
+///
+/// Raw text can hold anything the data held, a repository description with a
+/// terminal escape sequence included. When stdout is a terminal those control
+/// characters are removed (`clean_for_terminal`); piped output stays exactly
+/// the bytes of the string, which is what a script wants. JSON text needs no
+/// cleaning: it writes control characters as `\u001b` escapes.
+fn jq_line(value: &Val, tty: bool) -> String {
     match value {
-        Val::TStr(text) | Val::BStr(text) => String::from_utf8_lossy(&text[..]).into_owned(),
+        Val::TStr(text) | Val::BStr(text) => {
+            let raw = String::from_utf8_lossy(&text[..]).into_owned();
+            if tty {
+                clean_for_terminal(&raw)
+            } else {
+                raw
+            }
+        }
         other => other.to_string(),
     }
+}
+
+/// `text` without control characters other than newline and tab. A terminal
+/// treats ESC (and the C1 range, one byte or two) as the start of a command, so
+/// text that did not come from nsit must not carry them to one.
+pub(crate) fn clean_for_terminal(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
 }
 
 fn describe_load_errors(errs: &[(File<&str, ()>, load::Error<&str>)]) -> String {
@@ -359,6 +382,51 @@ mod tests {
             jq(".", json!({"a": 1, "b": [1, 2], "c": {"d": null}})).unwrap(),
             vec![r#"{"a":1,"b":[1,2],"c":{"d":null}}"#]
         );
+    }
+
+    /// `--jq` on a terminal or piped, for one value.
+    fn jq_on(tty: bool, expr: &str, value: serde_json::Value) -> Vec<String> {
+        out(true, Some(expr), tty)
+            .render(&value, |_| unreachable!("human output with --jq"))
+            .unwrap()
+    }
+
+    #[test]
+    fn on_a_terminal_raw_jq_strings_lose_control_characters() {
+        let nasty = json!({"d": "hi \u{1b}[31mred\u{7}\r\nnext\tcol\u{9b}31m end"});
+        // ESC, BEL, CR and the one-character CSI (U+009B) go; text, `[31m`,
+        // newline and tab stay.
+        assert_eq!(
+            jq_on(true, ".d", nasty),
+            vec!["hi [31mred\nnext\tcol31m end"]
+        );
+    }
+
+    #[test]
+    fn piped_raw_jq_strings_are_byte_exact() {
+        let nasty = "hi \u{1b}[31mred\u{7}\r\nnext\tcol\u{9b}31m end";
+        assert_eq!(jq_on(false, ".d", json!({ "d": nasty })), vec![nasty]);
+    }
+
+    #[test]
+    fn jq_json_output_is_escaped_so_it_needs_no_cleaning_on_a_terminal() {
+        let value = json!({"d": "a\u{1b}[31mb"});
+        let tty = jq_on(true, ".", value.clone());
+        assert_eq!(tty, vec![r#"{"d":"a\u001b[31mb"}"#]);
+        assert_eq!(jq_on(false, ".", value), tty);
+        // A string inside an array is JSON too.
+        assert_eq!(
+            jq_on(true, ".d", json!({"d": ["x\u{1b}"]})),
+            vec![r#"["x\u001b"]"#]
+        );
+    }
+
+    #[test]
+    fn terminal_cleaning_keeps_plain_and_non_ascii_text() {
+        assert_eq!(clean_for_terminal("café ☃\tgo\nnow"), "café ☃\tgo\nnow");
+        assert_eq!(clean_for_terminal("\u{1b}]0;title\u{7}ok"), "]0;titleok");
+        assert_eq!(clean_for_terminal("a\u{0}b\u{7f}c\u{85}d"), "abcd");
+        assert_eq!(clean_for_terminal(""), "");
     }
 
     #[test]

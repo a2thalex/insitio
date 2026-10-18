@@ -32,7 +32,7 @@ pub struct GlobalArgs {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Filter the JSON output with a jq expression (implies --json)
+    /// Filter the JSON output with a jq expression (implies --json); strings print raw, other values as JSON
     #[arg(long, global = true, value_name = "EXPR")]
     pub jq: Option<String>,
 
@@ -114,6 +114,10 @@ pub struct InitArgs {
     /// Write a starter README.md and make the first commit
     #[arg(long)]
     pub readme: bool,
+
+    /// Make the repository on Insitio public (it is private by default)
+    #[arg(long)]
+    pub public: bool,
 }
 
 #[derive(Debug, Args)]
@@ -301,6 +305,7 @@ mod tests {
             &["init"],
             &["init", "demo"],
             &["init", "demo", "--remote", "--readme"],
+            &["init", "demo", "--public"],
             &["clone", "ada/demo"],
             &["clone", "demo", "target"],
             &["clone", "https://git.iam.bot/ada/demo.git"],
@@ -331,6 +336,24 @@ mod tests {
         for args in invocations {
             parse(args).unwrap_or_else(|e| panic!("`nsit {}` should parse: {e}", args.join(" ")));
         }
+    }
+
+    #[test]
+    fn init_flags_land_in_the_right_fields() {
+        let Command::Init(i) = parse(&["init", "demo", "--remote", "--readme", "--public"])
+            .unwrap()
+            .command
+        else {
+            panic!("not init")
+        };
+        assert_eq!(i.name.as_deref(), Some("demo"));
+        assert!(i.remote && i.readme && i.public);
+
+        let Command::Init(plain) = parse(&["init"]).unwrap().command else {
+            panic!("not init")
+        };
+        assert_eq!(plain.name, None);
+        assert!(!plain.remote && !plain.readme && !plain.public);
     }
 
     #[test]

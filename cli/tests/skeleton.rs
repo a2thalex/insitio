@@ -1,5 +1,6 @@
-//! Runs the real `nsit` binary: version string, usage errors, the stubs, and
-//! the rule that a bad `--jq` fails before any command runs.
+//! Runs the real `nsit` binary: version string, usage errors, the network
+//! commands that are still stubs, and the rule that a bad `--jq` fails before
+//! any command runs. The local commands are in `tests/local.rs`.
 
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
@@ -77,23 +78,16 @@ fn help_lists_every_v1_command_and_exits_zero() {
 
 #[test]
 fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
-    // `auth` and `repo` are implemented (see tests/nsit.e2e.test.ts); the rest are still stubs.
+    // `auth`, `repo` and the local commands are implemented (tests/nsit.e2e.test.ts and
+    // tests/local.rs); the three that talk to a git server are still stubs.
     let invocations: &[&[&str]] = &[
-        &["init", "demo", "--remote", "--readme"],
         &["clone", "ada/demo", "target"],
-        &["status"],
-        &["add", "a.txt"],
-        &["commit", "-m", "msg", "--staged", "--allow-secret", ".env"],
-        &["log", "-n", "3", "--oneline"],
-        &["branch"],
-        &["branch", "-d", "old"],
-        &["switch", "-c", "feature"],
+        &["pull"],
         &["pull", "--abort"],
         &["push", "-u", "main", "--force-with-lease"],
-        &["readme"],
         // Global flags after the subcommand.
         &[
-            "status",
+            "pull",
             "--json",
             "--jq",
             ".[].name",
@@ -203,9 +197,9 @@ fn unknown_command_and_missing_arguments_exit_2() {
 
 #[test]
 fn bad_jq_exits_2_before_the_command_runs() {
-    // `status` is a stub that would exit 1; reaching exit 2 proves the
+    // `pull` is a stub that would exit 1; reaching exit 2 proves the
     // expression was checked first.
-    let o = nsit(&["status", "--jq", ".["]);
+    let o = nsit(&["pull", "--jq", ".["]);
     assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(
@@ -218,7 +212,7 @@ fn bad_jq_exits_2_before_the_command_runs() {
 
 #[test]
 fn valid_jq_reaches_the_stub() {
-    let o = nsit(&["status", "--jq", ".name"]);
+    let o = nsit(&["pull", "--jq", ".name"]);
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(stderr(&o), "nsit: not implemented\n");
 }

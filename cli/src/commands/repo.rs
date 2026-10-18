@@ -32,7 +32,7 @@ pub fn run(args: &RepoArgs, global: &GlobalArgs, out: &Out) -> Result<(), NsitEr
 }
 
 /// A client with this host's token. Signed out is `Auth` right here.
-fn signed_in(host: &str) -> Result<Api, NsitError> {
+pub(super) fn signed_in(host: &str) -> Result<Api, NsitError> {
     let (token, _) = token_for(host, None)?;
     Api::new(host, Some(token))
 }

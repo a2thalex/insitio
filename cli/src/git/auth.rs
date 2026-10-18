@@ -16,9 +16,9 @@
 //! 3. turns every git error into the right `NsitError`, so a refused login is
 //!    exit 3 with a sign-in hint instead of a bare libgit2 message.
 //!
-//! `remote_callbacks` is the first step on its own, for the rare caller that
-//! cannot go through `run_remote`; it does not set the redirect policy or map
-//! errors.
+//! `remote_callbacks` is the first step of that and private to this module, so
+//! nothing can build credentials without also getting the redirect policy and
+//! the error mapping.
 
 use std::fmt;
 use std::io::{self, IsTerminal};
@@ -49,10 +49,9 @@ use crate::repo_ref::{signed_in_login, token_for_repo, RepoRef};
 /// not given, and goes to stderr.
 ///
 /// Use each set of callbacks for one operation only: the credentials are
-/// offered once, and a second request means the server refused them. Prefer
-/// `run_remote`, which also refuses redirects and maps errors.
-#[allow(dead_code)] // `run_remote` is its first caller (Tasks 9 and 10)
-pub fn remote_callbacks<'a>(
+/// offered once, and a second request means the server refused them. Private:
+/// `run_remote` is the way in, and it also refuses redirects and maps errors.
+fn remote_callbacks<'a>(
     target: &RepoRef,
     selected_host: &str,
     out: &'a Out,
@@ -247,6 +246,33 @@ mod tests {
     }
 
     const URL: &str = "https://git.iam.bot/ada/rocket.git";
+
+    /// `remote_callbacks` builds credentials without the redirect policy or the
+    /// error mapping, so only this module may call it: `run_remote` is the one
+    /// public way onto the network. Rust cannot assert that an item is private,
+    /// so this reads the two source files that would show it.
+    #[test]
+    fn run_remote_is_the_only_public_network_entry_point() {
+        let auth = include_str!("auth.rs");
+        // Built from pieces so that this test's own text does not match.
+        let public = format!("pub {} remote_callbacks", "fn");
+        let private = format!("\n{} remote_callbacks<", "fn");
+        assert!(
+            !auth.contains(&public),
+            "remote_callbacks must not be public"
+        );
+        assert!(
+            auth.contains(&private),
+            "remote_callbacks should be a private fn"
+        );
+        assert!(auth.contains("pub fn run_remote<"));
+        let module = include_str!("mod.rs");
+        assert!(
+            !module.contains("remote_callbacks"),
+            "git/mod.rs must not re-export remote_callbacks"
+        );
+        assert!(module.contains("run_remote"));
+    }
 
     #[test]
     fn the_first_request_gets_the_login_and_the_token() {
