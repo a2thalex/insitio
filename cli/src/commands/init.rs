@@ -12,7 +12,9 @@
 //! * `--readme` writes a starter README.md and commits just that file as the
 //!   first commit: not whatever else the directory holds, and not what else is
 //!   staged in a repository that was already there (that stays staged, as it
-//!   was). The secret guard reads the README like any commit's files.
+//!   was). The secret guard reads the README like any commit's files. A README
+//!   that is there already is the user's: it is left exactly as it is, not
+//!   committed (so not pushed either), and init says so.
 //! * With a remote and at least one commit (`--readme` makes one) the current
 //!   branch is pushed, as `nsit push` would, so the repository is complete on
 //!   Insitio when init is done. With no commit yet there is nothing to push, and
@@ -21,7 +23,10 @@
 //!
 //! Running it again where the repository exists is safe: the local part is a
 //! no-op (and says so), an `origin` that is set is left alone, and what is
-//! already on the server is not sent again.
+//! already on the server is not sent again. The one exception is a failure after
+//! the repository was created on Insitio but before `origin` was set (the
+//! server's clone URL is refused, say): then it exists there, `nsit init` would
+//! be told the name is taken, and the error says to set `origin` by hand.
 //!
 //! `--json`: `{path, branch, created, remote, readme, commit, pushed}`, where
 //! `created` is whether this run made the local repository, `remote` is
@@ -39,7 +44,7 @@ use super::repo::signed_in;
 use crate::api::Api;
 use crate::cli::{GlobalArgs, InitArgs};
 use crate::config::resolve_host;
-use crate::error::NsitError;
+use crate::error::{one_line, NsitError};
 use crate::git::commit::{commit_changes, Outcome, Request, Staging};
 use crate::git::origin::origin_on;
 use crate::git::paths::directory_name;
@@ -91,6 +96,15 @@ struct Wired {
     target: Option<RepoRef>,
 }
 
+/// Why the server step (`wire_remote`) failed, and how far it got.
+#[derive(Debug)]
+struct WireFailure {
+    err: NsitError,
+    /// `owner/name` of the repository this step had already created on Insitio when it failed,
+    /// cleaned for printing; `None` when it failed before that (nothing was made on the server).
+    made: Option<String>,
+}
+
 /// What became of the first commits of a repository that now has a remote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirstPush {
@@ -135,11 +149,7 @@ pub fn run(args: &InitArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Resu
     let wired = match (&api, &plan.remote_name) {
         (Some(api), Some(name)) => {
             let wired = wire_remote(&repo, api, &host, name, args.public);
-            // A repository made by this run stays behind if the server step fails.
-            Some(wired.map_err(|err| match created {
-                true => with_hint(err, &rerun_hint(&plan.dir, args)),
-                false => err,
-            })?)
+            Some(wired.map_err(|failure| after_failed_wire(failure, &plan.dir, args, created))?)
         }
         _ => None,
     };
@@ -180,6 +190,28 @@ pub fn run(args: &InitArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Resu
     out.data(&json, |json| describe(json, args.readme, out.tty))
 }
 
+/// What a failed server step says, by how far it got.
+///
+/// * The repository was already created on Insitio (the server's answer was then refused, or
+///   `origin` could not be set): it now exists whether or not this run made the local one, so a
+///   rerun is not safe (it would be told the name is taken). Say that, and how to go on.
+/// * It failed before anything was made there, and this run made the local repository: that
+///   repository stays behind, and a rerun is safe.
+/// * Otherwise (a local repository that was there already, nothing made on the server): the
+///   error as it is.
+fn after_failed_wire(
+    failure: WireFailure,
+    dir: &Path,
+    args: &InitArgs,
+    local_made_here: bool,
+) -> NsitError {
+    match (&failure.made, local_made_here) {
+        (Some(made), _) => with_hint(failure.err, &exists_on_server_hint(dir, made)),
+        (None, true) => with_hint(failure.err, &rerun_hint(dir, args)),
+        (None, false) => failure.err,
+    }
+}
+
 /// What to tell someone whose server step failed after this run had made the
 /// local repository: where it is, that it has no origin, and how to go on.
 fn rerun_hint(dir: &Path, args: &InitArgs) -> String {
@@ -189,6 +221,19 @@ fn rerun_hint(dir: &Path, args: &InitArgs) -> String {
     };
     format!(
         "{} is now a local repository without an origin; running {again} again is safe",
+        dir.display()
+    )
+}
+
+/// What to tell someone whose server step failed after the repository `made` (`owner/name`) had
+/// been created on Insitio. `nsit init` cannot be run again for it: with a name, or with `--remote`,
+/// it would try to create the repository and be told the name is taken, and without either it
+/// never touches the server. What works is setting `origin` by hand and pushing.
+fn exists_on_server_hint(dir: &Path, made: &str) -> String {
+    format!(
+        "the repository {made} now exists on Insitio but {} has no origin, and nsit init cannot \
+         make it again; set origin yourself with git remote add origin <the clone URL of {made}> \
+         and run nsit push (with --host naming that URL's server)",
         dir.display()
     )
 }
@@ -309,14 +354,15 @@ fn open_or_init(dir: &Path) -> Result<(Repository, bool), NsitError> {
 }
 
 /// Create the repository `name` on the server and make it `origin`; or, when
-/// `origin` is set already, leave it be.
+/// `origin` is set already, leave it be. A failure says whether the repository had
+/// been created on the server by then (`WireFailure::made`).
 fn wire_remote(
     repo: &Repository,
     api: &Api,
     host: &str,
     name: &str,
     public: bool,
-) -> Result<Wired, NsitError> {
+) -> Result<Wired, WireFailure> {
     if let Ok(existing) = repo.find_remote("origin") {
         let target = origin_on(repo, host);
         return Ok(Wired {
@@ -330,12 +376,21 @@ fn wire_remote(
             target,
         });
     }
-    let made = api.create_repo(name, None, !public)?;
+    let made = api
+        .create_repo(name, None, !public)
+        .map_err(|err| WireFailure { err, made: None })?;
+    // From here on the repository exists on the server, whatever goes wrong. What the server
+    // called it is cleaned before it can go into a message.
+    let after_creation = |err: NsitError| WireFailure {
+        err,
+        made: Some(one_line(&format!("{}/{}", made.owner, made.name), 120)),
+    };
     // The server's answer is checked like any repository URL: no user name or
     // token in it, https (or loopback), and on the server that was asked (as in
     // `nsit clone`). `origin` gets the cleaned form.
-    let target = server_named_repo(&made.clone_url, host)?;
-    repo.remote("origin", target.clone_url.as_str())?;
+    let target = server_named_repo(&made.clone_url, host).map_err(&after_creation)?;
+    repo.remote("origin", target.clone_url.as_str())
+        .map_err(|e| after_creation(e.into()))?;
     Ok(Wired {
         json: RemoteJson {
             owner: Some(made.owner),
@@ -349,8 +404,12 @@ fn wire_remote(
 }
 
 /// Write README.md if there is none and commit that one file. Returns whether
-/// the file was written, and the commit if one was made (not when README.md was
-/// there already and committed).
+/// the file was written, and the commit if one was made.
+///
+/// Only a README that this call wrote is committed. One that was there already (in any
+/// capitalization) is the user's: it is not rewritten, and it is not staged or committed
+/// either, so it stays as it was (untracked, or tracked with whatever changes it has) and
+/// is never pushed by this run.
 fn first_readme_commit(
     repo: &Repository,
     target: Option<&RepoRef>,
@@ -359,10 +418,8 @@ fn first_readme_commit(
 ) -> Result<(bool, Option<git2::Oid>), NsitError> {
     let description = target.and_then(|t| description_of(host, t));
     let wrote = write_readme(repo, target, description.as_deref())? == Written::Created;
-    let root = repo.workdir().unwrap_or(Path::new("."));
-    if !root.join(README).exists() {
-        // A README under another capitalization: not ours to commit.
-        return Ok((wrote, None));
+    if !wrote {
+        return Ok((false, None));
     }
     let first = head_commit(repo)?.is_none();
     // Just the README: whatever else is staged in an existing repository is not part of this
@@ -378,8 +435,8 @@ fn first_readme_commit(
         allow_secret: Vec::new(),
     };
     match commit_changes(repo, who, &request)? {
-        Outcome::Committed(done) => Ok((wrote, Some(done.id))),
-        Outcome::NothingToCommit => Ok((wrote, None)),
+        Outcome::Committed(done) => Ok((true, Some(done.id))),
+        Outcome::NothingToCommit => Ok((true, None)),
     }
 }
 
@@ -453,7 +510,10 @@ fn describe(json: &InitJson, readme_asked: bool, tty: bool) -> String {
         lines.push(if json.readme {
             format!("Wrote {README}.")
         } else {
-            format!("{README} already exists; left as it is.")
+            format!(
+                "{README} already exists; left as it is, and not committed \
+                 (nsit init commits only a README it wrote)."
+            )
         });
     }
     if let Some(commit) = &json.commit {
@@ -790,6 +850,129 @@ mod tests {
         );
     }
 
+    /// What the server step failed with, as `wire_remote` reports it.
+    fn failure(made: Option<&str>) -> WireFailure {
+        WireFailure {
+            err: NsitError::Other(
+                "the server says this repository is at a different address".into(),
+            ),
+            made: made.map(str::to_string),
+        }
+    }
+
+    /// Once the repository exists on Insitio, running `nsit init` again is not safe: it would try
+    /// to make the repository again and be told the name is taken. The hint must say that the
+    /// repository exists and how to go on, whether or not this run made the local repository.
+    #[test]
+    fn a_failure_after_the_repository_was_made_says_it_exists_and_never_that_a_rerun_is_safe() {
+        let dir = Path::new("/work/demo");
+        for created_here in [true, false] {
+            for named in [Some("demo"), None] {
+                let err = after_failed_wire(
+                    failure(Some("ada/demo")),
+                    dir,
+                    &args(named, named.is_none(), false, false),
+                    created_here,
+                );
+                let text = err.to_string();
+                assert!(
+                    text.starts_with("the server says this repository is at a different address; "),
+                    "the error itself comes first: {text}"
+                );
+                assert!(
+                    text.contains("the repository ada/demo now exists on Insitio"),
+                    "{text}"
+                );
+                assert!(text.contains("/work/demo has no origin"), "{text}");
+                assert!(text.contains("git remote add origin"), "{text}");
+                assert!(text.contains("nsit push"), "{text}");
+                assert!(!text.contains("is safe"), "{text}");
+                assert!(!text.contains("again is"), "{text}");
+                assert!(!text.contains('\n'), "{text:?}");
+                assert_eq!(err.exit_code(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn a_failure_before_the_repository_was_made_keeps_the_rerun_hint_for_a_repository_this_run_made(
+    ) {
+        let dir = Path::new("/work/demo");
+        let made_here = after_failed_wire(
+            failure(None),
+            dir,
+            &args(Some("demo"), false, false, false),
+            true,
+        );
+        let text = made_here.to_string();
+        assert!(
+            text.contains("without an origin; running nsit init demo again is safe"),
+            "{text}"
+        );
+        assert!(!text.contains("now exists on Insitio"), "{text}");
+        // A local repository that was there already is not mentioned: nothing was made to leave behind.
+        let was_there = after_failed_wire(
+            failure(None),
+            dir,
+            &args(Some("demo"), false, false, false),
+            false,
+        );
+        assert_eq!(
+            was_there.to_string(),
+            "the server says this repository is at a different address"
+        );
+    }
+
+    #[test]
+    fn a_server_that_refuses_to_make_the_repository_leaves_nothing_behind_on_it() {
+        let body =
+            r#"{"error":{"code":"name_taken","message":"Repository ada/demo already exists"}}"#;
+        let server = StubServer::start(move |_| {
+            format!(
+                "HTTP/1.1 422 Unprocessable Entity\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        let api = Api::new(&server.host(), Some("ins_test_token_value".into())).unwrap();
+        let failure = match wire_remote(&repo, &api, &server.host(), "demo", false) {
+            Err(failure) => failure,
+            Ok(_) => panic!("the server said no"),
+        };
+        assert_eq!(failure.made, None, "nothing was made on the server");
+        assert!(
+            matches!(failure.err, NsitError::Api { status: 422, .. }),
+            "{:?}",
+            failure.err
+        );
+        assert!(repo.find_remote("origin").is_err());
+    }
+
+    #[test]
+    fn the_server_repository_name_in_the_hint_has_no_control_characters_whatever_the_server_sent() {
+        let body = created_json("https://elsewhere.example/ada/demo.git")
+            .replace(r#""name":"demo""#, r#""name":"de\u001b[31mmo\nx""#);
+        let server = answering(body);
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        let api = Api::new(&server.host(), Some("ins_test_token_value".into())).unwrap();
+        let failure = match wire_remote(&repo, &api, &server.host(), "demo", false) {
+            Err(failure) => failure,
+            Ok(_) => panic!("a repository on another server must not become origin"),
+        };
+        let made = failure.made.clone().expect("the repository was made");
+        assert!(!made.chars().any(char::is_control), "{made:?}");
+        let text = after_failed_wire(
+            failure,
+            dir.path(),
+            &args(Some("demo"), false, false, false),
+            true,
+        )
+        .to_string();
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+    }
+
     #[test]
     fn the_hint_joins_the_error_line_and_keeps_its_exit_code() {
         let hint = "the hint";
@@ -837,10 +1020,16 @@ mod tests {
             "https://ada:ins_stolen@git.example.invalid/ada/demo.git",
         ));
         let api = Api::new(&server.host(), Some("ins_test_token_value".into())).unwrap();
-        let err = match wire_remote(&repo, &api, &server.host(), "demo", false) {
-            Err(err) => err,
+        let failure = match wire_remote(&repo, &api, &server.host(), "demo", false) {
+            Err(failure) => failure,
             Ok(_) => panic!("a URL with a password must not become origin"),
         };
+        assert_eq!(
+            failure.made.as_deref(),
+            Some("ada/demo"),
+            "the repository was made before its URL was refused"
+        );
+        let err = failure.err;
         assert!(err.to_string().contains("will not use"), "{err}");
         assert!(!err.to_string().contains("ins_stolen"), "{err}");
         assert!(repo.find_remote("origin").is_err());
@@ -853,10 +1042,16 @@ mod tests {
         // The server that was asked answers with a repository that is somewhere else.
         let server = answering(created_json("https://elsewhere.example/ada/demo.git"));
         let api = Api::new(&server.host(), Some("ins_test_token_value".into())).unwrap();
-        let err = match wire_remote(&repo, &api, &server.host(), "demo", false) {
-            Err(err) => err,
+        let failure = match wire_remote(&repo, &api, &server.host(), "demo", false) {
+            Err(failure) => failure,
             Ok(_) => panic!("a repository on another server must not become origin"),
         };
+        assert_eq!(
+            failure.made.as_deref(),
+            Some("ada/demo"),
+            "the repository was made before its address was found to be another server's"
+        );
+        let err = failure.err;
         assert!(matches!(err, NsitError::Other(_)), "{err:?}");
         assert!(err.to_string().contains("different address"), "{err}");
         assert!(!err.to_string().contains("elsewhere.example"), "{err}");
@@ -954,13 +1149,15 @@ mod tests {
     }
 
     #[test]
-    fn the_secret_guard_still_reads_the_readme_and_a_refusal_changes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = local_repo(dir.path());
+    fn the_secret_guard_still_reads_the_readme_nsit_wrote_and_a_refusal_changes_nothing() {
+        // The starter README's title is the directory's name, so a directory that is named like
+        // an Insitio token makes a README the guard refuses.
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join(format!("ins_{}", "a".repeat(40)));
+        std::fs::create_dir(&dir).unwrap();
+        let repo = local_repo(&dir);
         crate::test_support::commit_file(&repo, "a.txt", "committed\n");
         stage_file(&repo, "staged.txt", "new and staged\n");
-        let key = "# notes\n-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
-        std::fs::write(dir.path().join(README), key).unwrap();
         let (head, index) = (
             repo.head().unwrap().target(),
             crate::test_support::index_on_disk(&repo),
@@ -1005,16 +1202,97 @@ mod tests {
         assert_eq!(std::fs::read(dir.path().join(README)).unwrap(), before);
     }
 
+    /// The state of `path` in `repo`'s status, if it shows up there at all.
+    fn state_of(repo: &Repository, path: &str) -> Option<git2::Status> {
+        let status = repo.statuses(None).unwrap();
+        let found = status
+            .iter()
+            .find(|entry| entry.path_bytes() == path.as_bytes())
+            .map(|entry| entry.status());
+        found
+    }
+
     #[test]
-    fn an_existing_readme_is_kept_as_it_is_and_committed() {
+    fn an_existing_readme_is_kept_as_it_is_and_not_committed() {
         let dir = tempfile::tempdir().unwrap();
         let repo = local_repo(dir.path());
         std::fs::write(dir.path().join(README), "# mine\n").unwrap();
         let (wrote, commit) = first_readme_commit(&repo, None, "git.iam.bot", &me()).unwrap();
         assert!(!wrote);
-        assert!(commit.is_some());
+        assert_eq!(
+            commit, None,
+            "a README nsit did not write is not nsit's to commit"
+        );
+        assert!(
+            head_commit(&repo).unwrap().is_none(),
+            "no commit was made at all"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join(README)).unwrap(),
+            "# mine\n"
+        );
+        assert_eq!(
+            state_of(&repo, README),
+            Some(git2::Status::WT_NEW),
+            "still untracked, and not staged either"
+        );
+    }
+
+    #[test]
+    fn an_existing_readme_is_left_alone_in_a_repository_that_has_commits_and_staged_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        crate::test_support::commit_file(&repo, "a.txt", "committed\n");
+        stage_file(&repo, "staged.txt", "new and staged\n");
+        std::fs::write(dir.path().join(README), "# mine\n").unwrap();
+        let (tip, index) = (
+            repo.head().unwrap().target(),
+            crate::test_support::index_on_disk(&repo),
+        );
+
+        let (wrote, commit) = first_readme_commit(&repo, None, "git.iam.bot", &me()).unwrap();
+        assert!(!wrote);
+        assert_eq!(commit, None);
+        assert_eq!(repo.head().unwrap().target(), tip, "no commit was made");
+        assert_eq!(
+            crate::test_support::index_on_disk(&repo),
+            index,
+            "the index is as it was"
+        );
+        assert_eq!(state_of(&repo, README), Some(git2::Status::WT_NEW));
+        assert_eq!(state_of(&repo, "staged.txt"), Some(git2::Status::INDEX_NEW));
+    }
+
+    #[test]
+    fn a_tracked_readme_with_changes_is_not_committed_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        crate::test_support::commit_file(&repo, README, "# first\n");
+        std::fs::write(dir.path().join(README), "# edited since\n").unwrap();
+        let tip = repo.head().unwrap().target();
+
+        let (wrote, commit) = first_readme_commit(&repo, None, "git.iam.bot", &me()).unwrap();
+        assert!(!wrote);
+        assert_eq!(commit, None);
+        assert_eq!(repo.head().unwrap().target(), tip);
+        assert_eq!(state_of(&repo, README), Some(git2::Status::WT_MODIFIED));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(README)).unwrap(),
+            "# edited since\n"
+        );
+    }
+
+    #[test]
+    fn a_readme_under_another_capitalization_is_left_alone_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        std::fs::write(dir.path().join("readme.md"), "# mine\n").unwrap();
+        let (wrote, commit) = first_readme_commit(&repo, None, "git.iam.bot", &me()).unwrap();
+        assert!(!wrote);
+        assert_eq!(commit, None);
+        assert!(head_commit(&repo).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("readme.md")).unwrap(),
             "# mine\n"
         );
     }
@@ -1192,7 +1470,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("README.md already exists; left as it is"),
+            text.contains("README.md already exists; left as it is, and not committed"),
             "{text}"
         );
         assert!(!text.contains("Committed"), "{text}");

@@ -698,6 +698,31 @@ fn init_readme_in_an_existing_repository_commits_only_the_readme_and_leaves_stag
 }
 
 #[test]
+fn init_readme_with_a_readme_already_there_leaves_it_untracked_and_commits_nothing() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.unicode_dir();
+    write(&dir, "README.md", "# mine\n");
+    let done = sandbox.json(&dir, &["init", "--readme"]);
+    assert_eq!(done["created"], true);
+    assert_eq!(done["readme"], false);
+    assert_eq!(done["commit"], Value::Null);
+    assert_eq!(read(&dir, "README.md"), "# mine\n");
+
+    // Not committed, not even staged: it is still the untracked file it was.
+    let status = sandbox.json(&dir, &["status"]);
+    assert_eq!(strings(&status["untracked"]), ["README.md"], "{status}");
+    assert_eq!(strings(&status["staged"]), Vec::<String>::new(), "{status}");
+    assert_eq!(sandbox.json(&dir, &["log"]), serde_json::json!([]));
+
+    // And the text says so.
+    let text = stdout(&sandbox.ok(&dir, &["init", "--readme"]));
+    assert!(
+        text.contains("README.md already exists; left as it is, and not committed"),
+        "{text}"
+    );
+}
+
+#[test]
 fn the_readme_command_never_overwrites_a_readme() {
     let sandbox = Sandbox::new();
     let dir = sandbox.unicode_dir();

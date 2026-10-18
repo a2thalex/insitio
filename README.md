@@ -123,7 +123,7 @@ Global flags work before or after the subcommand: `--host <host>` (default: `$NS
 | `nsit auth login [--with-token]` | Sign in with a browser approval, or with a token read from stdin. |
 | `nsit auth logout` | Revoke this machine's token on the server and forget it. |
 | `nsit auth status` | Show the signed-in account and where its token is stored. |
-| `nsit init [name] [--remote] [--readme] [--public]` | Start a repository (branch `main`) here, or in a new directory called `name`. With a name, or with `--remote`, it also creates the repository on Insitio (private unless `--public`), sets `origin`, and pushes if there are commits. `--readme` writes a starter README and makes the first commit. |
+| `nsit init [name] [--remote] [--readme] [--public]` | Start a repository (branch `main`) here, or in a new directory called `name`. With a name, or with `--remote`, it also creates the repository on Insitio (private unless `--public`), sets `origin`, and pushes if there are commits. `--readme` writes a starter README and makes the first commit; a README that is already there is left as it is and is not committed. |
 | `nsit clone <repo> [dir]` | Copy a repository. `<repo>` is `name` (yours), `owner/name`, or a full URL. |
 | `nsit status` | Staged, unstaged and untracked changes, and how far ahead of or behind the upstream you are. |
 | `nsit add <paths>` | Stage files or directories. |

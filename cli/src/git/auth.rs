@@ -755,31 +755,34 @@ mod tests {
     fn libgit2_gets_a_connect_timeout_and_an_idle_timeout() {
         use git2::opts::{
             get_server_connect_timeout_in_milliseconds, get_server_timeout_in_milliseconds,
-            set_server_connect_timeout_in_milliseconds, set_server_timeout_in_milliseconds,
         };
-        // SAFETY: these two libgit2 globals are only ever written with these same values (by
-        // this test and by `main`), and read as plain integers. The test puts back what it found.
-        unsafe {
-            let connect = get_server_connect_timeout_in_milliseconds().unwrap();
-            let idle = get_server_timeout_in_milliseconds().unwrap();
-            set_server_connect_timeout_in_milliseconds(0).unwrap();
-            set_server_timeout_in_milliseconds(0).unwrap();
-
-            set_network_timeouts().unwrap();
-            assert_eq!(
+        // Holding the crate's test lock keeps this away from the tests that run git traffic under
+        // `isolated_env`, which hold it too (not from every test that uses libgit2).
+        let _lock = EnvGuard::lock();
+        // The same call `run` makes. It is the only thing in the test process that writes these two
+        // libgit2 globals, and it always writes the same two constants, so calling it again changes
+        // nothing: no store here ever leaves either at some other value (0, say) for a socket that
+        // another test opens in parallel to read.
+        set_network_timeouts().unwrap();
+        // SAFETY: only reads two plain integers. libgit2 does not synchronize these globals, so
+        // the very first store (here, or in another test that calls `set_network_timeouts`) is a
+        // race in principle with a read by a thread that is opening a socket; nothing is lost
+        // if that read sees the old default of 0 instead, and every later store writes the value
+        // that is already there. `main` does not have the race: it sets them before anything else.
+        let (connect, idle) = unsafe {
+            (
                 get_server_connect_timeout_in_milliseconds().unwrap(),
-                30_000,
-                "connecting to a server that does not answer gives up after 30 s"
-            );
-            assert_eq!(
                 get_server_timeout_in_milliseconds().unwrap(),
-                600_000,
-                "a server that goes quiet is given 10 minutes (it may be indexing a big push)"
-            );
-
-            set_server_connect_timeout_in_milliseconds(connect).unwrap();
-            set_server_timeout_in_milliseconds(idle).unwrap();
-        }
+            )
+        };
+        assert_eq!(
+            connect, 30_000,
+            "connecting to a server that does not answer gives up after 30 s"
+        );
+        assert_eq!(
+            idle, 600_000,
+            "a server that goes quiet is given 10 minutes (it may be indexing a big push)"
+        );
     }
 
     // ---- proxies ---------------------------------------------------------------------

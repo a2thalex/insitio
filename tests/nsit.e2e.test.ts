@@ -921,6 +921,54 @@ describe("nsit init <name> against a server", () => {
     expect(readFileSync(join(cwd, "taken", ".git", "config"), "utf8")).not.toContain("origin");
   });
 
+  it("a failure after the server made the repository says it exists and how to set origin, not that a rerun is safe", async () => {
+    const cwd = tmpDir();
+    const env = homeWith(false);
+    const named = ins.deps.config.baseUrl;
+    // The server names itself by an address other than the one nsit was told (a wrong --host, or a
+    // wrong BASE_URL): it makes the repository, then answers with a clone URL somewhere else.
+    ins.deps.config.baseUrl = "https://elsewhere.example";
+    let result: NsitResult;
+    try {
+      result = await nsit(["init", "wrong-address", "--host", ins.base], { cwd, configDir, env });
+    } finally {
+      ins.deps.config.baseUrl = named;
+    }
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(oneLine(result.stderr), result.stderr).toBe(true);
+    expect(result.stderr).toContain("different address");
+    expect(result.stderr).toContain("the repository ada/wrong-address now exists on Insitio");
+    expect(result.stderr).toContain("git remote add origin");
+    expect(result.stderr).not.toContain("is safe");
+    expect(getRepo(ins.deps.db, "ada", "wrong-address")).not.toBeNull();
+    expect(readFileSync(join(cwd, "wrong-address", ".git", "config"), "utf8")).not.toContain("origin");
+
+    // And it is true that a rerun does not help: the name is taken now.
+    const again = await nsit(["init", "wrong-address", "--host", ins.base], { cwd, configDir, env });
+    expect(again.code, again.stderr).toBe(1);
+    expect(again.stderr).toContain("already exists");
+  });
+
+  it("with a README already there, --readme leaves it untracked, commits and pushes nothing, and says so", async () => {
+    const cwd = tmpDir();
+    const env = homeWith(false);
+    const dir = join(cwd, "has-readme");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "README.md"), "# mine\n");
+    const made = await nsit(["init", "has-readme", "--readme", "--json", "--host", ins.base], { cwd, configDir, env });
+    expect(made.code, made.stderr).toBe(0);
+    expect(JSON.parse(made.stdout)).toMatchObject({ created: true, readme: false, commit: null, pushed: false });
+    expect(made.stderr).toMatch(/nothing was pushed/);
+    expect(readFileSync(join(dir, "README.md"), "utf8")).toBe("# mine\n");
+    expect((await realGit(dir, "status", "--porcelain")).trim()).toBe("?? README.md");
+    expect(await realGit(serverRepo("ada", "has-readme"), "for-each-ref")).toBe("");
+
+    const text = await nsit(["-C", dir, "init", "--readme", "--host", ins.base], { configDir, env });
+    expect(text.code, text.stderr).toBe(0);
+    expect(text.stdout).toContain("README.md already exists; left as it is, and not committed");
+  });
+
   it("a first push refused as a non-fast-forward says to run nsit pull, and does not also say to run nsit push again", async () => {
     // The directory already has history of its own, and its origin (a repository with other history).
     await seedRepo("init-diverged", { "a.txt": "base\n" });
