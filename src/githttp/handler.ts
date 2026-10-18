@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Deps } from "../deps.js";
+import { clientAddress } from "../clientAddress.js";
 import { Repo } from "../git/repo.js";
 import { GIT_ENV } from "../git/run.js";
 import { repoDir, reposRoot } from "../git/storage.js";
@@ -90,7 +91,7 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
     QUERY_STRING: url.search.replace(/^\?/, ""),
     CONTENT_TYPE: req.headers["content-type"] ?? "",
     REMOTE_USER: user?.username ?? "",
-    REMOTE_ADDR: req.socket.remoteAddress ?? "",
+    REMOTE_ADDR: clientAddress(req.socket.remoteAddress, req.headers["x-forwarded-for"] as string | undefined, deps.config.trustedProxies),
   };
   if (req.headers["content-length"]) env.CONTENT_LENGTH = String(req.headers["content-length"]);
   if (req.headers["content-encoding"]) env.HTTP_CONTENT_ENCODING = String(req.headers["content-encoding"]);

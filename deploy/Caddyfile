@@ -1,0 +1,15 @@
+# GitFkd behind Caddy. setup.sh replaces {DOMAIN} and installs this as /etc/caddy/Caddyfile.
+# Caddy obtains and renews the HTTPS certificate automatically once DNS points here.
+{DOMAIN} {
+	encode zstd gzip
+
+	# Git pushes can be large; web forms are capped inside the app.
+	request_body {
+		max_size 2GB
+	}
+
+	reverse_proxy 127.0.0.1:3000 {
+		# Stream git responses as they are produced.
+		flush_interval -1
+	}
+}

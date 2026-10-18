@@ -69,7 +69,29 @@ A new empty repository shows these push instructions on its page. If the first p
 | `DATA_DIR` | `./data` | Database (`gitfkd.db`) and bare repositories (`repos/<owner>/<name>.git`) |
 | `ALLOW_USER_INVITES` | unset | `1` lets non-admins create invite links |
 
+| `TRUST_PROXY` | unset | `1` trusts a proxy on loopback (or a comma list of proxy IPs) for client addresses, and binds the app to 127.0.0.1 |
+| `HOST` | all interfaces (127.0.0.1 with `TRUST_PROXY`) | Interface to listen on |
+
 For anything beyond your own machine, put GitFkd behind an HTTPS reverse proxy (Caddy, nginx) and set `BASE_URL` to the public `https://` address. Tokens and session cookies must not travel over plain HTTP. Back up `DATA_DIR` to back up everything.
+
+## Deploy to a VM
+
+`deploy/` runs GitFkd on Ubuntu 24.04 behind Caddy, which handles HTTPS certificates automatically:
+
+- `setup.sh` installs Node 24, git and Caddy, creates a `gitfkd` service user, installs the app to `/opt/gitfkd` with data in `/var/lib/gitfkd`, and starts the `gitfkd` systemd service. It is safe to re-run for updates.
+- `gitfkd.service` is a hardened systemd unit that can only write its data directory.
+- `Caddyfile` proxies your domain to the app on 127.0.0.1:3000 and allows git pushes up to 2 GB.
+- `deploy.sh` packs the committed code and runs `setup.sh` on a Google Cloud VM over IAP SSH.
+
+```bash
+deploy/deploy.sh
+```
+
+Point your domain's A record at the VM first, so Caddy can get a certificate. Then create the first admin on the server:
+
+```bash
+gcloud compute ssh gitfkd-1 --zone us-central1-a --tunnel-through-iap --command "cd /opt/gitfkd && sudo -u gitfkd env \$(sudo cat /etc/gitfkd.env) node --disable-warning=ExperimentalWarning --import tsx src/cli/admin-create.ts yourname you@example.com"
+```
 
 ## Development
 

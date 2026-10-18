@@ -19,7 +19,10 @@ export function testDeps(overrides: Partial<Config> = {}): Deps {
   migrate(db);
   const dataDir = tmpDir();
   mkdirSync(join(dataDir, "repos"));
-  return { db, config: { dataDir, port: 0, baseUrl: "http://localhost:3000", allowUserInvites: false, ...overrides } };
+  return {
+    db,
+    config: { dataDir, port: 0, host: undefined, baseUrl: "http://localhost:3000", allowUserInvites: false, trustedProxies: [], ...overrides },
+  };
 }
 
 export function git(cwd: string, ...args: string[]): string {

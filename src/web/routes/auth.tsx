@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Deps } from "../../deps.js";
+import { clientAddress } from "../../clientAddress.js";
 import { ValidationError } from "../../services/errors.js";
 import { authenticate, createSession, deleteSession, inviteStatus, redeemInvite } from "../../services/users.js";
 import type { Env } from "../env.js";
@@ -14,12 +15,14 @@ const failures = new Map<string, { count: number; until: number }>();
 const MAX_FAILURES = 10;
 const WINDOW_MS = 15 * 60 * 1000;
 
-function clientAddress(c: Context<Env>): string {
+function requestAddress(c: Context<Env>, deps: Deps): string {
+  let peer: string | undefined;
   try {
-    return getConnInfo(c).remote.address ?? "unknown";
+    peer = getConnInfo(c).remote.address;
   } catch {
-    return "unknown"; // in-process requests (tests) have no socket
+    // in-process requests (tests) have no socket
   }
+  return clientAddress(peer, c.req.header("x-forwarded-for"), deps.config.trustedProxies);
 }
 
 function throttled(key: string): boolean {
@@ -110,7 +113,7 @@ export function authRoutes(deps: Deps, app: Hono<Env>) {
     const f = await form(c);
     const username = field(f, "username").trim();
     const next = safeNext(c.req.query("next"));
-    const key = `${username.toLowerCase()}|${clientAddress(c)}`;
+    const key = `${username.toLowerCase()}|${requestAddress(c, deps)}`;
     if (throttled(key)) {
       return render(c, "Sign in", <LoginPage csrf={c.get("csrf")} next={next} username={username} error="Too many failed attempts. Try again in a few minutes." />, 429);
     }
