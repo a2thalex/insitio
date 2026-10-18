@@ -7,7 +7,7 @@ import { loadConfig } from "../src/config.js";
 import { testApp } from "./helpers.js";
 
 const BASE = "https://git.iam.bot";
-const DEFAULT_REPO = "a2thalex/gitfkd";
+const DEFAULT_REPO = "a2thalex/insitio";
 const ASSETS = ["nsit-windows-x64.exe", "nsit-linux-x64", "nsit-macos-arm64", "nsit-macos-x64"];
 const releaseUrl = (repo: string, asset: string) => `https://github.com/${repo}/releases/latest/download/${asset}`;
 
@@ -275,7 +275,7 @@ describe("GET /install.ps1", () => {
 });
 
 describe("releaseRepo config", () => {
-  it("defaults to a2thalex/gitfkd", () => {
+  it("defaults to a2thalex/insitio", () => {
     expect(loadConfig({} as NodeJS.ProcessEnv).releaseRepo).toBe(DEFAULT_REPO);
     expect(loadConfig({ NSIT_RELEASE_REPO: "" } as NodeJS.ProcessEnv).releaseRepo).toBe(DEFAULT_REPO);
   });

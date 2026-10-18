@@ -38,7 +38,7 @@ export function testDeps(overrides: Partial<Config> = {}): Deps {
       baseUrl: "http://localhost:3000",
       allowUserInvites: false,
       trustedProxies: [],
-      releaseRepo: "a2thalex/gitfkd",
+      releaseRepo: "a2thalex/insitio",
       requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
       headersTimeoutMs: DEFAULT_HEADERS_TIMEOUT_MS,
       gitDrainMaxBytes: DEFAULT_GIT_DRAIN_MAX_BYTES,

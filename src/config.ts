@@ -27,7 +27,7 @@ export type Config = {
   gitDrainIdleMs: number;
 };
 
-const DEFAULT_RELEASE_REPO = "a2thalex/gitfkd";
+const DEFAULT_RELEASE_REPO = "a2thalex/insitio";
 // The value is written into generated shell scripts, so only plain owner/repo names are accepted.
 const RELEASE_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 

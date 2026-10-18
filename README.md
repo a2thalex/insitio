@@ -83,7 +83,7 @@ curl -fsSL https://git.example.com/install.sh | sh
 
 Each script downloads the binary for your system from the latest GitHub release, checks its SHA-256 against the release's `SHA256SUMS` and stops if it does not match. Nothing needs admin rights: nsit goes to `%LOCALAPPDATA%\Programs\nsit` on Windows (and onto your user PATH) and to `~/.local/bin` on macOS and Linux. Open a script in your browser first if you want to read it.
 
-To install by hand, take the file for your system from the [latest release](https://github.com/a2thalex/gitfkd/releases/latest) and check it against `SHA256SUMS` from the same release:
+To install by hand, take the file for your system from the [latest release](https://github.com/a2thalex/insitio/releases/latest) and check it against `SHA256SUMS` from the same release:
 
 | File | System |
 |---|---|
@@ -207,7 +207,7 @@ This needs Rust 1.89 or later and a C compiler: libgit2 is compiled into the bin
 | `BASE_URL` | `http://localhost:$PORT` | Public URL, used in clone URLs and invite links. An `https://` value turns on secure cookies. |
 | `DATA_DIR` | `./data` | Database (`gitfkd.db`) and bare repositories (`repos/<owner>/<name>.git`) |
 | `ALLOW_USER_INVITES` | unset | `1` lets non-admins create invite links |
-| `NSIT_RELEASE_REPO` | `a2thalex/gitfkd` | GitHub `owner/repo` whose Releases hold the `nsit` binaries that `/download`, `/install.ps1` and `/install.sh` point at |
+| `NSIT_RELEASE_REPO` | `a2thalex/insitio` | GitHub `owner/repo` whose Releases hold the `nsit` binaries that `/download`, `/install.ps1` and `/install.sh` point at |
 | `TRUST_PROXY` | unset | `1` trusts a proxy on loopback (or a comma list of proxy IPs) for client addresses, and binds the app to 127.0.0.1 |
 | `HOST` | all interfaces (127.0.0.1 with `TRUST_PROXY`) | Interface to listen on |
 | `REQUEST_TIMEOUT_MS` | `7200000` (2 hours) | The longest a client may take to send one whole request. Large git pushes (up to 2 GB) are sent in one request, so this is long; it is a bound and cannot be 0. Node's own default is 5 minutes, which would cut off a slow push. |
