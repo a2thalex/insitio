@@ -199,6 +199,7 @@ function buildNsit(): Promise<string> {
 }
 
 export type NsitOptions = {
+  /** Where nsit runs. Default: a fresh empty temporary directory, never the directory of the test run. */
   cwd?: string;
   /** Extra environment variables; `undefined` removes one. Applied after the isolation below. */
   env?: Record<string, string | undefined>;
@@ -258,7 +259,10 @@ export async function startNsit(args: string[], opts: NsitOptions = {}): Promise
   const bin = await nsitBin();
   const stdin = opts.input !== undefined || opts.stdin === "open" ? "pipe" : "ignore";
   const child = spawn(bin, args, {
-    cwd: opts.cwd,
+    // Never this project's own repository (the working directory of the test run): a command that
+    // acts on "the repository here" (pull, push, commit) must not be able to reach it by a test that
+    // forgot to name a directory. `-C <dir>` and `cwd` are how a test says where nsit runs.
+    cwd: opts.cwd ?? tmpDir(),
     env: nsitEnv(opts.configDir ?? tmpDir(), opts.env),
     stdio: [stdin, "pipe", "pipe"],
     windowsHide: true,

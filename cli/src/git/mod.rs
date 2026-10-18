@@ -10,22 +10,27 @@
 //! path in the repository, and paths as raw bytes), `stage` (staging and the
 //! questions about the repository's state), `secrets` (the guard a commit
 //! applies), `commit` (making a commit: `nsit commit` and `nsit init`
-//! both call it), `readme` (the starter README), `origin` (`origin` as
-//! a repository on the selected host) and `push` (sending a branch to `origin`
-//! and the upstream settings: `nsit push` and the first push of `nsit init`
-//! both call it). No command module is needed by another.
+//! both call it), `readme` (the starter README), `origin` (a remote's URL as
+//! a repository on an Insitio server, and `origin` as one on the selected host),
+//! `upstream` (the two settings that tie a branch to a remote branch: `push` and
+//! `clone` write them, `pull` reads them), `push` (sending a branch to `origin`:
+//! `nsit push` and the first push of `nsit init` both call it) and `pull`
+//! (fetching the upstream branch and bringing it in, and undoing a merge). No
+//! command module is needed by another.
 //!
-//! `clone` and `push` are the commands that call `run_remote` so far.
+//! `clone`, `push` and `pull` are the commands that call `run_remote`.
 
 pub mod auth;
 pub mod commit;
 pub mod origin;
 pub mod paths;
 pub mod progress;
+pub mod pull;
 pub mod push;
 pub mod readme;
 pub mod secrets;
 pub mod stage;
+pub mod upstream;
 
 // What the git commands import from `crate::git`. `run_remote` is the only
 // way onto the network: its credential step stays private to `auth`.

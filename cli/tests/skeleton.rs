@@ -1,17 +1,33 @@
-//! Runs the real `nsit` binary: version string, usage errors, the network
-//! command that is still a stub (`pull`), signed-out behavior, and the rule that a bad
-//! `--jq` fails before any command runs. The local commands are in `tests/local.rs`.
+//! Runs the real `nsit` binary: version string, usage errors, `pull` without a server to
+//! pull from, signed-out behavior, and the rule that a bad `--jq` fails before any command
+//! runs. The local commands are in `tests/local.rs`; what talks to a server is in
+//! `tests/nsit.e2e.test.ts`.
+//!
+//! **Every run happens in a directory of its own** (`nsit` here, `nsit_in`, `run_signed_out`):
+//! the working directory of a test is the crate directory, which is inside this project's own
+//! git repository, and a command that acts on "the repository here" (`pull`, `push`, `commit`)
+//! must never be able to reach it.
 
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// Run `nsit <args>` in an empty directory of its own, with a config directory of its own.
 fn nsit(args: &[&str]) -> Output {
+    let work = tempfile::tempdir().unwrap();
+    nsit_in(work.path(), args)
+}
+
+/// Run `nsit <args>` in `work`, with a config directory of its own, no host, no token, and the OS
+/// credential store switched off.
+fn nsit_in(work: &Path, args: &[&str]) -> Output {
     let config = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_nsit"))
         .args(args)
+        .current_dir(work)
         .env("NSIT_CONFIG_DIR", config.path())
+        .env("NSIT_NO_KEYCHAIN", "1")
         .env_remove("NSIT_HOST")
         .env_remove("NSIT_TOKEN")
         .env("NO_COLOR", "1")
@@ -77,35 +93,88 @@ fn help_lists_every_v1_command_and_exits_zero() {
     }
 }
 
+/// A throwaway repository on `main` with one commit and no remote: nothing to pull from, and
+/// nothing a command could do to the project's own repository.
+fn lonely_repo(dir: &Path) -> git2::Repository {
+    let mut options = git2::RepositoryInitOptions::new();
+    options.initial_head("main");
+    let repo = git2::Repository::init_opts(dir, &options).unwrap();
+    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("a.txt")).unwrap();
+    index.write().unwrap();
+    {
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let who = git2::Signature::now("Test", "test@example.com").unwrap();
+        repo.commit(Some("HEAD"), &who, &who, "one", &tree, &[])
+            .unwrap();
+    }
+    repo
+}
+
 #[test]
-fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
-    // `auth`, `repo`, `clone`, `push` and the local commands are implemented
-    // (tests/nsit.e2e.test.ts and tests/local.rs); `pull` is the one left. (This must never
-    // list a command that does something: these runs have the crate directory, which is inside
-    // this project's own repository, as their working directory.)
-    let invocations: &[&[&str]] = &[
-        &["pull"],
-        &["pull", "--abort"],
-        // Global flags after the subcommand.
-        &[
-            "pull",
-            "--json",
-            "--jq",
-            ".[].name",
-            "--host",
-            "h.example",
-            "-q",
-            "--no-color",
-            "-C",
-            "somewhere",
-        ],
-    ];
-    for args in invocations {
-        let o = nsit(args);
-        let label = args.join(" ");
-        assert_eq!(o.status.code(), Some(1), "nsit {label}: {}", stderr(&o));
-        assert_eq!(stderr(&o), "nsit: not implemented\n", "nsit {label}");
-        assert_eq!(stdout(&o), "", "nsit {label}");
+fn pull_without_a_branch_to_pull_from_is_a_usage_error_that_says_what_to_do() {
+    // Each of these runs in a repository of its own, never the project's.
+    let work = tempfile::tempdir().unwrap();
+    let repo = lonely_repo(work.path());
+    let before = std::fs::read_to_string(work.path().join("a.txt")).unwrap();
+
+    // No upstream: the hint is nsit push.
+    let o = nsit_in(work.path(), &["pull"]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert_eq!(
+        stderr(&o),
+        "nsit: main has no upstream branch: run nsit push to send it to Insitio and track it\n"
+    );
+    assert_eq!(stdout(&o), "");
+
+    // Global flags after the subcommand are fine, and -C is honoured.
+    let o = nsit(&[
+        "pull",
+        "--json",
+        "--jq",
+        ".[].name",
+        "--host",
+        "h.example",
+        "-q",
+        "--no-color",
+        "-C",
+        work.path().to_str().unwrap(),
+    ]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(stderr(&o).contains("no upstream branch"), "{}", stderr(&o));
+
+    // Nothing to abort.
+    let o = nsit_in(work.path(), &["pull", "--abort"]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert_eq!(
+        stderr(&o),
+        "nsit: there is no merge in progress, so there is nothing to abort\n"
+    );
+    assert_eq!(stdout(&o), "");
+
+    // Nothing was touched.
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("a.txt")).unwrap(),
+        before
+    );
+    assert!(repo.find_reference("refs/remotes/origin/main").is_err());
+    assert_eq!(repo.state(), git2::RepositoryState::Clean);
+}
+
+#[test]
+fn pull_outside_a_repository_says_to_run_nsit_init() {
+    let work = tempfile::tempdir().unwrap();
+    // Only meaningful when nothing above the temp dir is a repository.
+    if work.path().ancestors().any(|p| p.join(".git").exists()) {
+        eprintln!("skipped: the temp dir is inside a git repository");
+        return;
+    }
+    for args in [&["pull"][..], &["pull", "--abort"]] {
+        let o = nsit_in(work.path(), args);
+        assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+        assert_eq!(stderr(&o), "nsit: not a git repository (run nsit init)\n");
+        assert_eq!(stdout(&o), "");
     }
 }
 
@@ -216,19 +285,7 @@ fn clone_signed_out_exits_3_at_once_never_reads_stdin_and_makes_nothing() {
 /// A repository on `main` with one commit, whose `origin` is a server nothing listens on:
 /// where an agent that never signed in would be.
 fn repo_with_an_origin_nobody_answers(dir: &Path) -> git2::Repository {
-    let mut options = git2::RepositoryInitOptions::new();
-    options.initial_head("main");
-    let repo = git2::Repository::init_opts(dir, &options).unwrap();
-    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
-    let mut index = repo.index().unwrap();
-    index.add_path(Path::new("a.txt")).unwrap();
-    index.write().unwrap();
-    {
-        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let who = git2::Signature::now("Test", "test@example.com").unwrap();
-        repo.commit(Some("HEAD"), &who, &who, "one", &tree, &[])
-            .unwrap();
-    }
+    let repo = lonely_repo(dir);
     repo.remote("origin", "http://127.0.0.1:9/ada/tools.git")
         .unwrap();
     repo
@@ -267,6 +324,50 @@ fn push_signed_out_exits_3_at_once_never_reads_stdin_and_moves_nothing() {
     }
 }
 
+/// Review Focus 2 for `nsit pull`: signed out, stdin an open pipe nobody writes to, and an
+/// upstream whose server would not answer anyway. It exits 3 with the sign-in hint at once,
+/// without reading stdin or touching the network, and nothing in the repository changes.
+#[test]
+fn pull_signed_out_exits_3_at_once_never_reads_stdin_and_moves_nothing() {
+    let invocations: &[&[&str]] = &[&["pull"], &["pull", "--json"], &["pull", "--jq", ".result"]];
+    for args in invocations {
+        let work = tempfile::tempdir().unwrap();
+        let repo = repo_with_an_origin_nobody_answers(work.path());
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("branch.main.remote", "origin").unwrap();
+            config
+                .set_str("branch.main.merge", "refs/heads/main")
+                .unwrap();
+        }
+        let config_before = std::fs::read_to_string(repo.path().join("config")).unwrap();
+        let head_before = repo.head().unwrap().target().unwrap();
+        let (code, out, err) = run_signed_out(args, work.path());
+        let label = format!("nsit {}", args.join(" "));
+        assert_eq!(code, Some(3), "{label}: {err}");
+        assert_eq!(out, "", "{label}");
+        assert_eq!(err, SIGN_IN_HINT, "{label}");
+        assert!(
+            repo.find_reference("refs/remotes/origin/main").is_err(),
+            "{label} recorded a fetch that did not happen"
+        );
+        assert_eq!(
+            repo.head().unwrap().target().unwrap(),
+            head_before,
+            "{label}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("config")).unwrap(),
+            config_before,
+            "{label} changed the repository's config"
+        );
+        assert!(
+            !repo.path().join("ORIG_HEAD").exists(),
+            "{label} wrote ORIG_HEAD for a pull that never started"
+        );
+    }
+}
+
 #[test]
 fn unknown_command_and_missing_arguments_exit_2() {
     for args in [
@@ -291,9 +392,11 @@ fn unknown_command_and_missing_arguments_exit_2() {
 
 #[test]
 fn bad_jq_exits_2_before_the_command_runs() {
-    // `pull` is a stub that would exit 1; reaching exit 2 proves the
-    // expression was checked first.
-    let o = nsit(&["pull", "--jq", ".["]);
+    // In a repository that `pull` itself would stop at, with exit 2 and its own message: the
+    // message tells which of the two came first.
+    let work = tempfile::tempdir().unwrap();
+    lonely_repo(work.path());
+    let o = nsit_in(work.path(), &["pull", "--jq", ".["]);
     assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(
@@ -305,8 +408,11 @@ fn bad_jq_exits_2_before_the_command_runs() {
 }
 
 #[test]
-fn valid_jq_reaches_the_stub() {
-    let o = nsit(&["pull", "--jq", ".name"]);
-    assert_eq!(o.status.code(), Some(1));
-    assert_eq!(stderr(&o), "nsit: not implemented\n");
+fn a_valid_jq_expression_reaches_the_command() {
+    let work = tempfile::tempdir().unwrap();
+    lonely_repo(work.path());
+    let o = nsit_in(work.path(), &["pull", "--jq", ".result"]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(stderr(&o).contains("no upstream branch"), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "");
 }

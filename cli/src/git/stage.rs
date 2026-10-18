@@ -195,11 +195,35 @@ pub fn changed_paths(
     base: Option<&Tree<'_>>,
 ) -> Result<Vec<RawPath>, NsitError> {
     let diff = repo.diff_tree_to_index(base, Some(index), None)?;
-    Ok(diff
-        .deltas()
-        .filter(|delta| delta.status() != Delta::Deleted)
-        .filter_map(|delta| delta.new_file().path_bytes().map(<[u8]>::to_vec))
-        .collect())
+    collect_changed(diff.deltas().map(|delta| {
+        (
+            delta.status(),
+            delta.new_file().path_bytes().map(<[u8]>::to_vec),
+        )
+    }))
+}
+
+/// The paths of the changes that are not deletions, from `(status, new path)` pairs.
+/// **Fails closed**: a change that is not a deletion and has no path is an error, never a change
+/// that is quietly left out. The secret guard scans exactly these paths, so a path that dropped
+/// out here would be a file that was committed unread.
+fn collect_changed(
+    changes: impl IntoIterator<Item = (Delta, Option<RawPath>)>,
+) -> Result<Vec<RawPath>, NsitError> {
+    let mut paths = Vec::new();
+    for (status, path) in changes {
+        if status == Delta::Deleted {
+            continue;
+        }
+        let Some(path) = path else {
+            return Err(NsitError::Other(
+                "cannot tell which file a change is about, so it cannot be checked for secrets                  (this is a bug in nsit)"
+                    .into(),
+            ));
+        };
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 /// `GIT_INDEX_ENTRY_STAGEMASK`: the two bits of an entry's flags that hold its
@@ -509,6 +533,34 @@ mod tests {
         stage_all(&mut index).unwrap();
         let paths = changed_paths(&fresh, &index, None).unwrap();
         assert_eq!(paths, [b"x.txt".to_vec()]);
+    }
+
+    #[test]
+    fn a_change_without_a_path_is_an_error_not_a_file_that_is_left_out() {
+        // Deletions have nothing left to check, with a path or without one.
+        let found = collect_changed([
+            (Delta::Added, Some(b"a.txt".to_vec())),
+            (Delta::Deleted, Some(b"gone.txt".to_vec())),
+            (Delta::Deleted, None),
+            (Delta::Modified, Some(b"b.txt".to_vec())),
+        ])
+        .unwrap();
+        assert_eq!(found, [b"a.txt".to_vec(), b"b.txt".to_vec()]);
+        // Anything else without a path must not be skipped: the guard would never see that file.
+        for status in [
+            Delta::Added,
+            Delta::Modified,
+            Delta::Renamed,
+            Delta::Copied,
+            Delta::Typechange,
+            Delta::Unmodified,
+        ] {
+            let err = collect_changed([(Delta::Added, Some(b"a.txt".to_vec())), (status, None)])
+                .unwrap_err();
+            assert!(matches!(err, NsitError::Other(_)), "{status:?}: {err:?}");
+            assert!(err.to_string().contains("bug in nsit"), "{err}");
+            assert_eq!(err.exit_code(), 1);
+        }
     }
 
     #[test]

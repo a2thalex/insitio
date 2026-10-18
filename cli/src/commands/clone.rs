@@ -31,7 +31,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use git2::build::RepoBuilder;
-use git2::{Branch, ConfigLevel, ErrorCode, Repository};
+use git2::{Branch, ErrorCode, Repository};
 use serde::Serialize;
 
 use super::repo::{named_repo, not_found};
@@ -41,6 +41,7 @@ use crate::config::{base_url, resolve_host};
 use crate::error::NsitError;
 use crate::git::run_remote;
 use crate::git::stage::{current_branch, head_commit};
+use crate::git::upstream::{clear_upstream, set_upstream};
 use crate::output::{for_display, strip_controls, Out};
 use crate::repo_ref::{parse_repo_ref, token_for_repo, RepoRef};
 
@@ -219,23 +220,11 @@ fn default_branch(repo: &RepoJson) -> String {
 /// names, with tracking settings for that name. When the server's default branch
 /// is another, those settings are removed with the move.
 fn point_unborn_head_at(repo: &Repository, branch: &str) -> Result<(), NsitError> {
-    let mut config = repo.config()?.open_level(ConfigLevel::Local)?;
     if let Some(guessed) = current_branch(repo).filter(|guessed| guessed != branch) {
-        for key in ["remote", "merge"] {
-            match config.remove(&format!("branch.{guessed}.{key}")) {
-                Ok(()) => {}
-                Err(e) if e.code() == ErrorCode::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
+        clear_upstream(repo, &guessed)?;
     }
     repo.set_head(&format!("refs/heads/{branch}"))?;
-    config.set_str(&format!("branch.{branch}.remote"), "origin")?;
-    config.set_str(
-        &format!("branch.{branch}.merge"),
-        &format!("refs/heads/{branch}"),
-    )?;
-    Ok(())
+    set_upstream(repo, branch, "origin")
 }
 
 /// After the fetch: a `HEAD` with commits is left as libgit2 made it (checked

@@ -27,15 +27,25 @@
 //!   updating anything. `refs/remotes/origin/<b>` is written here, after every ref was
 //!   accepted (or the server already had it), and `refs/heads/<b>` is never written.
 //!   Setting the upstream (`branch.<b>.remote` and `.merge`) happens after that too.
+//! * **Which address the push goes to is not what keeps the token safe.** The push is made
+//!   from an anonymous remote built from the URL nsit checked (`origin`'s URL, read as a
+//!   repository on an Insitio server), so nothing configured for a remote in `.git/config`
+//!   (`pushurl`, refspecs) applies. But libgit2 still applies `url.<base>.insteadOf` and
+//!   `url.<base>.pushInsteadOf` rewrites from the git configuration to any URL it is given,
+//!   so the request can go to an address other than the one nsit checked. What protects
+//!   the token is the credential provider in `auth`: it answers a credentials request only
+//!   for the one host the token was chosen for, and a request for any other host gets
+//!   nothing (redirects to other hosts are refused as well).
 //! * **Errors are said in one line**, with the server named, and never carry more than
 //!   libgit2's own words (a token is never part of those).
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use git2::{ConfigLevel, ErrorClass, ErrorCode, Oid, PushUpdate, Repository};
+use git2::{ErrorClass, ErrorCode, Oid, PushUpdate, Repository};
 
 use super::auth::run_remote;
+use super::upstream::{has_upstream, set_upstream};
 use super::RemoteAccess;
 use crate::error::{one_line, NsitError};
 use crate::output::{strip_controls, Out};
@@ -85,7 +95,7 @@ pub fn push_branch(
         })
     })?;
     if set_upstream_now || !has_upstream(repo, branch)? {
-        set_upstream(repo, branch)?;
+        set_upstream(repo, branch, "origin")?;
     }
     Ok(pushed)
 }
@@ -128,9 +138,11 @@ fn push_via(
     })
 }
 
-/// The libgit2 push itself, to an anonymous remote at `url` (the URL nsit checked, not
-/// whatever `.git/config` says about `origin`), with the hooks added to the options that
-/// `run_remote` hands out.
+/// The libgit2 push itself, to an anonymous remote made from `url` (the URL nsit checked;
+/// `.git/config`'s own settings for `origin` are not used), with the hooks added to the options
+/// that `run_remote` hands out. libgit2 may still rewrite `url` by `insteadOf` settings, so
+/// this is not what keeps the token from another host: the credential provider is (see the
+/// module documentation).
 fn upload(
     repo: &Repository,
     url: &str,
@@ -347,59 +359,36 @@ fn push_error(err: NsitError, target: &RepoRef, refname: &str) -> NsitError {
             "{} answered the push with HTTP {code}",
             target.host_key()
         )),
-        None => {
-            let text = one_line(git.message(), MAX_REASON);
-            let network = matches!(
-                git.class(),
-                ErrorClass::Net | ErrorClass::Os | ErrorClass::Http | ErrorClass::Ssl
-            );
-            if network {
-                NsitError::Other(format!("cannot reach {}: {text}", target.host_key()))
-            } else {
-                NsitError::Other(text)
-            }
-        }
+        None => plain_failure(&git, target),
+    }
+}
+
+/// One line for a libgit2 failure that is neither a refusal nor an HTTP status: the server named
+/// when it was a network matter (`cannot reach <server>: <why>`), libgit2's own words otherwise.
+/// Used by `pull` too.
+pub(super) fn plain_failure(git: &git2::Error, target: &RepoRef) -> NsitError {
+    let text = one_line(git.message(), MAX_REASON);
+    let network = matches!(
+        git.class(),
+        ErrorClass::Net | ErrorClass::Os | ErrorClass::Http | ErrorClass::Ssl
+    );
+    if network {
+        NsitError::Other(format!("cannot reach {}: {text}", target.host_key()))
+    } else {
+        NsitError::Other(text)
     }
 }
 
 /// The HTTP status libgit2 names in an error, when it refused to go on because of one:
 /// "unexpected http status code: 403" from its own HTTP client, "request failed with status
 /// code: 403" from WinHTTP.
-fn http_status(err: &git2::Error) -> Option<u16> {
+pub(super) fn http_status(err: &git2::Error) -> Option<u16> {
     if err.class() != ErrorClass::Http {
         return None;
     }
     let (_, rest) = err.message().split_once("status code: ")?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
-}
-
-// ---- the upstream ------------------------------------------------------------------------
-
-/// Does `branch` have both of `branch.<b>.remote` and `branch.<b>.merge` in this
-/// repository's own config?
-pub fn has_upstream(repo: &Repository, branch: &str) -> Result<bool, NsitError> {
-    let config = repo.config()?.open_level(ConfigLevel::Local)?;
-    for key in ["remote", "merge"] {
-        match config.get_string(&format!("branch.{branch}.{key}")) {
-            Ok(value) if !value.trim().is_empty() => {}
-            Ok(_) => return Ok(false),
-            Err(e) if e.code() == ErrorCode::NotFound => return Ok(false),
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(true)
-}
-
-/// Make `origin/<branch>` the upstream of `branch`, in this repository's own config.
-pub fn set_upstream(repo: &Repository, branch: &str) -> Result<(), NsitError> {
-    let mut config = repo.config()?.open_level(ConfigLevel::Local)?;
-    config.set_str(&format!("branch.{branch}.remote"), "origin")?;
-    config.set_str(
-        &format!("branch.{branch}.merge"),
-        &format!("refs/heads/{branch}"),
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1143,72 +1132,6 @@ mod tests {
         assert_eq!(
             refspec("refs/heads/release/1.0", true),
             "+refs/heads/release/1.0:refs/heads/release/1.0"
-        );
-    }
-
-    // ---- the upstream --------------------------------------------------------------------------
-
-    fn local(repo: &Repository, key: &str) -> Option<String> {
-        repo.config()
-            .unwrap()
-            .open_level(ConfigLevel::Local)
-            .unwrap()
-            .get_string(key)
-            .ok()
-    }
-
-    #[test]
-    fn a_branch_without_tracking_settings_has_no_upstream_until_one_is_set() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = local_repo(dir.path());
-        assert!(!has_upstream(&repo, "main").unwrap());
-        set_upstream(&repo, "main").unwrap();
-        assert!(has_upstream(&repo, "main").unwrap());
-        assert_eq!(
-            local(&repo, "branch.main.remote").as_deref(),
-            Some("origin")
-        );
-        assert_eq!(
-            local(&repo, "branch.main.merge").as_deref(),
-            Some("refs/heads/main")
-        );
-        // Another branch is still without.
-        assert!(!has_upstream(&repo, "dev").unwrap());
-    }
-
-    #[test]
-    fn half_a_setting_is_not_an_upstream_and_setting_one_repairs_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = local_repo(dir.path());
-        repo.config()
-            .unwrap()
-            .set_str("branch.main.remote", "origin")
-            .unwrap();
-        assert!(!has_upstream(&repo, "main").unwrap());
-        set_upstream(&repo, "main").unwrap();
-        assert!(has_upstream(&repo, "main").unwrap());
-    }
-
-    #[test]
-    fn setting_the_upstream_replaces_what_was_there_and_handles_dots_and_slashes() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = local_repo(dir.path());
-        {
-            let mut config = repo.config().unwrap();
-            config.set_str("branch.release/1.0.remote", "fork").unwrap();
-            config
-                .set_str("branch.release/1.0.merge", "refs/heads/other")
-                .unwrap();
-        }
-        assert!(has_upstream(&repo, "release/1.0").unwrap());
-        set_upstream(&repo, "release/1.0").unwrap();
-        assert_eq!(
-            local(&repo, "branch.release/1.0.remote").as_deref(),
-            Some("origin")
-        );
-        assert_eq!(
-            local(&repo, "branch.release/1.0.merge").as_deref(),
-            Some("refs/heads/release/1.0")
         );
     }
 

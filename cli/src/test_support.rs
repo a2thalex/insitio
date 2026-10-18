@@ -110,7 +110,7 @@ pub(crate) fn diverged_repo(dir: &Path) -> Repository {
     repo
 }
 
-/// Start merging `branch` into `HEAD`, as `nsit pull` will: `MERGE_HEAD` is
+/// Start merging `branch` into `HEAD`, as `nsit pull` does: `MERGE_HEAD` is
 /// written and the index and working files are updated, with conflict markers
 /// where the two sides disagree. Nothing is committed.
 pub(crate) fn merge_branch(repo: &Repository, branch: &str) {

@@ -32,10 +32,11 @@ use crate::cli::{GlobalArgs, PushArgs};
 use crate::config::{base_url, resolve_host};
 use crate::error::NsitError;
 use crate::git::open_repo;
+use crate::git::origin::repo_ref_from_url;
 use crate::git::push::{push_branch, Mode, Pushed};
 use crate::git::stage::{current_branch, head_commit};
 use crate::output::{for_display, Out};
-use crate::repo_ref::{parse_repo_ref, RepoRef};
+use crate::repo_ref::RepoRef;
 
 /// `--json` for `nsit push`.
 #[derive(Debug, Serialize)]
@@ -111,19 +112,14 @@ fn origin_target(repo: &Repository, selected_host: &str) -> Result<RepoRef, Nsit
         ),
         _ => NsitError::Git(e),
     })?;
-    let url = remote.url()?;
-    let unusable = |why: &str| {
+    // Only a full URL counts (see `repo_ref_from_url`): `owner/name` alone would be read as
+    // being on the selected server, and git would take it for a path.
+    repo_ref_from_url(remote.url()?, &base_url(selected_host)?).map_err(|why| {
         NsitError::Usage(format!(
             "origin is not a repository URL nsit can push to ({why}); it should look like \
              https://<server>/<owner>/<name>.git"
         ))
-    };
-    // `owner/name` alone would be read as being on the selected server, and git would take
-    // it for a path: only a full URL counts.
-    if !url.contains("://") {
-        return Err(unusable("it is not a URL"));
-    }
-    parse_repo_ref(url, "", &base_url(selected_host)?).map_err(|e| unusable(&e.to_string()))
+    })
 }
 
 fn describe(json: &PushJson, tty: bool) -> String {
@@ -143,6 +139,7 @@ mod tests {
     use git2::Oid;
 
     use super::*;
+    use crate::repo_ref::parse_repo_ref;
     use crate::test_support::{commit_file, local_repo};
 
     // ---- which branch --------------------------------------------------------------------

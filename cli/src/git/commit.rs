@@ -8,7 +8,9 @@
 //! (exit 4), a usage error, "nothing to commit", and a commit that libgit2 cannot
 //! make (a locked branch, say) therefore all leave the index file exactly as it
 //! was. The one thing written before the commit is `.nsit-allow-secrets`, and
-//! only for `--allow-secret` paths, once the guard has nothing left to refuse.
+//! only for `--allow-secret` paths, once the guard has nothing left to refuse; if
+//! the commit then fails (or turns out to be empty) that file is put back byte for
+//! byte, or removed if it was not there.
 //!
 //! A merge in progress (`MERGE_HEAD`, left by `nsit pull`) is finished by the
 //! same call: two parents, and the merge state is cleared.
@@ -123,11 +125,22 @@ pub fn commit_changes(
 
     // Staging a file with conflict markers resolves it as far as the index is
     // concerned, and so does `nsit add`; committing the markers is almost never
-    // what anyone wants. Files that were in conflict are checked, and while a
-    // merge is being finished so is every file this commit changes.
+    // what anyone wants. Files that were in conflict are checked, and while a merge
+    // is being finished so is every file that **both** differs from the merged-in
+    // branch and differs from `HEAD`: that is a file this merge (or the person finishing
+    // it) changed. A file only our side changed, earlier, is not this commit's doing:
+    // documentation that shows what a conflict looks like must not block the merge.
     let mut to_check: BTreeSet<RawPath> = in_conflict.into_iter().collect();
     if !merging.is_empty() {
-        to_check.extend(candidates.iter().cloned());
+        let differs_from_head: BTreeSet<RawPath> = changed_paths(repo, &index, head_tree.as_ref())?
+            .into_iter()
+            .collect();
+        to_check.extend(
+            candidates
+                .iter()
+                .filter(|path| differs_from_head.contains(*path))
+                .cloned(),
+        );
     }
     let marked = with_conflict_markers(repo, &index, &to_check.into_iter().collect::<Vec<_>>())?;
     if !marked.is_empty() {
@@ -143,36 +156,44 @@ pub fn commit_changes(
     }
     // Past the guard: record the allowances in one write and stage the file in
     // this same index, so they travel with this commit.
-    record_allowances(repo, &mut index, &pending)?;
+    let backup = record_allowances(repo, &mut index, &pending)?;
 
-    let tree_id = index.write_tree()?;
-    let same_as_head = head_tree.as_ref().map(Tree::id) == Some(tree_id);
-    let nothing_at_all = head.is_none() && index.is_empty();
-    if merging.is_empty() && (same_as_head || nothing_at_all) {
-        return Ok(Outcome::NothingToCommit);
-    }
-
-    let tree = repo.find_tree(tree_id)?;
-    let changes = changes_between(repo, head_tree.as_ref(), &tree)?;
-    let mut parents: Vec<Commit<'_>> = head.into_iter().collect();
-    for oid in &merging {
-        parents.push(repo.find_commit(*oid)?);
-    }
-    let parent_refs: Vec<&Commit<'_>> = parents.iter().collect();
-    let id = repo.commit(
-        Some("HEAD"),
+    // The allow file is now changed in the working directory. Until a commit exists
+    // anything that goes wrong (and "nothing to commit") takes the change back, so a
+    // commit that is not made leaves no allowance behind and an allow file that was
+    // there is exactly as it was.
+    let (id, changes) = match commit_tree(
+        repo,
         who,
-        who,
-        &request.message,
-        &tree,
-        &parent_refs,
-    )?;
-    // Only now does the index reach the disk: if the commit had failed, the
-    // index file would still be what it was before.
-    index.write()?;
+        request,
+        &mut index,
+        head.as_ref(),
+        head_tree.as_ref(),
+        &merging,
+    ) {
+        Ok(Some(made)) => made,
+        Ok(None) => {
+            if let Some(backup) = backup {
+                backup.restore()?;
+            }
+            return Ok(Outcome::NothingToCommit);
+        }
+        Err(err) => {
+            return Err(match backup {
+                Some(backup) => backup.restore_after(err),
+                None => err,
+            });
+        }
+    };
+    // The merge is over once its commit exists, so its state goes before anything else can
+    // fail: a write of the index that does not work must not leave a `MERGE_HEAD` waiting
+    // over a finished merge (the next commit would be a second merge of the same parents).
     if !merging.is_empty() {
         repo.cleanup_state()?;
     }
+    // Only now does the index reach the disk: if the commit had failed, the
+    // index file would still be what it was before.
+    index.write()?;
     Ok(Outcome::Committed(Committed {
         id,
         branch: current_branch(repo),
@@ -184,6 +205,36 @@ pub fn commit_changes(
             .to_string(),
         changes,
     }))
+}
+
+/// The commit itself: the tree of `index`, committed on `HEAD` with `head` and every commit
+/// being merged in as its parents. `None` when there is nothing to commit (and no merge to
+/// finish). Writes the tree to the object database and moves the branch, and nothing else.
+fn commit_tree(
+    repo: &Repository,
+    who: &Signature<'_>,
+    request: &Request,
+    index: &mut Index,
+    head: Option<&Commit<'_>>,
+    head_tree: Option<&Tree<'_>>,
+    merging: &[Oid],
+) -> Result<Option<(Oid, Vec<Change>)>, NsitError> {
+    let tree_id = index.write_tree()?;
+    let same_as_head = head_tree.map(Tree::id) == Some(tree_id);
+    let nothing_at_all = head.is_none() && index.is_empty();
+    if merging.is_empty() && (same_as_head || nothing_at_all) {
+        return Ok(None);
+    }
+
+    let tree = repo.find_tree(tree_id)?;
+    let changes = changes_between(repo, head_tree, &tree)?;
+    let merged: Vec<Commit<'_>> = merging
+        .iter()
+        .map(|oid| repo.find_commit(*oid))
+        .collect::<Result<_, _>>()?;
+    let parents: Vec<&Commit<'_>> = head.into_iter().chain(merged.iter()).collect();
+    let id = repo.commit(Some("HEAD"), who, who, &request.message, &tree, &parents)?;
+    Ok(Some((id, changes)))
 }
 
 /// Raw paths for an error message.
@@ -1036,6 +1087,57 @@ mod tests {
     }
 
     #[test]
+    fn marker_text_in_a_file_only_our_side_changed_does_not_block_the_merge_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = diverged(dir.path());
+        checkout(&repo, "theirs");
+        commit_file(&repo, "b.txt", "theirs\n");
+        checkout(&repo, "main");
+        // Earlier, on our side alone: documentation that shows what a conflict looks like. It is
+        // not in conflict, and this merge does not change it.
+        commit_file(
+            &repo,
+            "docs.md",
+            "How to read a conflict:\n<<<<<<< ours\n=======\n>>>>>>> theirs\n",
+        );
+        commit_file(&repo, "c.txt", "ours\n");
+        merge_in(&repo, "theirs");
+
+        let done = made(commit(&repo, "Merge theirs"));
+        assert_eq!(repo.find_commit(done.id).unwrap().parent_count(), 2);
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+    }
+
+    #[test]
+    fn marker_lines_in_a_file_both_sides_changed_or_the_person_edited_are_still_refused() {
+        // Both sides changed the file (merged without a conflict), and the person left a marker
+        // line in the result.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = diverged(dir.path());
+        checkout(&repo, "theirs");
+        commit_file(&repo, "a.txt", "base\ntheirs line\n");
+        checkout(&repo, "main");
+        commit_file(&repo, "a.txt", "our line\nbase\n");
+        merge_in(&repo, "theirs");
+        assert!(repo
+            .index()
+            .unwrap()
+            .get_path(Path::new("a.txt"), 0)
+            .is_some());
+        write(
+            &repo,
+            "a.txt",
+            "our line\nbase\ntheirs line\n<<<<<<< left over\n",
+        );
+        let err = commit_changes(&repo, &me(), &request("Merge")).unwrap_err();
+        assert!(
+            matches!(&err, NsitError::Conflict(files) if files == &["a.txt"]),
+            "{err:?}"
+        );
+        assert_eq!(repo.state(), git2::RepositoryState::Merge);
+    }
+
+    #[test]
     fn a_lone_separator_line_or_an_indented_marker_is_ordinary_text() {
         let dir = tempfile::tempdir().unwrap();
         let repo = clean_merge(dir.path());
@@ -1139,6 +1241,89 @@ mod tests {
         let done = made(commit(&repo, "now it works"));
         assert_eq!(paths(&done), ["a.txt", "new.txt"]);
         assert_eq!(staged_on_disk(dir.path()), ["a.txt", "new.txt"]);
+    }
+
+    #[test]
+    fn a_commit_that_fails_after_the_allowance_was_written_removes_an_allow_file_that_was_not_there(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        commit_file(&repo, "a.txt", "1");
+        write(&repo, ".env", "TOKEN=abc\n");
+        let allowed = Request {
+            allow_secret: vec![".env".to_string()],
+            ..request("with env")
+        };
+        // A leftover lock on the branch makes libgit2 unable to move it: the commit fails after
+        // the allowance was written to the working directory.
+        let lock = repo.path().join("refs").join("heads").join("main.lock");
+        std::fs::write(&lock, "").unwrap();
+        let err = commit_changes(&repo, &me(), &allowed).unwrap_err();
+        assert!(matches!(err, NsitError::Git(_)), "{err:?}");
+        assert!(
+            !dir.path().join(ALLOW_FILE).exists(),
+            "the failed commit left an allowance behind"
+        );
+        assert_eq!(staged_on_disk(dir.path()), ["a.txt"]);
+
+        // With the lock gone, the same request works and records the allowance again.
+        std::fs::remove_file(&lock).unwrap();
+        let done = made(commit_changes(&repo, &me(), &allowed).unwrap());
+        assert_eq!(paths(&done), [".env", ".nsit-allow-secrets"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(ALLOW_FILE)).unwrap(),
+            ".env\n"
+        );
+    }
+
+    #[test]
+    fn a_commit_that_fails_after_the_allowance_was_written_restores_the_allow_file_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        commit_file(&repo, "a.txt", "1");
+        // An allow file that is already there, with a comment and a name that is not text.
+        let original = b"# reviewed\nold.env\n# caf\xe9\n".to_vec();
+        std::fs::write(dir.path().join(ALLOW_FILE), &original).unwrap();
+        write(&repo, ".env", "TOKEN=abc\n");
+        let allowed = Request {
+            allow_secret: vec![".env".to_string()],
+            ..request("with env")
+        };
+        let lock = repo.path().join("refs").join("heads").join("main.lock");
+        std::fs::write(&lock, "").unwrap();
+        assert!(commit_changes(&repo, &me(), &allowed).is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join(ALLOW_FILE)).unwrap(),
+            original,
+            "the allow file is not what it was"
+        );
+        assert_eq!(staged_on_disk(dir.path()), ["a.txt"]);
+    }
+
+    #[test]
+    fn the_merge_is_over_once_the_commit_is_made_even_if_the_index_file_cannot_be_written_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = clean_merge(dir.path());
+        // Something else holds the index file's lock: the commit goes in, the index write cannot.
+        let lock = repo.path().join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let err = commit_changes(&repo, &me(), &request("Merge")).unwrap_err();
+        assert!(matches!(err, NsitError::Git(_)), "{err:?}");
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(
+            fresh
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .parent_count(),
+            2,
+            "the merge commit was made"
+        );
+        // So no MERGE_HEAD may be left waiting over a merge that is finished: the next
+        // `nsit commit` would otherwise make a second merge commit with the same parents.
+        assert_eq!(fresh.state(), git2::RepositoryState::Clean);
+        assert!(!repo.path().join("MERGE_HEAD").exists());
     }
 
     #[test]

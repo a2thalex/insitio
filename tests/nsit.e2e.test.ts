@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { repoDir } from "../src/git/storage.js";
 import { decideDevice, findPendingByUserCode } from "../src/services/devices.js";
@@ -456,20 +456,17 @@ describe("nsit repo", () => {
   });
 
   it("signed out, with stdin an open pipe: exits 3 within 5 s with a sign-in hint and never waits for input (Review Focus 2)", async () => {
-    const timings: Record<string, number> = {};
     for (const args of [["list"], ["list", "--json"], ["list", "--owner", "ada"], ["create", "tools"], ["view", "ada/tools"], ["view", "tools"]]) {
       const started = performance.now();
       // No NSIT_TOKEN (the test environment removes it), no config, stdin open and silent: a read would hang.
       const result = await nsit(repo(...args), { stdin: "open", timeoutMs: 5_000 });
       const elapsed = performance.now() - started;
-      timings[args.join(" ")] = Math.round(elapsed);
       expect(result.code, `repo ${args.join(" ")}: ${result.stderr}`).toBe(3);
       expect(result.stdout).toBe("");
       expect(result.stderr).toContain("nsit auth login");
       expect(result.stderr).toBe(`nsit: not signed in to ${hostKey}; run nsit auth login\n`);
       expect(elapsed, `repo ${args.join(" ")} took ${elapsed} ms`).toBeLessThan(5_000);
     }
-    console.info(`signed-out nsit repo, ms until exit 3: ${JSON.stringify(timings)}`);
   });
 
   it("with no repositories: [] for --json, and a note on stderr (not stdout) that -q silences", async () => {
@@ -691,6 +688,9 @@ const gitEnv = {
   GIT_TERMINAL_PROMPT: "0",
   GCM_INTERACTIVE: "never",
   GIT_ASKPASS: "",
+  // Git's own sentences ("You have unmerged paths") are matched below: always the English ones.
+  LC_ALL: "C",
+  LANGUAGE: "C",
 };
 
 /** Runs real git in `cwd` and returns stdout; rejects, with git's own words, when git fails. */
@@ -921,6 +921,23 @@ describe("nsit init <name> against a server", () => {
     expect(readFileSync(join(cwd, "taken", ".git", "config"), "utf8")).not.toContain("origin");
   });
 
+  it("a first push refused as a non-fast-forward says to run nsit pull, and does not also say to run nsit push again", async () => {
+    // The directory already has history of its own, and its origin (a repository with other history).
+    await seedRepo("init-diverged", { "a.txt": "base\n" });
+    const dir = join(tmpDir(), "init-diverged");
+    mkdirSync(dir);
+    await realGit(dir, "init", "-q", "-b", "main");
+    writeFileSync(join(dir, "mine.txt"), "mine\n");
+    await realGit(dir, "add", "-A");
+    await realGit(dir, "commit", "-q", "-m", "Mine");
+    await realGit(dir, "remote", "add", "origin", `${ins.base}/ada/init-diverged.git`);
+
+    const result = await nsit(["-C", dir, "init", "--remote", "--host", ins.base], { configDir, env: homeWith(false) });
+    expect(result.code, result.stderr).toBe(6);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("nsit: refs/heads/main: non-fast-forward; run nsit pull\n");
+  });
+
   it("signed out it is exit 3 at once and creates no directory", async () => {
     const cwd = tmpDir();
     const result = await nsit(["init", "nobody-home", "--host", ins.base], { cwd, env: homeWith(false), stdin: "open", timeoutMs: 5_000 });
@@ -974,6 +991,51 @@ const filesUnder = (dir: string) =>
     .map((entry) => join(entry.parentPath, entry.name));
 
 const same = (a: string, b: string) => realpathSync(a) === realpathSync(b);
+
+/** A working copy made by `nsit clone`: where it is, and the environment and sign-in its nsit runs use. */
+type Work = { dir: string; env: Record<string, string | undefined>; configDir: string };
+
+/** A ref of the repository in `dir`, from real git; "" when it is not there. */
+async function ref(dir: string, name: string): Promise<string> {
+  try {
+    return (await realGit(dir, "rev-parse", "--verify", "-q", name)).trim();
+  } catch {
+    return "";
+  }
+}
+
+async function configValue(dir: string, key: string): Promise<string | null> {
+  try {
+    return (await realGit(dir, "config", "--get", key)).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** Everything a command must leave alone when it fails: all refs, HEAD and the repository's own config. */
+async function snapshot(dir: string) {
+  return {
+    refs: await realGit(dir, "for-each-ref", "--format=%(refname) %(objectname)"),
+    head: (await realGit(dir, "rev-parse", "HEAD")).trim(),
+    config: readFileSync(join(dir, ".git", "config"), "utf8"),
+  };
+}
+
+/** `nsit clone` of `repo` (as `owner/name`) into a fresh directory, signed in with `configDir`. */
+async function cloneOf(repo: string, configDir: string, env = homeWith(true)): Promise<Work> {
+  const cwd = tmpDir();
+  const result = await nsit(["clone", repo, "work", "--host", ins.base], { cwd, configDir, env });
+  expect(result.code, result.stderr).toBe(0);
+  return { dir: join(cwd, "work"), env, configDir };
+}
+
+/** Writes `file` and commits it with `nsit commit`; returns the new HEAD. */
+async function commitIn(work: Work, file: string, content: string | Buffer, message: string): Promise<string> {
+  writeFileSync(join(work.dir, file), content);
+  const result = await nsit(["-C", work.dir, "commit", "-m", message], { configDir: work.configDir, env: work.env });
+  expect(result.code, result.stderr).toBe(0);
+  return ref(work.dir, "HEAD");
+}
 
 describe("nsit clone", () => {
   const SEED: Seed = { "README.md": "# tools\n", "src/main.txt": "hello\n", "docs/ünï côdé.txt": "accented\n" };
@@ -1094,20 +1156,8 @@ describe("nsit clone", () => {
     expect(commit.stdout).toBe("nothing to commit\n");
     expect((await realGit(dir, "rev-parse", "HEAD")).trim(), "no commit was made").toBe(head);
     // Real git, reading the same configuration, agrees that the checkout is clean.
-    const gitStatus = await gitSeeing(home, dir, "status", "--porcelain");
-    expect(gitStatus).toBe("");
+    expect(await gitSeeing(home, dir, "status", "--porcelain")).toBe("");
     expect(await gitSeeing(home, dir, "rev-list", "--count", "HEAD")).toBe("1\n");
-
-    const bytes = (name: string) => JSON.stringify(readFileSync(join(dir, name)).toString("latin1"));
-    console.info(
-      [
-        "Review Focus 3 evidence (HOME/.gitconfig has core.autocrlf=true):",
-        `  working tree: lf.txt=${bytes("lf.txt")} crlf.txt=${bytes("crlf.txt")} bin/data.bin=${bytes("bin/data.bin")}`,
-        `  nsit status --json: ${JSON.stringify(await repoStatus(dir, env))}`,
-        `  nsit commit -m x: exit ${commit.code}, stdout ${JSON.stringify(commit.stdout)}`,
-        `  real git status --porcelain (same home): ${JSON.stringify(gitStatus)}`,
-      ].join("\n"),
-    );
   });
 
   it("the home's core.autocrlf decides the line endings on checkout (the control for the test above)", async () => {
@@ -1293,58 +1343,15 @@ describe("nsit push", () => {
   /** `nsit push` against this server, with `args` before the global --host. */
   const push = (...args: string[]) => ["push", ...args, "--host", ins.base];
 
-  type Work = { dir: string; env: Record<string, string | undefined>; configDir: string };
-
-  /** A ref of the repository in `dir`, from real git; "" when it is not there. */
-  async function ref(dir: string, name: string): Promise<string> {
-    try {
-      return (await realGit(dir, "rev-parse", "--verify", "-q", name)).trim();
-    } catch {
-      return "";
-    }
-  }
-
   /** The server's own tip of a branch, read from the bare repository by real git; "" when it has none. */
   async function serverTip(repo: string, branch = "main"): Promise<string> {
     return (await realGit(serverRepo("ada", repo), "for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`)).trim();
-  }
-
-  /** Everything push must leave alone when it fails: all refs, HEAD and the repository's own config. */
-  async function snapshot(dir: string) {
-    return {
-      refs: await realGit(dir, "for-each-ref", "--format=%(refname) %(objectname)"),
-      head: (await realGit(dir, "rev-parse", "HEAD")).trim(),
-      config: readFileSync(join(dir, ".git", "config"), "utf8"),
-    };
-  }
-
-  async function configValue(dir: string, key: string): Promise<string | null> {
-    try {
-      return (await realGit(dir, "config", "--get", key)).trim();
-    } catch {
-      return null;
-    }
-  }
-
-  async function cloneOf(repo: string, configDir: string): Promise<Work> {
-    const cwd = tmpDir();
-    const env = homeWith(true);
-    const result = await nsit(["clone", repo, "work", "--host", ins.base], { cwd, configDir, env });
-    expect(result.code, result.stderr).toBe(0);
-    return { dir: join(cwd, "work"), env, configDir };
   }
 
   /** A repository ada owns on the server with one commit on main, and a fresh nsit clone of it. */
   async function seededClone(name: string, isPrivate = true): Promise<Work> {
     await seedRepo(name, { "README.md": "# x\n", "a.txt": "base\n" }, isPrivate);
     return cloneOf(`ada/${name}`, adaDir);
-  }
-
-  async function commitIn(work: Work, file: string, content: string | Buffer, message: string): Promise<string> {
-    writeFileSync(join(work.dir, file), content);
-    const result = await nsit(["-C", work.dir, "commit", "-m", message], { configDir: work.configDir, env: work.env });
-    expect(result.code, result.stderr).toBe(0);
-    return ref(work.dir, "HEAD");
   }
 
   const pushFrom = (work: Work, ...args: string[]) => nsit(["-C", work.dir, ...push(...args)], { configDir: work.configDir, env: work.env });
@@ -1493,15 +1500,6 @@ describe("nsit push", () => {
     expect(await snapshot(b.dir)).toEqual(before);
     // The server: still A's commit.
     expect(await serverTip("diverge")).toBe(fromA);
-    // Real git, asked to do the same, is refused for the same reason.
-    console.info(
-      [
-        "diverged push (B has not pulled A's commit):",
-        `  nsit push: exit ${result.code}, stderr ${JSON.stringify(result.stderr)}`,
-        `  B refs/heads/main ${await ref(b.dir, "refs/heads/main")}, refs/remotes/origin/main ${await ref(b.dir, "refs/remotes/origin/main")} (both as before the push)`,
-        `  server refs/heads/main ${await serverTip("diverge")} (A's commit, as before)`,
-      ].join("\n"),
-    );
   });
 
   it("a branch whose history was rewritten is refused unless --force-with-lease and the server's branch is where nsit last saw it", async () => {
@@ -1628,7 +1626,6 @@ describe("nsit push", () => {
     expect(result.stderr).not.toMatch(/ins_/);
     expect(await snapshot(work.dir)).toEqual(before);
     expect(await serverTip("readonly")).toBe(tip);
-    console.info(`read-only collaborator's push: exit ${result.code}, stderr ${JSON.stringify(result.stderr)}`);
 
     // It was the account's access that was refused, not nsit's request: with write access the same push goes through.
     addCollaborator(ins.deps.db, row.id, bob.id, "write");
@@ -1655,12 +1652,10 @@ describe("nsit push", () => {
       expect((await nsit(["-C", dir, "commit", "-m", "later"], { configDir, env })).code).toBe(0);
       const before = await snapshot(dir);
       expect(await ref(dir, "refs/heads/main")).not.toBe(await ref(dir, "refs/remotes/origin/main"));
-      const serverBefore = await realGit(repoDir(gone.deps.config.dataDir, "ada", "stopped"), "rev-parse", "refs/heads/main");
 
       // The server goes away: the address is still in .git/config.
       await gone.close();
 
-      const lines: string[] = [];
       // Once with the token nsit saved, once with NSIT_TOKEN (which is asked about first, over the API).
       for (const [how, opts] of [
         ["saved token", { configDir, env }],
@@ -1674,17 +1669,8 @@ describe("nsit push", () => {
         expect(result.stderr).not.toMatch(/ins_/);
         expect(result.stderr + result.stdout).not.toContain(token);
         expect(await snapshot(dir), `${how}: nothing moved`).toEqual(before);
-        lines.push(`  ${how}: exit ${result.code}, stderr ${JSON.stringify(result.stderr)}`);
       }
       expect(readFileSync(join(dir, ".git", "config"), "utf8")).not.toMatch(/ins_/);
-      console.info(
-        [
-          "Review Focus 4 evidence: push to a server that was stopped (its address is still origin)",
-          ...lines,
-          `  refs before == after: ${JSON.stringify(before.refs)}`,
-          `  the server's last branch tip, from its repository on disk: ${serverBefore.trim()}`,
-        ].join("\n"),
-      );
     } finally {
       await gone.close();
     }
@@ -1713,7 +1699,6 @@ describe("nsit push", () => {
     expect(result.stderr).not.toMatch(/ins_/);
     expect(await snapshot(work.dir)).toEqual(before);
     expect(await serverTip("drop")).toBe(tip);
-    console.info(`connection cut mid-upload: exit ${result.code}, stderr ${JSON.stringify(result.stderr)}`);
 
     // Nothing was left in a state that blocks the next try.
     const retry = await pushFrom(work);
@@ -1732,4 +1717,596 @@ describe("nsit push", () => {
     expect((await realGit(bare, "cat-file", "-s", "main:blob.bin")).trim()).toBe(String(blob.length));
     await realGit(bare, "fsck", "--strict");
   });
+});
+
+// ---- nsit pull ---------------------------------------------------------------------------------
+
+/** Every file of a working tree (`.git` left out) with its text: what an abort has to put back. */
+function workingFiles(dir: string): Record<string, string> {
+  const found: Record<string, string> = {};
+  for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const path = join(entry.parentPath, entry.name);
+    const name = relative(dir, path).split(sep).join("/");
+    if (name === ".git" || name.startsWith(".git/")) continue;
+    found[name] = readFileSync(path, "utf8");
+  }
+  return found;
+}
+
+describe("nsit pull", () => {
+  // Two clones of one server repository stand for two people. They run in order, share the server,
+  // and each test makes its own repository so none depends on another.
+  const SLOW = 60_000;
+  let adaDir: string;
+
+  /** `nsit pull` against this server, with `args` before the global --host. */
+  const pull = (...args: string[]) => ["pull", ...args, "--host", ins.base];
+  const pullIn = (work: Work, ...args: string[]) => nsit(["-C", work.dir, ...pull(...args)], { configDir: work.configDir, env: work.env });
+  const nsitIn = (work: Work, ...args: string[]) => nsit(["-C", work.dir, ...args], { configDir: work.configDir, env: work.env });
+  const MERGE_STATE = ["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"];
+  const merging = (work: Work) => existsSync(join(work.dir, ".git", "MERGE_HEAD"));
+
+  async function pushIn(work: Work): Promise<void> {
+    const result = await nsit(["-C", work.dir, "push", "--host", ins.base], { configDir: work.configDir, env: work.env });
+    expect(result.code, result.stderr).toBe(0);
+  }
+
+  /** Writes and commits `file` in `work`, then pushes: what one person does to leave something for the other to pull. */
+  async function publish(work: Work, file: string, content: string, message: string): Promise<string> {
+    const head = await commitIn(work, file, content, message);
+    await pushIn(work);
+    return head;
+  }
+
+  async function statusOf(work: Work) {
+    const result = await nsitIn(work, "status", "--json");
+    expect(result.code, result.stderr).toBe(0);
+    return JSON.parse(result.stdout);
+  }
+
+  /** The parents of HEAD, from real git, first parent first. */
+  async function parentsOfHead(dir: string): Promise<string[]> {
+    return (await realGit(dir, "rev-list", "--parents", "-n", "1", "HEAD")).trim().split(" ").slice(1);
+  }
+
+  /** Two clones of a fresh server repository, each with its own commit identity in its own repository config. */
+  async function twoClones(name: string, seed: Seed = { "a.txt": "base\n", "keep.txt": "keep\n" }, envOfB = homeWith(true)) {
+    await seedRepo(name, seed);
+    const a = await cloneOf(`ada/${name}`, adaDir);
+    const b = await cloneOf(`ada/${name}`, adaDir, envOfB);
+    for (const [work, who, email] of [[a, "Clone A", "a@example.com"], [b, "Clone B", "b@example.com"]] as const) {
+      await realGit(work.dir, "config", "user.name", who);
+      await realGit(work.dir, "config", "user.email", email);
+    }
+    return { a, b };
+  }
+
+  beforeAll(async () => {
+    adaDir = tmpDir();
+    await signIn(adaDir);
+  });
+
+  it(
+    "fast-forwards to a commit another clone pushed: the branch, the files, the tracking ref and ORIG_HEAD move, and nothing else",
+    async () => {
+      const { a, b } = await twoClones("pull-ff");
+      const before = await ref(b.dir, "HEAD");
+      const theirs = await publish(a, "new.txt", "from a\n", "A adds new.txt");
+      expect(theirs).not.toBe(before);
+
+      const result = await pullIn(b);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toBe(`Fast-forwarded main to ${theirs.slice(0, 7)}\n`);
+      expect(result.stderr, "nothing but data off a terminal").toBe("");
+      expect(await ref(b.dir, "HEAD")).toBe(theirs);
+      expect(await ref(b.dir, "refs/heads/main")).toBe(theirs);
+      expect(await ref(b.dir, "refs/remotes/origin/main")).toBe(theirs);
+      expect(readFileSync(join(b.dir, "new.txt"), "utf8")).toBe("from a\n");
+      // Real git finds ORIG_HEAD where it looks for it: the commit the branch was at before the pull.
+      expect(await ref(b.dir, "ORIG_HEAD")).toBe(before);
+      expect((await realGit(b.dir, "log", "--format=%s")).trimEnd().split("\n")).toEqual(["A adds new.txt", "Seed"]);
+      expect(await realGit(b.dir, "status", "--porcelain")).toBe("");
+      expect(await statusOf(b)).toMatchObject({ branch: "main", upstream: "origin/main", ahead: 0, behind: 0, conflicted: [] });
+      for (const state of MERGE_STATE) expect(existsSync(join(b.dir, ".git", state)), state).toBe(false);
+      await realGit(b.dir, "fsck", "--strict");
+
+      // Asked again there is nothing to do, and nothing is touched (ORIG_HEAD included).
+      const again = await pullIn(b);
+      expect(again.code, again.stderr).toBe(0);
+      expect(again.stdout).toBe("Already up to date\n");
+      expect(await ref(b.dir, "HEAD")).toBe(theirs);
+      expect(await ref(b.dir, "ORIG_HEAD")).toBe(before);
+
+      // --json and --jq say what happened.
+      const next = await publish(a, "newer.txt", "again\n", "A adds newer.txt");
+      const json = await pullIn(b, "--json");
+      expect(json.code, json.stderr).toBe(0);
+      expect(JSON.parse(json.stdout)).toEqual({ result: "fast_forward", head: next, conflicts: [] });
+      expect(JSON.parse((await pullIn(b, "--json")).stdout)).toEqual({ result: "up_to_date", head: next, conflicts: [] });
+      expect((await pullIn(b, "--jq", ".result")).stdout).toBe("up_to_date\n");
+    },
+    SLOW,
+  );
+
+  it(
+    "merges edits to different files into a merge commit with two parents, made as the person pulling; it pushes as a fast-forward",
+    async () => {
+      const { a, b } = await twoClones("pull-merge");
+      const theirs = await publish(a, "a.txt", "from a\n", "A edits a.txt");
+      const mine = await commitIn(b, "keep.txt", "from b\n", "B edits keep.txt");
+
+      const result = await pullIn(b);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toBe("Merged origin/main\n");
+      expect(result.stderr).toBe("");
+      const head = await ref(b.dir, "HEAD");
+      expect(await parentsOfHead(b.dir)).toEqual([mine, theirs]);
+      expect(await realGit(b.dir, "log", "-1", "--format=%s")).toBe(`Merge branch 'main' of ${ins.base}/ada/pull-merge.git\n`);
+      expect((await realGit(b.dir, "log", "-1", "--format=%an <%ae>|%cn <%ce>")).trim()).toBe("Clone B <b@example.com>|Clone B <b@example.com>");
+      expect(readFileSync(join(b.dir, "a.txt"), "utf8")).toBe("from a\n");
+      expect(readFileSync(join(b.dir, "keep.txt"), "utf8")).toBe("from b\n");
+      expect(await ref(b.dir, "ORIG_HEAD")).toBe(mine);
+      expect(await ref(b.dir, "refs/remotes/origin/main")).toBe(theirs);
+      for (const state of MERGE_STATE) expect(existsSync(join(b.dir, ".git", state)), state).toBe(false);
+      expect(await realGit(b.dir, "status", "--porcelain")).toBe("");
+      await realGit(b.dir, "fsck", "--strict");
+      expect(await statusOf(b)).toMatchObject({ ahead: 2, behind: 0, conflicted: [] });
+      // The token went to the server as a password and nowhere else.
+      for (const file of filesUnder(join(b.dir, ".git"))) {
+        for (const secret of secrets) expect(readFileSync(file).includes(secret), `a token is in ${file}`).toBe(false);
+      }
+
+      // The merge goes up as a fast-forward, and the other clone fast-forwards to it.
+      await pushIn(b);
+      expect((await realGit(serverRepo("ada", "pull-merge"), "rev-parse", "refs/heads/main")).trim()).toBe(head);
+      const back = await pullIn(a);
+      expect(back.code, back.stderr).toBe(0);
+      expect(back.stdout).toBe(`Fast-forwarded main to ${head.slice(0, 7)}\n`);
+      expect(readFileSync(join(a.dir, "keep.txt"), "utf8")).toBe("from b\n");
+
+      // --json
+      const theirs2 = await publish(a, "more-a.txt", "a\n", "A again");
+      const mine2 = await commitIn(b, "more-b.txt", "b\n", "B again");
+      const json = await pullIn(b, "--json");
+      expect(json.code, json.stderr).toBe(0);
+      expect(JSON.parse(json.stdout)).toEqual({ result: "merged", head: await ref(b.dir, "HEAD"), conflicts: [] });
+      expect(await parentsOfHead(b.dir)).toEqual([mine2, theirs2]);
+    },
+    SLOW,
+  );
+
+  it("with no git identity on the machine the merge commit is by the account nsit is signed in as", async () => {
+    await seedRepo("pull-identity", { "a.txt": "base\n", "keep.txt": "keep\n" });
+    const a = await cloneOf("ada/pull-identity", adaDir);
+    const b = await cloneOf("ada/pull-identity", adaDir, homeWith(false));
+    await realGit(a.dir, "config", "user.name", "Clone A");
+    await realGit(a.dir, "config", "user.email", "a@example.com");
+    await publish(a, "a.txt", "from a\n", "A edits a.txt");
+    // B's own commit is by that account too (with --host: its name and email are saved per server).
+    writeFileSync(join(b.dir, "keep.txt"), "from b\n");
+    const own = await nsitIn(b, "commit", "-m", "B edits keep.txt", "--host", ins.base);
+    expect(own.code, own.stderr).toBe(0);
+
+    const result = await pullIn(b);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toBe("Merged origin/main\n");
+    expect((await realGit(b.dir, "log", "-1", "--format=%an <%ae>")).trim()).toBe("Ada Lovelace <ada@example.com>");
+    expect((await parentsOfHead(b.dir)).length).toBe(2);
+  }, SLOW);
+
+  it(
+    "a conflict exits 4 and leaves the merge in progress for real git to see; nsit commit finishes it once it is resolved",
+    async () => {
+      const { a, b } = await twoClones("pull-conflict");
+      const theirs = await publish(a, "a.txt", "from a\n", "A edits a.txt");
+      const mine = await commitIn(b, "a.txt", "from b\n", "B edits a.txt");
+
+      const result = await pullIn(b);
+      expect(result.code, result.stderr).toBe(4);
+      expect(result.stdout).toContain("a.txt");
+      expect(result.stderr).toContain("merge conflict in a.txt");
+      expect(result.stderr).toContain("nsit commit");
+      expect(result.stderr).toContain("nsit pull --abort");
+      const content = readFileSync(join(b.dir, "a.txt"), "utf8");
+      expect(content).toContain("<<<<<<<");
+      expect(content).toContain("from b");
+      expect(content).toContain("from a");
+      expect(content).toContain(">>>>>>> origin/main");
+
+      // Real git sees an ordinary merge that stopped on a conflict.
+      expect(await realGit(b.dir, "status")).toContain("You have unmerged paths");
+      expect((await realGit(b.dir, "status", "--porcelain")).trimEnd()).toBe("UU a.txt");
+      expect(readFileSync(join(b.dir, ".git", "MERGE_HEAD"), "utf8").trim()).toBe(theirs);
+      expect(readFileSync(join(b.dir, ".git", "MERGE_MSG"), "utf8")).toContain(`Merge branch 'main' of ${ins.base}/ada/pull-conflict.git`);
+      expect(await ref(b.dir, "HEAD")).toBe(mine);
+      expect(await ref(b.dir, "ORIG_HEAD")).toBe(mine);
+      expect(await ref(b.dir, "refs/remotes/origin/main")).toBe(theirs);
+      expect(await statusOf(b)).toMatchObject({ conflicted: ["a.txt"], staged: [], unstaged: [] });
+
+      // Finishing before the conflict is resolved is refused (exit 4), and changes nothing.
+      const early = await nsitIn(b, "commit", "-m", "done");
+      expect(early.code, early.stderr).toBe(4);
+      expect(early.stderr).toContain("a.txt");
+      expect(await ref(b.dir, "HEAD")).toBe(mine);
+      expect(merging(b)).toBe(true);
+      // A second pull is refused while a merge is waiting, and says how to go on.
+      const second = await pullIn(b);
+      expect(second.code, second.stderr).toBe(2);
+      expect(second.stdout).toBe("");
+      expect(second.stderr).toMatch(/nsit commit.*nsit pull --abort/);
+      expect(oneLine(second.stderr), second.stderr).toBe(true);
+      expect(await ref(b.dir, "HEAD")).toBe(mine);
+
+      // What a person adds while resolving is still held to the secret guard...
+      const token = `ghp_${"Ab1".repeat(14)}`;
+      writeFileSync(join(b.dir, "a.txt"), `resolved, with ${token}\n`);
+      const guarded = await nsitIn(b, "commit", "-m", "done");
+      expect(guarded.code, guarded.stderr).toBe(5);
+      expect(guarded.stderr).toContain("a.txt");
+      expect(guarded.stderr).not.toContain(token);
+      expect(merging(b)).toBe(true);
+      // ...and a clean resolution finishes the merge: two parents, no merge state, a clean tree for real git.
+      writeFileSync(join(b.dir, "a.txt"), "resolved\n");
+      const done = await nsitIn(b, "commit", "-m", "done", "--json");
+      expect(done.code, done.stderr).toBe(0);
+      const merged = await ref(b.dir, "HEAD");
+      expect(JSON.parse(done.stdout).sha).toBe(merged);
+      expect(await parentsOfHead(b.dir)).toEqual([mine, theirs]);
+      expect(await realGit(b.dir, "log", "-1", "--format=%s")).toBe("done\n");
+      expect(merging(b)).toBe(false);
+      for (const state of MERGE_STATE) expect(existsSync(join(b.dir, ".git", state)), state).toBe(false);
+      expect(await realGit(b.dir, "status", "--porcelain")).toBe("");
+      await realGit(b.dir, "fsck", "--strict");
+
+      // It pushes, and the other clone gets the resolution.
+      await pushIn(b);
+      const back = await pullIn(a);
+      expect(back.code, back.stderr).toBe(0);
+      expect(readFileSync(join(a.dir, "a.txt"), "utf8")).toBe("resolved\n");
+    },
+    SLOW,
+  );
+
+  it(
+    "pull --abort puts HEAD, the files and the index back exactly as they were before the pull; untracked files stay",
+    async () => {
+      const { a, b } = await twoClones("pull-abort");
+      await publish(a, "added.txt", "theirs only\n", "A adds added.txt");
+      await publish(a, "a.txt", "from a\n", "A edits a.txt");
+      const mine = await commitIn(b, "a.txt", "from b\n", "B edits a.txt");
+      writeFileSync(join(b.dir, "scratch.txt"), "untracked\n");
+      const index = await realGit(b.dir, "ls-files", "--stage");
+      const filesBefore = workingFiles(b.dir);
+
+      const conflict = await pullIn(b, "--json");
+      expect(conflict.code, conflict.stderr).toBe(4);
+      expect(JSON.parse(conflict.stdout)).toEqual({ result: "conflict", head: mine, conflicts: ["a.txt"] });
+      expect(existsSync(join(b.dir, "added.txt")), "the merge brought this file in").toBe(true);
+      // A person had started on the conflict, and changes their mind.
+      writeFileSync(join(b.dir, "a.txt"), "half resolved\n");
+
+      const abort = await pullIn(b, "--abort");
+      expect(abort.code, abort.stderr).toBe(0);
+      expect(abort.stdout).toBe(`Merge aborted; main is back at ${mine.slice(0, 7)}\n`);
+      expect(await ref(b.dir, "HEAD")).toBe(mine);
+      expect(await realGit(b.dir, "ls-files", "--stage")).toBe(index);
+      expect(workingFiles(b.dir)).toEqual(filesBefore);
+      for (const state of MERGE_STATE) expect(existsSync(join(b.dir, ".git", state)), state).toBe(false);
+      expect((await realGit(b.dir, "status", "--porcelain")).trimEnd()).toBe("?? scratch.txt");
+      await realGit(b.dir, "diff", "--quiet");
+      await realGit(b.dir, "diff", "--cached", "--quiet");
+      expect(await statusOf(b)).toMatchObject({ conflicted: [], staged: [], unstaged: [], untracked: ["scratch.txt"] });
+
+      // There is nothing left to abort.
+      const nothing = await pullIn(b, "--abort");
+      expect(nothing.code, nothing.stderr).toBe(2);
+      expect(nothing.stdout).toBe("");
+      expect(nothing.stderr).toMatch(/^nsit: .*no merge in progress/);
+      expect(oneLine(nothing.stderr), nothing.stderr).toBe(true);
+
+      // The same pull stops on the same conflict again: the state really was cleaned up. --json for the abort.
+      const again = await pullIn(b);
+      expect(again.code, again.stderr).toBe(4);
+      const json = await pullIn(b, "--abort", "--json");
+      expect(json.code, json.stderr).toBe(0);
+      expect(JSON.parse(json.stdout)).toEqual({ result: "aborted", head: mine, conflicts: [] });
+      expect(workingFiles(b.dir)).toEqual(filesBefore);
+    },
+    SLOW,
+  );
+
+  it(
+    "refuses a fast-forward that would overwrite uncommitted work (exit 1, the file is named) and changes nothing; an unrelated edit is carried along",
+    async () => {
+      const { a, b } = await twoClones("pull-dirty-ff");
+      const theirs = await publish(a, "a.txt", "from a\n", "A edits a.txt");
+      writeFileSync(join(b.dir, "a.txt"), "my work, not committed\n");
+      const before = await snapshot(b.dir);
+
+      const refused = await pullIn(b);
+      expect(refused.code, refused.stderr).toBe(1);
+      expect(refused.stdout).toBe("");
+      expect(refused.stderr).toContain("a.txt");
+      expect(oneLine(refused.stderr), refused.stderr).toBe(true);
+      expect(readFileSync(join(b.dir, "a.txt"), "utf8")).toBe("my work, not committed\n");
+      expect(await snapshot(b.dir), "no ref moved, the tracking ref included").toEqual(before);
+      expect(await ref(b.dir, "ORIG_HEAD")).toBe("");
+
+      // Put that file back and edit one the pull does not touch: the fast-forward keeps the edit.
+      await realGit(b.dir, "checkout", "--", "a.txt");
+      writeFileSync(join(b.dir, "keep.txt"), "unrelated edit\n");
+      const carried = await pullIn(b);
+      expect(carried.code, carried.stderr).toBe(0);
+      expect(await ref(b.dir, "HEAD")).toBe(theirs);
+      expect(readFileSync(join(b.dir, "keep.txt"), "utf8")).toBe("unrelated edit\n");
+      expect(readFileSync(join(b.dir, "a.txt"), "utf8")).toBe("from a\n");
+    },
+    SLOW,
+  );
+
+  it(
+    "a pull that has to merge needs the tracked files committed (exit 1, they are named): nothing changes, so an abort can never lose them",
+    async () => {
+      const { a, b } = await twoClones("pull-dirty-merge");
+      await publish(a, "a.txt", "from a\n", "A edits a.txt");
+      await commitIn(b, "mine.txt", "mine\n", "B adds mine.txt");
+      writeFileSync(join(b.dir, "keep.txt"), "uncommitted, and nothing to do with a.txt\n");
+      writeFileSync(join(b.dir, "scratch.txt"), "untracked\n");
+      const before = await snapshot(b.dir);
+      const filesBefore = workingFiles(b.dir);
+
+      const refused = await pullIn(b);
+      expect(refused.code, refused.stderr).toBe(1);
+      expect(refused.stdout).toBe("");
+      expect(refused.stderr).toContain("keep.txt");
+      expect(refused.stderr, "untracked files are not in the way").not.toContain("scratch.txt");
+      expect(oneLine(refused.stderr), refused.stderr).toBe(true);
+      expect(await snapshot(b.dir)).toEqual(before);
+      expect(workingFiles(b.dir)).toEqual(filesBefore);
+      expect(await ref(b.dir, "ORIG_HEAD")).toBe("");
+      expect(merging(b)).toBe(false);
+
+      // Committed (only that file: --staged), the same pull merges, and the untracked file is left alone.
+      expect((await nsitIn(b, "add", "keep.txt")).code).toBe(0);
+      const committed = await nsitIn(b, "commit", "--staged", "-m", "B edits keep.txt");
+      expect(committed.code, committed.stderr).toBe(0);
+      const merged = await pullIn(b);
+      expect(merged.code, merged.stderr).toBe(0);
+      expect(merged.stdout).toBe("Merged origin/main\n");
+      expect(readFileSync(join(b.dir, "scratch.txt"), "utf8")).toBe("untracked\n");
+      expect(readFileSync(join(b.dir, "a.txt"), "utf8")).toBe("from a\n");
+    },
+    SLOW,
+  );
+
+  it(
+    "an untracked file where the pull would write one is refused (exit 1, it is named), for a fast-forward and for a merge",
+    async () => {
+      // Fast-forward.
+      const ff = await twoClones("pull-untracked-ff");
+      await publish(ff.a, "new.txt", "from a\n", "A adds new.txt");
+      writeFileSync(join(ff.b.dir, "new.txt"), "mine, untracked\n");
+      const ffBefore = await snapshot(ff.b.dir);
+      const ffResult = await pullIn(ff.b);
+      expect(ffResult.code, ffResult.stderr).toBe(1);
+      expect(ffResult.stderr).toContain("new.txt");
+      expect(oneLine(ffResult.stderr), ffResult.stderr).toBe(true);
+      expect(readFileSync(join(ff.b.dir, "new.txt"), "utf8")).toBe("mine, untracked\n");
+      expect(await snapshot(ff.b.dir)).toEqual(ffBefore);
+
+      // Merge: diverge first, then the untracked file appears.
+      const mg = await twoClones("pull-untracked-merge");
+      await publish(mg.a, "new.txt", "from a\n", "A adds new.txt");
+      await commitIn(mg.b, "mine.txt", "mine\n", "B adds mine.txt");
+      writeFileSync(join(mg.b.dir, "new.txt"), "mine, untracked\n");
+      const mgBefore = await snapshot(mg.b.dir);
+      const mgResult = await pullIn(mg.b);
+      expect(mgResult.code, mgResult.stderr).toBe(1);
+      expect(mgResult.stderr).toContain("new.txt");
+      expect(oneLine(mgResult.stderr), mgResult.stderr).toBe(true);
+      expect(readFileSync(join(mg.b.dir, "new.txt"), "utf8")).toBe("mine, untracked\n");
+      expect(await snapshot(mg.b.dir)).toEqual(mgBefore);
+      expect(await ref(mg.b.dir, "ORIG_HEAD")).toBe("");
+      expect(merging(mg.b)).toBe(false);
+
+      // An untracked file that is not in the way is no problem.
+      rmSync(join(mg.b.dir, "new.txt"));
+      writeFileSync(join(mg.b.dir, "scratch.txt"), "untracked\n");
+      const fine = await pullIn(mg.b);
+      expect(fine.code, fine.stderr).toBe(0);
+      expect(readFileSync(join(mg.b.dir, "scratch.txt"), "utf8")).toBe("untracked\n");
+      expect(readFileSync(join(mg.b.dir, "new.txt"), "utf8")).toBe("from a\n");
+    },
+    SLOW,
+  );
+
+  it(
+    "says what is wrong when there is nothing to pull from (exit 2): no upstream, a detached HEAD, a remote that is not there",
+    async () => {
+      const env = homeWith(true);
+      const usage = async (result: Promise<NsitResult>, pattern: RegExp) => {
+        const done = await result;
+        expect(done.code, done.stderr).toBe(2);
+        expect(done.stdout).toBe("");
+        expect(done.stderr).toMatch(pattern);
+        expect(oneLine(done.stderr), done.stderr).toBe(true);
+      };
+
+      // A repository that was never pushed: no origin, so no upstream; the hint is nsit push.
+      const local = tmpDir();
+      expect((await nsit(["-C", local, "init"], { env })).code).toBe(0);
+      writeFileSync(join(local, "a.txt"), "a\n");
+      expect((await nsit(["-C", local, "commit", "-m", "one"], { env })).code).toBe(0);
+      await usage(nsit(["-C", local, ...pull()], { configDir: adaDir, env }), /^nsit: .*no upstream.*nsit push/);
+
+      // An origin made by init, and nothing pushed yet: still no upstream.
+      const fresh = join(tmpDir(), "pull-no-upstream");
+      mkdirSync(fresh);
+      expect((await nsit(["-C", fresh, "init", "--remote", "--host", ins.base], { configDir: adaDir, env })).code).toBe(0);
+      await usage(nsit(["-C", fresh, ...pull()], { configDir: adaDir, env }), /^nsit: .*no upstream.*nsit push/);
+
+      // A detached HEAD has no branch to bring up to date.
+      const { b } = await twoClones("pull-usage");
+      await realGit(b.dir, "checkout", "--detach", "-q");
+      await usage(pullIn(b), /^nsit: .*detached/);
+      await realGit(b.dir, "checkout", "-q", "main");
+
+      // An upstream that names a remote that is not there, and one that is not a branch.
+      await realGit(b.dir, "config", "branch.main.remote", "nowhere");
+      await usage(pullIn(b), /^nsit: .*nowhere/);
+      await realGit(b.dir, "config", "branch.main.remote", "origin");
+      await realGit(b.dir, "config", "branch.main.merge", "refs/tags/v1");
+      await usage(pullIn(b), /^nsit: .*refs\/tags\/v1/);
+    },
+    SLOW,
+  );
+
+  it("signed out, with stdin an open pipe: exit 3 within 5 s with a sign-in hint, and nothing moves", async () => {
+    const { a, b } = await twoClones("pull-signedout");
+    await publish(a, "late.txt", "late\n", "Late");
+    const before = await snapshot(b.dir);
+    for (const extra of [[], ["--json"]]) {
+      const started = performance.now();
+      // A fresh config directory, no NSIT_TOKEN, stdin open and silent: a read would hang.
+      const result = await nsit(["-C", b.dir, ...pull(...extra)], { env: b.env, stdin: "open", timeoutMs: 5_000 });
+      expect(result.code, result.stderr).toBe(3);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(`nsit: not signed in to ${hostKey}; run nsit auth login\n`);
+      expect(performance.now() - started).toBeLessThan(5_000);
+    }
+    expect(await snapshot(b.dir)).toEqual(before);
+    expect(readdirSync(b.dir)).not.toContain("late.txt");
+  }, SLOW);
+
+  it("an origin on another server never gets NSIT_TOKEN (exit 3), and nothing moves", async () => {
+    const { b } = await twoClones("pull-elsewhere");
+    await realGit(b.dir, "remote", "set-url", "origin", "https://other.example/ada/pull-elsewhere.git");
+    const before = await snapshot(b.dir);
+    const result = await nsit(["-C", b.dir, ...pull()], { env: { ...b.env, NSIT_TOKEN: newToken("agent") }, timeoutMs: 5_000 });
+    expect(result.code, result.stderr).toBe(3);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("nsit: NSIT_TOKEN is sent only to the selected host, and other.example is not it\n");
+    expect(await snapshot(b.dir)).toEqual(before);
+  }, SLOW);
+
+  it("an upstream branch the server no longer has is exit 1 with one line, and nothing moves", async () => {
+    const { b } = await twoClones("pull-gone");
+    await realGit(serverRepo("ada", "pull-gone"), "update-ref", "-d", "refs/heads/main");
+    const before = await snapshot(b.dir);
+    const result = await pullIn(b);
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/^nsit: .*main/);
+    expect(oneLine(result.stderr), result.stderr).toBe(true);
+    expect(await snapshot(b.dir)).toEqual(before);
+  }, SLOW);
+
+  it("a server that has stopped: exit 1, one line, no token anywhere, and nothing moves", async () => {
+    const gone = await startInsitio();
+    try {
+      const user = createUser(gone.deps.db, { username: "ada", password: "longenough", email: "ada@example.com" });
+      const token = createAccessToken(gone.deps.db, user.id, "e2e");
+      secrets.add(token);
+      const configDir = tmpDir();
+      const env = homeWith(true);
+      expect((await nsit(["auth", "login", "--with-token", "--host", gone.base], { configDir, input: token })).code).toBe(0);
+      const cwd = tmpDir();
+      const init = await nsit(["init", "pull-stopped", "--readme", "--host", gone.base], { cwd, configDir, env });
+      expect(init.code, init.stderr).toBe(0);
+      const dir = join(cwd, "pull-stopped");
+      const before = await snapshot(dir);
+      await gone.close();
+
+      // Once with the token nsit saved, once with NSIT_TOKEN (which is asked about first, over the API).
+      for (const [how, opts] of [
+        ["saved token", { configDir, env }],
+        ["NSIT_TOKEN", { configDir: tmpDir(), env: { ...env, NSIT_TOKEN: token } }],
+      ] as const) {
+        const result = await nsit(["-C", dir, "pull", "--host", gone.base], { ...opts, timeoutMs: 15_000 });
+        expect(result.code, `${how}: ${result.stderr}`).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toMatch(/^nsit: \S/);
+        expect(oneLine(result.stderr), `${how}: ${result.stderr}`).toBe(true);
+        expect(result.stderr + result.stdout).not.toContain(token);
+        expect(await snapshot(dir), `${how}: nothing moved`).toEqual(before);
+      }
+    } finally {
+      await gone.close();
+    }
+  }, SLOW);
+
+  it(
+    "pull's own merge commit is not held up by the secret guard: secrets that came with either side are not the pull's to refuse",
+    async () => {
+      const { a, b } = await twoClones("pull-guard");
+      // Both sides committed a secret-looking file with real git (nsit's own guard would have refused them).
+      writeFileSync(join(a.dir, ".env"), "A_SECRET=1\n");
+      await realGit(a.dir, "add", "-A");
+      await realGit(a.dir, "commit", "-q", "-m", "A adds .env");
+      await pushIn(a);
+      writeFileSync(join(b.dir, "mine.pem"), "not really a key\n");
+      await realGit(b.dir, "add", "-A");
+      await realGit(b.dir, "commit", "-q", "-m", "B adds mine.pem");
+
+      const result = await pullIn(b);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toBe("Merged origin/main\n");
+      expect((await parentsOfHead(b.dir)).length).toBe(2);
+      expect(readFileSync(join(b.dir, ".env"), "utf8")).toBe("A_SECRET=1\n");
+      expect(readFileSync(join(b.dir, "mine.pem"), "utf8")).toBe("not really a key\n");
+      expect(await realGit(b.dir, "status", "--porcelain")).toBe("");
+    },
+    SLOW,
+  );
+
+  it(
+    "with core.autocrlf=true what is pulled arrives with CRLF in the working tree and nothing counts as modified (fast-forward and merge)",
+    async () => {
+      const home = homeWith(true, true);
+      const { a, b } = await twoClones("pull-crlf", { "lf.txt": "alpha\nbeta\n", "other.txt": "other\n" }, home);
+      const fromA = await publish(a, "lf.txt", "alpha\nbeta\ngamma\n", "A extends lf.txt");
+
+      const ff = await pullIn(b);
+      expect(ff.code, ff.stderr).toBe(0);
+      expect(await ref(b.dir, "HEAD")).toBe(fromA);
+      expect(readFileSync(join(b.dir, "lf.txt")), "LF in the repository, CRLF in the working tree").toEqual(Buffer.from("alpha\r\nbeta\r\ngamma\r\n"));
+      expect((await statusOf(b)).unstaged).toEqual([]);
+      expect(await gitSeeing(home, b.dir, "status", "--porcelain")).toBe("");
+
+      // And through a merge.
+      await publish(a, "lf.txt", "alpha\nbeta\ngamma\ndelta\n", "A extends lf.txt again");
+      await commitIn(b, "other.txt", "other, edited\n", "B edits other.txt");
+      const merged = await pullIn(b);
+      expect(merged.code, merged.stderr).toBe(0);
+      expect(merged.stdout).toBe("Merged origin/main\n");
+      expect(readFileSync(join(b.dir, "lf.txt"))).toEqual(Buffer.from("alpha\r\nbeta\r\ngamma\r\ndelta\r\n"));
+      expect((await statusOf(b)).unstaged).toEqual([]);
+      expect(await gitSeeing(home, b.dir, "status", "--porcelain")).toBe("");
+    },
+    SLOW,
+  );
+
+  it("(Review Focus 1) works in a directory with spaces and an accent: with -C, and as the working directory", async () => {
+    await seedRepo("pull-unicode", { "a.txt": "base\n" });
+    const name = "Vidéo Ink - OG Edition";
+    const cwd = tmpDir();
+    const env = homeWith(true);
+    const cloned = await nsit(["clone", "ada/pull-unicode", name, "--host", ins.base], { cwd, configDir: adaDir, env });
+    expect(cloned.code, cloned.stderr).toBe(0);
+    const b: Work = { dir: join(cwd, name), env, configDir: adaDir };
+    const a = await cloneOf("ada/pull-unicode", adaDir);
+
+    const first = await publish(a, "ünï côdé.txt", "accented\n", "A adds an accented file");
+    const viaC = await nsit(["-C", b.dir, ...pull("--json")], { configDir: adaDir, env, cwd: tmpDir() });
+    expect(viaC.code, viaC.stderr).toBe(0);
+    expect(JSON.parse(viaC.stdout)).toEqual({ result: "fast_forward", head: first, conflicts: [] });
+    expect(readFileSync(join(b.dir, "ünï côdé.txt"), "utf8")).toBe("accented\n");
+
+    const second = await publish(a, "more.txt", "more\n", "A adds more.txt");
+    const here = await nsit(pull("--json"), { cwd: b.dir, configDir: adaDir, env });
+    expect(here.code, here.stderr).toBe(0);
+    expect(JSON.parse(here.stdout)).toEqual({ result: "fast_forward", head: second, conflicts: [] });
+    expect(await realGit(b.dir, "status", "--porcelain")).toBe("");
+  }, SLOW);
 });

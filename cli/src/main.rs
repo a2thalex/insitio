@@ -1,9 +1,8 @@
 //! nsit: the Insitio command-line tool for people and agents.
 //!
-//! `auth`, `repo`, `clone`, `push` and the local git commands (`init`, `status`,
-//! `add`, `commit`, `log`, `branch`, `switch`, `readme`) are implemented; `pull`
-//! is still a stub that a later task fills in, with the network helpers that
-//! `clone` and `push` already use.
+//! Every v1 command is implemented: `auth`, `repo`, the local git commands (`init`,
+//! `status`, `add`, `commit`, `log`, `branch`, `switch`, `readme`) and the three that
+//! talk to a repository on Insitio over git (`clone`, `push`, `pull`).
 
 mod api;
 mod cli;
@@ -58,6 +57,6 @@ fn run(cli: &Cli) -> Result<(), NsitError> {
         Command::Readme => commands::readme::run(g, &out, &base()?),
         Command::Clone(args) => commands::clone::run(args, g, &out, &base()?),
         Command::Push(args) => commands::push::run(args, g, &out, &base()?),
-        Command::Pull(_) => Err(NsitError::Other("not implemented".into())),
+        Command::Pull(args) => commands::pull::run(args, g, &out, &base()?),
     }
 }

@@ -5,7 +5,7 @@
 //! in as `base`: the process directory, or `-C <dir>` resolved against it once
 //! (`working_dir`). They never change the process directory, so everything they
 //! read or write is explicit. `clone` takes it too: the directory a relative
-//! `[dir]` is taken from, and `push` the directory whose repository it sends.
+//! `[dir]` is taken from, and `push` and `pull` the directory whose repository they act on.
 
 pub mod add;
 pub mod auth;
@@ -14,6 +14,7 @@ pub mod clone;
 pub mod commit;
 pub mod init;
 pub mod log;
+pub mod pull;
 pub mod push;
 pub mod readme;
 pub mod repo;

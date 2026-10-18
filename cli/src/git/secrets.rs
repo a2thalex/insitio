@@ -29,7 +29,7 @@
 //! key"). The matched text is never part of a hit, an error or any output.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use git2::{Index, Repository};
@@ -193,30 +193,36 @@ pub fn check_recordable(path: &str) -> Result<(), NsitError> {
 /// The index is only changed in memory: when it reaches the disk is the
 /// caller's decision. That keeps the allowance in the commit that needed it
 /// without touching the index file of a commit that then fails.
+///
+/// The allow file itself is written to the working directory, so a commit that fails after
+/// this must put it back: the `AllowFileBackup` returned (when anything was written) does that.
 pub fn record_allowances(
     repo: &Repository,
     index: &mut Index,
     paths: &[String],
-) -> Result<(), NsitError> {
+) -> Result<Option<AllowFileBackup>, NsitError> {
     if paths.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     for path in paths {
         check_recordable(path)?;
     }
     let file = workdir(repo)?.join(ALLOW_FILE);
-    let mut bytes = match std::fs::read(&file) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+    let previous = match std::fs::read(&file) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
+    let mut bytes = previous.clone().unwrap_or_default();
     let listed = parse_allow_list(&bytes);
     let new: BTreeSet<&str> = paths
         .iter()
         .map(String::as_str)
         .filter(|path| !listed.contains(path.as_bytes()))
         .collect();
-    if !new.is_empty() {
+    let backup = if new.is_empty() {
+        None
+    } else {
         if !bytes.is_empty() && !bytes.ends_with(b"\n") {
             bytes.push(b'\n');
         }
@@ -225,9 +231,53 @@ pub fn record_allowances(
             bytes.push(b'\n');
         }
         std::fs::write(&file, bytes)?;
+        Some(AllowFileBackup {
+            file: file.clone(),
+            previous,
+        })
+    };
+    if let Err(e) = index.add_path(Path::new(ALLOW_FILE)) {
+        // Written but not staged: this call fails as a whole, so it leaves no file behind.
+        return Err(match backup {
+            Some(backup) => backup.restore_after(e.into()),
+            None => e.into(),
+        });
     }
-    index.add_path(Path::new(ALLOW_FILE))?;
-    Ok(())
+    Ok(backup)
+}
+
+/// What `.nsit-allow-secrets` held before `record_allowances` changed it.
+#[derive(Debug)]
+pub struct AllowFileBackup {
+    file: PathBuf,
+    /// The bytes it had; `None` when there was no such file.
+    previous: Option<Vec<u8>>,
+}
+
+impl AllowFileBackup {
+    /// Put the file back as it was: its old bytes, or gone if it was not there.
+    pub fn restore(self) -> Result<(), NsitError> {
+        match self.previous {
+            Some(bytes) => std::fs::write(&self.file, bytes)?,
+            None => match std::fs::remove_file(&self.file) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            },
+        }
+        Ok(())
+    }
+
+    /// Put the file back because `err` made the caller give up, and return `err`; when even
+    /// that fails, `err` with a note that the allow file is not as it was.
+    pub fn restore_after(self, err: NsitError) -> NsitError {
+        match self.restore() {
+            Ok(()) => err,
+            Err(restore) => NsitError::Other(format!(
+                "{err}; and {ALLOW_FILE} could not be put back as it was: {restore}"
+            )),
+        }
+    }
 }
 
 /// Let `path` through the guard on its own: record it (see `record_allowances`),
@@ -235,8 +285,13 @@ pub fn record_allowances(
 #[allow(dead_code)] // the plan's entry point; `commit` uses `record_allowances`, which leaves the index file to it
 pub fn allow(repo: &Repository, path: &str) -> Result<(), NsitError> {
     let mut index = repo.index()?;
-    record_allowances(repo, &mut index, &[path.to_string()])?;
-    index.write()?;
+    let backup = record_allowances(repo, &mut index, &[path.to_string()])?;
+    if let Err(e) = index.write() {
+        return Err(match backup {
+            Some(backup) => backup.restore_after(e.into()),
+            None => e.into(),
+        });
+    }
     Ok(())
 }
 
@@ -860,6 +915,42 @@ mod tests {
             std::fs::read_to_string(dir.path().join(ALLOW_FILE)).unwrap(),
             ".env\nk.pem\n"
         );
+    }
+
+    #[test]
+    fn a_recorded_allowance_can_be_taken_back_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        let file = dir.path().join(ALLOW_FILE);
+        let mut index = repo.index().unwrap();
+
+        // There was no allow file: taking the allowance back removes the one that was made.
+        let backup = record_allowances(&repo, &mut index, &[".env".to_string()])
+            .unwrap()
+            .expect("the file was written");
+        assert!(file.exists());
+        backup.restore().unwrap();
+        assert!(!file.exists());
+
+        // There was one, with a comment and a name that is not text: every byte comes back.
+        let mut original = b"# why\nold.env\n# caf\xe9".to_vec();
+        original.push(b'\n');
+        std::fs::write(&file, &original).unwrap();
+        let backup = record_allowances(&repo, &mut index, &["k.pem".to_string()])
+            .unwrap()
+            .expect("the file was changed");
+        assert_ne!(std::fs::read(&file).unwrap(), original);
+        backup.restore().unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+
+        // Nothing new to record: nothing was written, so there is nothing to take back.
+        assert!(
+            record_allowances(&repo, &mut index, &["old.env".to_string()])
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+        assert!(record_allowances(&repo, &mut index, &[]).unwrap().is_none());
     }
 
     #[test]

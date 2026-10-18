@@ -149,8 +149,8 @@ pub fn run(args: &InitArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Resu
 
     let pushed = match target {
         Some(target) => {
-            let first = push_first_commits(&repo, target, &host, out)
-                .map_err(|err| with_hint(err, PUSH_AGAIN))?;
+            let first =
+                push_first_commits(&repo, target, &host, out).map_err(after_failed_first_push)?;
             match first {
                 FirstPush::NoCommits => out.info(
                     "There is no commit yet, so nothing was pushed: make one with nsit commit.",
@@ -188,6 +188,18 @@ fn rerun_hint(dir: &Path, args: &InitArgs) -> String {
         "{} is now a local repository without an origin; running {again} again is safe",
         dir.display()
     )
+}
+
+/// What a failed first push says: `err` and how to go on.
+///
+/// Not "run nsit push to try again" when the push was refused because the server has commits
+/// this repository lacks: the error already says what to do (`run nsit pull`), and pushing
+/// again would only be refused the same way.
+fn after_failed_first_push(err: NsitError) -> NsitError {
+    match &err {
+        NsitError::Rejected(message) if message.contains("run nsit pull") => err,
+        _ => with_hint(err, PUSH_AGAIN),
+    }
 }
 
 /// err with hint added to its one-line message. The exit code is kept: a
@@ -932,16 +944,38 @@ mod tests {
         for (err, code) in [
             (NsitError::Rejected("refs/heads/main: stale".into()), 6),
             (
+                NsitError::Rejected(
+                    "permission denied: you do not have write access to ada/x".into(),
+                ),
+                6,
+            ),
+            (
                 NsitError::Other("cannot reach git.iam.bot: refused".into()),
                 1,
             ),
             (NsitError::Auth("authentication failed".into()), 3),
         ] {
-            let hinted = with_hint(err, PUSH_AGAIN);
+            let hinted = after_failed_first_push(err);
             assert_eq!(hinted.exit_code(), code, "{hinted}");
             let text = hinted.to_string();
             assert!(text.contains("run nsit push to try again"), "{text}");
             assert!(!text.contains('\n'), "{text:?}");
+        }
+    }
+
+    /// Pushing again cannot fix a push that was refused because the server has commits this
+    /// repository lacks: the error already says what to do (`run nsit pull`), and a second
+    /// instruction to `run nsit push` would contradict it.
+    #[test]
+    fn a_first_push_that_needs_a_pull_is_not_told_to_push_again() {
+        for message in [
+            "refs/heads/main: non-fast-forward; run nsit pull",
+            "refs/heads/main: stale info; the branch on the server is not where nsit last fetched it (run nsit pull)",
+        ] {
+            let kept = after_failed_first_push(NsitError::Rejected(message.into()));
+            assert!(matches!(&kept, NsitError::Rejected(m) if m == message), "{kept:?}");
+            assert_eq!(kept.exit_code(), 6);
+            assert!(!kept.to_string().contains("nsit push"), "{kept}");
         }
     }
 
