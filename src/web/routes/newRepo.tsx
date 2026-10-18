@@ -50,7 +50,7 @@ function NewRepoPage({ c, values, error }: { c: Context<Env>; values: Values; er
               <input type="radio" name="visibility" value="public" checked={values.visibility !== "private"} />
               <Octicon name="repo" class="mx-1" />Public
             </label>
-            <p class="note">Anyone signed in to this GitFkd, and anyone with the link, can see this repository.</p>
+            <p class="note">Anyone signed in to this Insitio, and anyone with the link, can see this repository.</p>
           </div>
           <div class="form-checkbox">
             <label>

@@ -79,7 +79,7 @@ export function settingsRoutes(deps: Deps, app: Hono<Env>) {
           <div class="form-group">
             <div class="form-group-header"><label for="email">Email</label></div>
             <div class="form-group-body"><input class="form-control input-block" id="email" name="email" type="email" value={user.email} /></div>
-            <p class="note">Used as the author email for commits you make in GitFkd, like merges.</p>
+            <p class="note">Used as the author email for commits you make in Insitio, like merges.</p>
           </div>
           <div class="form-group">
             <div class="form-group-header"><label for="bio">Bio</label></div>
@@ -212,7 +212,7 @@ export function settingsRoutes(deps: Deps, app: Hono<Env>) {
     return (
       <>
         <div class="Subhead"><h2 class="Subhead-heading">Invites</h2></div>
-        <p class="color-fg-muted">GitFkd is invite-only. Each link creates one account and expires after 7 days.</p>
+        <p class="color-fg-muted">Insitio is invite-only. Each link creates one account and expires after 7 days.</p>
         {created && (
           <div class="flash flash-success mb-3">
             <div class="input-group">

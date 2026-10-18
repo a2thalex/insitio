@@ -85,10 +85,10 @@ describe("settings and site admin", () => {
     const ada = t.loginAs(t.user("ada"));
     const res = await t.post("/settings/tokens", { name: "laptop" }, ada);
     const html = await res.text();
-    expect(html).toMatch(/value="gfk_[A-Za-z0-9_-]+"/);
+    expect(html).toMatch(/value="ins_[A-Za-z0-9_-]+"/);
     const list = await (await t.get("/settings/tokens", ada)).text();
     expect(list).toContain("laptop");
-    expect(list).not.toMatch(/value="gfk_/);
+    expect(list).not.toMatch(/value="ins_/);
   });
 
   it("hides site admin from non-admins and lets admins create invites", async () => {

@@ -218,7 +218,7 @@ export class Repo {
     assertSafeRef(branch);
     const existing = await this.resolve(branch);
     const parent = existing ?? (from ? await this.resolve(from) : null);
-    const tmp = await mkdtemp(join(tmpdir(), "gitfkd-index-"));
+    const tmp = await mkdtemp(join(tmpdir(), "insitio-index-"));
     const env = { GIT_INDEX_FILE: join(tmp, "index") };
     try {
       if (parent) await this.git(["read-tree", parent], { env });

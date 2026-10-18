@@ -209,7 +209,7 @@ export type AccessToken = { id: number; name: string; lastUsedAt: number | null;
 export function createAccessToken(db: DatabaseSync, userId: number, name: string): string {
   const label = name.trim();
   if (!label) throw new ValidationError("Token name is required");
-  const token = `gfk_${randomToken(30)}`;
+  const token = `ins_${randomToken(30)}`;
   db.prepare("insert into access_tokens (user_id, name, token_hash, created_at) values (?, ?, ?, ?)").run(
     userId,
     label.slice(0, 100),

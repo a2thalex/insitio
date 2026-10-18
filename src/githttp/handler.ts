@@ -67,7 +67,7 @@ async function fixHead(deps: Deps, repo: RepoRow) {
 export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: Deps, route: GitRoute): void {
   const repo = getRepo(deps.db, route.owner, route.repo);
   const { user, invalid } = authenticate(deps, req);
-  const challenge = { "www-authenticate": 'Basic realm="GitFkd"' };
+  const challenge = { "www-authenticate": 'Basic realm="Insitio"' };
   if (invalid) return send(res, 401, "Invalid username or token. Use a personal access token as the password.", challenge);
   const access = repo ? accessLevel(deps.db, user, repo) : "none";
   const need = route.service === "git-receive-pack" ? "write" : "read";

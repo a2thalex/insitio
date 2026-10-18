@@ -1,4 +1,4 @@
-/* GitFkd styles layered on Primer CSS 21. Colors come from Primer's theme variables so light and dark both work. */
+/* Insitio styles layered on Primer CSS 21. Colors come from Primer's theme variables so light and dark both work. */
 
 body { background-color: var(--bgColor-default); }
 .Header { background-color: var(--header-bgColor); }

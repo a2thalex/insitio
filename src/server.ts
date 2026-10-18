@@ -5,7 +5,7 @@ import { buildApp } from "./app.js";
 import { handleGitHttp, matchGitRoute } from "./githttp/handler.js";
 
 /** One HTTP server: git smart-HTTP URLs go to the git bridge, everything else to the web app. */
-export function createGitFkdServer(deps: Deps): Server {
+export function createInsitioServer(deps: Deps): Server {
   const web = getRequestListener(buildApp(deps).fetch);
   return createServer((req, res) => {
     try {

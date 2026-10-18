@@ -15,7 +15,7 @@ export type RepoCtx = {
   access: Access;
   starred: boolean;
   counts: { issues: number; pulls: number };
-  /** Maps a commit author email to a GitFkd username when one matches. */
+  /** Maps a commit author email to a Insitio username when one matches. */
   userForEmail: (email: string) => string | null;
 };
 

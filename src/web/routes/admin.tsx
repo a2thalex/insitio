@@ -31,7 +31,7 @@ export function adminRoutes(deps: Deps, app: Hono<Env>) {
       <div class="container-lg p-responsive py-4">
         <div class="Subhead">
           <h1 class="Subhead-heading">Site admin</h1>
-          <div class="Subhead-description">Invite people and manage accounts on this GitFkd instance.</div>
+          <div class="Subhead-description">Invite people and manage accounts on this Insitio instance.</div>
         </div>
 
         <h2 class="f4 mb-2">Invites</h2>

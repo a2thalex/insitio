@@ -50,7 +50,7 @@ function AuthBox({ title, children }: { title: string; children: any }) {
 
 function LoginPage({ csrf, next, error, username }: { csrf: string; next: string; error?: string; username?: string }) {
   return (
-    <AuthBox title="Sign in to GitFkd">
+    <AuthBox title="Sign in to Insitio">
       <Flash error={error} />
       <div class="Box color-bg-subtle p-3">
         <form method="post" action={`/login?next=${encodeURIComponent(next)}`}>
@@ -63,7 +63,7 @@ function LoginPage({ csrf, next, error, username }: { csrf: string; next: string
         </form>
       </div>
       <p class="text-center color-fg-muted f6 mt-3 p-3 border rounded-2">
-        GitFkd is invite-only. Ask an admin for an invite link.
+        Insitio is invite-only. Ask an admin for an invite link.
       </p>
     </AuthBox>
   );
@@ -71,7 +71,7 @@ function LoginPage({ csrf, next, error, username }: { csrf: string; next: string
 
 function JoinPage({ csrf, token, error, values }: { csrf: string; token: string; error?: string; values?: Record<string, string> }) {
   return (
-    <AuthBox title="Create your GitFkd account">
+    <AuthBox title="Create your Insitio account">
       <Flash error={error} />
       <div class="Box color-bg-subtle p-3">
         <form method="post" action={`/join/${token}`}>

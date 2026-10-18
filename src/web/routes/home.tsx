@@ -30,7 +30,7 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
           <Octicon name="git-merge" size={64} />
           <h1 class="f00-light mt-4">Where your code lives.</h1>
           <p class="f3 color-fg-muted mt-2 mb-4">
-            GitFkd is a private, invite-only home for git repositories, issues and pull requests.
+            Insitio is a private, invite-only home for git repositories, issues and pull requests.
           </p>
           <a class="btn btn-primary btn-large" href="/login">Sign in</a>
           <p class="color-fg-muted mt-3">Have an invite link? Open it to create your account.</p>

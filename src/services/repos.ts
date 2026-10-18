@@ -46,9 +46,9 @@ export function gitFor(deps: Deps, repo: RepoRow): Repo {
   return new Repo(repoDir(deps.config.dataDir, repo.owner, repo.name));
 }
 
-/** The git identity used for commits GitFkd makes on a user's behalf. */
+/** The git identity used for commits Insitio makes on a user's behalf. */
 export function authorFor(user: User): Author {
-  return { name: user.displayName || user.username, email: user.email || `${user.username}@users.noreply.gitfkd` };
+  return { name: user.displayName || user.username, email: user.email || `${user.username}@users.noreply.insitio` };
 }
 
 export function validateRepoName(name: string): string {

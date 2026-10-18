@@ -1,8 +1,8 @@
-# GitFkd
+# Insitio
 
 A self-hosted, invite-only git forge with a GitHub-style web UI. Push and clone over HTTP, browse code, review diffs, track issues and merge pull requests.
 
-The page layouts, URL scheme and data-loading approach come from evidence gathered on github.com with [REA (Reverse Engineer Anything)](https://github.com/morluto/rea). See [docs/rea-findings.md](docs/rea-findings.md) for what was observed and what GitFkd adopted.
+The page layouts, URL scheme and data-loading approach come from evidence gathered on github.com with [REA (Reverse Engineer Anything)](https://github.com/morluto/rea). See [docs/rea-findings.md](docs/rea-findings.md) for what was observed and what Insitio adopted.
 
 ## Features
 
@@ -42,7 +42,7 @@ Open http://localhost:3000, sign in, and change your password under **Settings â
 
 ### Inviting people
 
-GitFkd has no open sign-up. As a site admin, open **Site admin** from the avatar menu and click **Create invite link**, then send the link to the person you're inviting. Each link creates one account and expires after 7 days. You can also print one from the terminal:
+Insitio has no open sign-up. As a site admin, open **Site admin** from the avatar menu and click **Create invite link**, then send the link to the person you're inviting. Each link creates one account and expires after 7 days. You can also print one from the terminal:
 
 ```bash
 npm run invite:create
@@ -58,7 +58,7 @@ Create a token under **Settings â†’ Personal access tokens** and use it as the p
 git clone http://localhost:3000/yourname/your-repo.git
 ```
 
-A new empty repository shows these push instructions on its page. If the first push is a `master` branch instead of `main`, GitFkd makes it the default branch.
+A new empty repository shows these push instructions on its page. If the first push is a `master` branch instead of `main`, Insitio makes it the default branch.
 
 ## Configuration
 
@@ -72,11 +72,11 @@ A new empty repository shows these push instructions on its page. If the first p
 | `TRUST_PROXY` | unset | `1` trusts a proxy on loopback (or a comma list of proxy IPs) for client addresses, and binds the app to 127.0.0.1 |
 | `HOST` | all interfaces (127.0.0.1 with `TRUST_PROXY`) | Interface to listen on |
 
-For anything beyond your own machine, put GitFkd behind an HTTPS reverse proxy (Caddy, nginx) and set `BASE_URL` to the public `https://` address. Tokens and session cookies must not travel over plain HTTP. Back up `DATA_DIR` to back up everything.
+For anything beyond your own machine, put Insitio behind an HTTPS reverse proxy (Caddy, nginx) and set `BASE_URL` to the public `https://` address. Tokens and session cookies must not travel over plain HTTP. Back up `DATA_DIR` to back up everything.
 
 ## Deploy to a VM
 
-`deploy/` runs GitFkd on Ubuntu 24.04 behind Caddy, which handles HTTPS certificates automatically:
+`deploy/` runs Insitio on Ubuntu 24.04 behind Caddy, which handles HTTPS certificates automatically:
 
 - `setup.sh` installs Node 24, git and Caddy, creates a `gitfkd` service user, installs the app to `/opt/gitfkd` with data in `/var/lib/gitfkd`, and starts the `gitfkd` systemd service. It is safe to re-run for updates.
 - `gitfkd.service` is a hardened systemd unit that can only write its data directory.

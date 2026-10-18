@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { createGitFkdServer } from "../src/server.js";
+import { createInsitioServer } from "../src/server.js";
 import { addCollaborator, createRepo, getRepo, gitFor } from "../src/services/repos.js";
 import { createAccessToken, createSession, createUser, getUserByName } from "../src/services/users.js";
 import { matchGitRoute } from "../src/githttp/handler.js";
@@ -57,7 +57,7 @@ beforeAll(async () => {
   const secret = await createRepo(deps, ada, { name: "secret", description: "", isPrivate: true, initReadme: false });
   await createRepo(deps, ada, { name: "open", description: "", isPrivate: false, initReadme: true });
   addCollaborator(deps.db, secret.id, bob.id, "read");
-  server = createGitFkdServer(deps);
+  server = createInsitioServer(deps);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });

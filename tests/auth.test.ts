@@ -78,7 +78,7 @@ describe("access tokens", () => {
     const ada = createUser(db, { username: "ada", password: "longenough", email: "a@b.c" });
     createUser(db, { username: "bob", password: "longenough", email: "b@b.c" });
     const t = createAccessToken(db, ada.id, "laptop");
-    expect(t.startsWith("gfk_")).toBe(true);
+    expect(t.startsWith("ins_")).toBe(true);
     expect(userForAccessToken(db, "ada", t)?.id).toBe(ada.id);
     expect(userForAccessToken(db, "bob", t)).toBeNull();
     expect(userForAccessToken(db, "ada", "gfk_wrong")).toBeNull();

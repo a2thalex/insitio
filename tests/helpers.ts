@@ -10,7 +10,7 @@ import { buildApp } from "../src/app.js";
 import { createSession, createUser, type User } from "../src/services/users.js";
 
 export function tmpDir(): string {
-  return mkdtempSync(join(tmpdir(), "gitfkd-test-"));
+  return mkdtempSync(join(tmpdir(), "insitio-test-"));
 }
 
 /** Fresh deps: an in-memory database and a temporary data directory. */

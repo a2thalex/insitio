@@ -67,9 +67,9 @@ function Header({ user, csrf }: { user: User | null; csrf: string }) {
   return (
     <header class="Header px-3 px-md-4" role="banner">
       <div class="Header-item">
-        <a href="/" class="Header-link f4 d-flex flex-items-center" aria-label="GitFkd home">
+        <a href="/" class="Header-link f4 d-flex flex-items-center" aria-label="Insitio home">
           <Octicon name="git-merge" size={28} />
-          <span class="ml-2 text-bold header-wordmark">GitFkd</span>
+          <span class="ml-2 text-bold header-wordmark">Insitio</span>
         </a>
       </div>
       <div class="Header-item Header-item--full min-width-0">
@@ -132,7 +132,7 @@ export function Layout({ title, user, csrf, children }: PageProps) {
         <head>
           <meta charset="utf-8" />
           <meta name="viewport" content="width=device-width, initial-scale=1" />
-          <title>{title ? `${title} · GitFkd` : "GitFkd"}</title>
+          <title>{title ? `${title} · Insitio` : "Insitio"}</title>
           <link rel="stylesheet" href={assetUrl("primer.css")} />
           <link rel="stylesheet" href={assetUrl("app.css")} />
           <link rel="icon" href={assetUrl("favicon.svg")} type="image/svg+xml" />
@@ -143,7 +143,7 @@ export function Layout({ title, user, csrf, children }: PageProps) {
           <Header user={user} csrf={csrf} />
           <main id="main">{children}</main>
           <footer class="container-xl p-responsive py-6 mt-6 border-top color-fg-muted f6 d-flex flex-justify-between" role="contentinfo">
-            <span>GitFkd · self-hosted, invite-only</span>
+            <span>Insitio · self-hosted, invite-only</span>
             <span>Powered by git</span>
           </footer>
         </body>

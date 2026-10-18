@@ -1,4 +1,4 @@
-// GitFkd progressive enhancements. Every page works without this script.
+// Insitio progressive enhancements. Every page works without this script.
 
 // Copy buttons: data-copy-target="<input id>" or data-copy-text="<text>".
 document.addEventListener("click", async (event) => {
