@@ -374,6 +374,18 @@ jobs:
           mkdir dist
           cp "cli/target/$BUILD_TARGET/release/nsit" "dist/$ASSET"
 
+      # Users' Macs have only the system libraries. Any other dylib (say Homebrew's OpenSSL, picked up
+      # because the runner has it) would make the binary fail to start there, so refuse it here.
+      - name: Check it links only system libraries
+        run: |
+          set -euo pipefail
+          otool -L "dist/$ASSET"
+          outside=$(otool -L "dist/$ASSET" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)
+          if [ -n "$outside" ]; then
+            echo "::error::$ASSET links libraries that are not part of macOS: $outside"
+            exit 1
+          fi
+
       # Not run here: the smoke test is in sign-macos, on the file that is actually shipped.
       - uses: actions/upload-artifact@v4
         with:

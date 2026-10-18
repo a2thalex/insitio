@@ -41,14 +41,17 @@ thiserror = "2"
 toml = "1.1"
 url = "2"
 
-# Token file safety checks on Unix: who owns the config dir, and O_NOFOLLOW.
 [target.'cfg(unix)'.dependencies]
+# Token file safety checks on Unix: who owns the config dir, and O_NOFOLLOW.
 libc = "0.2"
-
 # libgit2 over HTTPS uses OpenSSL on Linux; build it from source so the musl
-# release binary stays static. Windows and macOS use their native TLS stacks.
-[target.'cfg(target_os = "linux")'.dependencies]
-git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https", "vendored-openssl"] }
+# release binary stays static. macOS uses SecureTransport, but libgit2-sys still
+# depends on openssl-sys on every Unix when `https` is on, and without
+# `vendored-openssl` that links whatever OpenSSL the build machine has (Homebrew's
+# dylib), which users' Macs may not have, and fails when cross-compiling to x86_64.
+# Vendoring it there too keeps both macOS binaries free of outside libraries.
+# Windows uses WinHTTP and needs neither.
+git2 ={ version = "0.21", default-features = false, features = ["vendored-libgit2", "https", "vendored-openssl"] }
 
 [dev-dependencies]
 tempfile = "3"
