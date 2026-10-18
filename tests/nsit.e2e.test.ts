@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { execFile, spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
@@ -1706,6 +1706,36 @@ describe("nsit push", () => {
     expect(await serverTip("drop")).toBe(await ref(work.dir, "HEAD"));
   });
 
+  it("a pack the server refuses to store is rejected by the server (exit 6, its own words, not 'cannot reach'), and nothing moves", async () => {
+    const work = await seededClone("unpackfail");
+    // Far more than the sockets between the two hold, so nsit is still sending when the server gives up.
+    await commitIn(work, "payload.bin", randomBytes(16 * 1024 * 1024), "Payload");
+    const before = await snapshot(work.dir);
+    const tip = await serverTip("unpackfail");
+    // The server's own limit on what one push may carry, the way a server refuses a very big push:
+    // the real receive-pack stops reading the pack at the limit, cannot unpack it, and says
+    // `ng <ref> unpacker error` for the branch. (The Rust test of `plain_failure` covers a server that
+    // fails to unpack and names no ref.) The server has to read the rest of the upload and drop it, or
+    // the connection breaks under nsit and it reports a write failure instead of the server's answer.
+    const bare = serverRepo("ada", "unpackfail");
+    await realGit(bare, "config", "receive.maxInputSize", "1024");
+
+    const result = await pushFrom(work);
+    expect(result.code, result.stderr).toBe(6);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("nsit: refs/heads/main: unpacker error\n");
+    expect(result.stderr).not.toMatch(/cannot reach|ins_/);
+    expect(await snapshot(work.dir)).toEqual(before);
+    expect(await serverTip("unpackfail")).toBe(tip);
+
+    // Nothing is stuck: without the limit the same push goes through.
+    await realGit(bare, "config", "--unset", "receive.maxInputSize");
+    const retry = await pushFrom(work);
+    expect(retry.code, retry.stderr).toBe(0);
+    expect(await serverTip("unpackfail")).toBe(await ref(work.dir, "HEAD"));
+    await realGit(bare, "fsck", "--strict");
+  });
+
   it("a few megabytes of data that does not compress go through in one push, and real git agrees about the object", async () => {
     const work = await seededClone("bulk");
     const blob = randomBytes(6 * 1024 * 1024);
@@ -2463,4 +2493,156 @@ describe("nsit pull", () => {
     expect(JSON.parse(here.stdout)).toEqual({ result: "fast_forward", head: second, conflicts: [] });
     expect(await realGit(b.dir, "status", "--porcelain")).toBe("");
   }, SLOW);
+});
+
+// ---- a larger repository (Review Focus 5) -------------------------------------------------------
+
+// Set NSIT_SKIP_SCALE=1 to leave this out (it moves about 20 MB over the loopback and takes a
+// minute or two); it runs by default, and in CI.
+const skipScale = /^(1|true|yes)$/i.test(process.env.NSIT_SKIP_SCALE ?? "");
+const SCALE_COMMITS = 2_000;
+const SCALE_BLOB_BYTES = 20 * 1024 * 1024;
+/** The push and the clone together must finish within this. */
+const SCALE_BUDGET_MS = 120_000;
+/**
+ * The most a test of its own may take: generating the repository, the budget above (with room to
+ * report how far over it was instead of being killed first), and the checks. The two `nsit`
+ * processes get less than this each, so a hung one is killed with its output before vitest gives up.
+ */
+const SCALE_TEST_TIMEOUT = 300_000;
+const SCALE_PROCESS_TIMEOUT = 150_000;
+
+/** Runs real git with `input` on its stdin; rejects with git's own words when it fails. */
+function realGitWith(cwd: string, input: Buffer, ...args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["-c", "core.autocrlf=false", ...args], { cwd, env: gitEnv, stdio: ["pipe", "ignore", "pipe"], windowsHide: true });
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+    child.stdin.on("error", () => {}); // git exited early: its own message is the one to report
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`git ${args.join(" ")} failed in ${cwd} (exit ${code}): ${stderr}`))));
+    child.stdin.end(input);
+  });
+}
+
+/**
+ * A `git fast-import` stream: `commits` small commits on main (each rewrites one of a hundred
+ * text files, so the history is long and the trees are real), then one commit that adds `blob`.
+ */
+function fastImportStream(commits: number, blob: Buffer): Buffer {
+  const parts: Buffer[] = [];
+  const epoch = 1_700_000_000;
+  const add = (n: number, message: string, path: string, content: Buffer) => {
+    parts.push(Buffer.from(`commit refs/heads/main\ncommitter Scale Test <scale@example.com> ${epoch + n} +0000\ndata ${Buffer.byteLength(message)}\n${message}\n`));
+    parts.push(Buffer.from(`M 100644 inline ${path}\ndata ${content.length}\n`), content, Buffer.from("\n"));
+  };
+  for (let n = 0; n < commits; n++) {
+    const file = n % 100;
+    const text = `revision ${Math.floor(n / 100)} of file ${file}, written by commit ${n}\n` + `${n} `.repeat(60) + "\n";
+    add(n, `Commit ${n}`, `files/f${String(file).padStart(2, "0")}.txt`, Buffer.from(text));
+  }
+  add(commits, "Add a 20 MB binary", "big.bin", blob);
+  return Buffer.concat(parts);
+}
+
+describe.skipIf(skipScale)("nsit at scale (Review Focus 5)", () => {
+  it(
+    `pushes and clones ${SCALE_COMMITS.toLocaleString("en-US")} commits and a 20 MB blob in ${SCALE_BUDGET_MS / 1000} s, with no progress off a terminal`,
+    async () => {
+      const dirs: string[] = [];
+      const tmp = () => {
+        const dir = tmpDir();
+        dirs.push(dir);
+        return dir;
+      };
+      const timings: Record<string, number> = {};
+      const timed = async <T>(phase: string, work: () => Promise<T>): Promise<T> => {
+        const started = performance.now();
+        try {
+          return await work();
+        } finally {
+          timings[phase] = performance.now() - started;
+        }
+      };
+      const seconds = () => Object.entries(timings).map(([phase, ms]) => `${phase} ${(ms / 1000).toFixed(1)} s`).join(", ");
+      const noProgress = (what: string, result: NsitResult) => {
+        // What a terminal would show while a pack moves: redrawn lines (\r) and git's progress words.
+        expect(result.stdout + result.stderr, `${what} wrote progress off a terminal`).not.toMatch(/\r|Writing objects|Receiving objects|Resolving deltas|Compressing objects|Counting objects/);
+      };
+
+      try {
+        // The repository: real git builds it in one stream, in a directory with spaces in its name.
+        const blob = randomBytes(SCALE_BLOB_BYTES); // random: packing cannot make it smaller
+        const blobSha256 = createHash("sha256").update(blob).digest("hex");
+        const source = join(tmp(), "Scale Source");
+        mkdirSync(source);
+        await timed("generate", async () => {
+          await realGit(source, "init", "-q", "-b", "main");
+          await realGitWith(source, fastImportStream(SCALE_COMMITS, blob), "fast-import", "--quiet");
+          await realGit(source, "reset", "-q", "--hard", "main");
+        });
+        const head = (await realGit(source, "rev-parse", "HEAD")).trim();
+        expect((await realGit(source, "rev-list", "--count", "HEAD")).trim()).toBe(String(SCALE_COMMITS + 1));
+        expect((await realGit(source, "cat-file", "-s", "HEAD:big.bin")).trim()).toBe(String(SCALE_BLOB_BYTES));
+
+        // A server repository for it, and origin set the way a person would.
+        const configDir = tmp();
+        await signIn(configDir);
+        const made = await nsit(["repo", "create", "big", "--host", ins.base], { configDir });
+        expect(made.code, made.stderr).toBe(0);
+        await realGit(source, "remote", "add", "origin", `${ins.base}/ada/big.git`);
+        const env = homeWith(true);
+
+        const pushed = await timed("push", () => nsit(["-C", source, "push", "--host", ins.base], { configDir, env, timeoutMs: SCALE_PROCESS_TIMEOUT }));
+        expect(pushed.code, `${pushed.stderr} (${seconds()})`).toBe(0);
+        expect(pushed.stdout).toBe("Pushed main to ada/big\n");
+        expect(pushed.stderr, "nothing but data off a terminal").toBe("");
+        noProgress("push", pushed);
+
+        const cwd = tmp();
+        const cloned = await timed("clone", () => nsit(["clone", "ada/big", "copy", "--host", ins.base], { cwd, configDir, env, timeoutMs: SCALE_PROCESS_TIMEOUT }));
+        expect(cloned.code, `${cloned.stderr} (${seconds()})`).toBe(0);
+        expect(cloned.stdout).toMatch(/^Cloned ada\/big into .*copy\n$/);
+        expect(cloned.stderr, "nothing but data off a terminal").toBe("");
+        noProgress("clone", cloned);
+
+        // Both together are within the budget.
+        const wall = timings.push! + timings.clone!;
+        // Where the time went, in the log of the run (CI included), whether or not the test passes.
+        console.info(`nsit at scale: ${seconds()} (push + clone ${(wall / 1000).toFixed(1)} s of ${SCALE_BUDGET_MS / 1000} s)`);
+        expect(wall, `push and clone took ${(wall / 1000).toFixed(1)} s (${seconds()})`).toBeLessThanOrEqual(SCALE_BUDGET_MS);
+
+        // What arrived is what was sent: the server (read by real git on its disk) and the clone.
+        await timed("verify", async () => {
+          const bare = serverRepo("ada", "big");
+          const copy = join(cwd, "copy");
+          expect((await realGit(bare, "rev-parse", "refs/heads/main")).trim(), "the server's branch").toBe(head);
+          expect((await realGit(bare, "rev-list", "--count", "refs/heads/main")).trim()).toBe(String(SCALE_COMMITS + 1));
+          expect((await realGit(bare, "cat-file", "-s", "main:big.bin")).trim()).toBe(String(SCALE_BLOB_BYTES));
+          await realGit(bare, "fsck", "--strict");
+
+          expect((await realGit(copy, "rev-parse", "HEAD")).trim(), "the clone's HEAD").toBe(head);
+          expect((await realGit(copy, "rev-list", "--count", "HEAD")).trim()).toBe(String(SCALE_COMMITS + 1));
+          expect((await realGit(copy, "cat-file", "-s", "HEAD:big.bin")).trim()).toBe(String(SCALE_BLOB_BYTES));
+          const checkedOut = readFileSync(join(copy, "big.bin"));
+          expect(checkedOut.length).toBe(SCALE_BLOB_BYTES);
+          expect(createHash("sha256").update(checkedOut).digest("hex"), "the blob's SHA-256").toBe(blobSha256);
+          expect(await realGit(copy, "status", "--porcelain")).toBe("");
+          await realGit(copy, "fsck", "--strict");
+          expect((await realGit(copy, "rev-parse", "--abbrev-ref", "main@{upstream}")).trim()).toBe("origin/main");
+        });
+        console.info(`nsit at scale: ${seconds()}`);
+      } finally {
+        // About 100 MB of repositories: do not leave them behind.
+        for (const dir of [...dirs, serverRepo("ada", "big")]) {
+          try {
+            rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+          } catch {
+            // a file still held open (Windows): the operating system's temp cleanup gets it
+          }
+        }
+      }
+    },
+    SCALE_TEST_TIMEOUT,
+  );
 });

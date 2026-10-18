@@ -99,9 +99,12 @@ gcloud compute ssh gitfkd-1 --zone us-central1-a --tunnel-through-iap --command 
 ```bash
 npm test           # unit, route and end-to-end git tests (Vitest)
 npm run typecheck  # tsc --noEmit
+cargo test --manifest-path cli/Cargo.toml   # the nsit CLI's own tests (needs Rust)
 ```
 
-The end-to-end tests start a real server and run `git clone` and `git push` against it. They use an isolated git config with credential helpers disabled, so they never touch your own git settings or credential store.
+The end-to-end tests start a real server and run `git clone` and `git push` against it. They use an isolated git config with credential helpers disabled, so they never touch your own git settings or credential store. The `nsit` end-to-end tests build the debug CLI with cargo and run it against the server; one of them pushes and clones a repository of 2,000 commits and a 20 MB file, and `NSIT_SKIP_SCALE=1 npm test` leaves that one out.
+
+`.github/workflows/ci.yml` runs all of the above, plus `cargo fmt`, `cargo clippy` and the type check, on Windows, Linux and macOS for every push and pull request.
 
 Layout:
 

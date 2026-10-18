@@ -133,6 +133,12 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
     send(res, 500, "Git backend unavailable.");
   });
   child.on("close", async (code) => {
+    // git can stop reading before the upload is over: a pack above receive.maxInputSize, a fatal error.
+    // The client is still sending then, and a connection that nobody reads from gets reset under it,
+    // so it reports a broken upload instead of git's answer (for a push: "unpacker error"). Read what
+    // is left of the request and drop it, so that the answer reaches the client.
+    req.unpipe(child.stdin);
+    req.resume();
     if (!headersSent) {
       send(res, 500, `Git backend exited with code ${code}.`);
       return;

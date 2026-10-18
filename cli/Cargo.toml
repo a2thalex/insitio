@@ -2,6 +2,11 @@
 name = "nsit"
 version = "0.1.0"
 edition = "2021"
+# The lowest Rust the locked dependencies build with. Windows and macOS need 1.88 (keyring, the
+# ICU crates behind `url`); Linux needs 1.89: keyring's Secret Service path pulls in uuid 1.28
+# (rust-version 1.89.0) through zbus and aes 0.9 (1.89) through secret-service. From
+# `cargo metadata`'s rust_version over every package in Cargo.lock; raise it when an update does.
+rust-version = "1.89"
 description = "nsit: the Insitio command-line tool for people and agents, used instead of git"
 license = "MIT"
 publish = false

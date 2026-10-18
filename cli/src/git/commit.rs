@@ -953,10 +953,12 @@ mod tests {
         assert_eq!(marked, [b"d\xe9/merged.txt".to_vec()]);
     }
 
-    /// Real files with names that are not UTF-8, which only a Unix file system can
+    /// Real files with names that are not UTF-8, which only some Unix file systems can
     /// hold. They go through the whole of `nsit commit` (staging by `add_all`, the
-    /// diff, the guard). These cannot run on Windows.
-    #[cfg(unix)]
+    /// diff, the guard). These cannot run on Windows, and not on macOS either: APFS
+    /// refuses to create such a name (`Illegal byte sequence`), so on Apple systems the
+    /// same code is covered by the `stage_raw` tests above, which need no real file.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     mod non_utf8_files {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;

@@ -321,8 +321,11 @@ fn answer_requests(mut stream: TcpStream, seen: &Mutex<Vec<Seen>>, reply: &Reply
     loop {
         while let Some(end) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
             let head = String::from_utf8_lossy(&pending[..end]).into_owned();
-            // These requests are GETs; none has a body to skip.
             pending.drain(..end + 4);
+            // A GET has no body; a push has one (a pack), which is read and dropped.
+            if !skip_body(&mut stream, &mut pending, &head) {
+                return;
+            }
             let mut lines = head.lines();
             let request_line = lines.next().unwrap_or_default().to_string();
             let authorization = lines
@@ -343,6 +346,68 @@ fn answer_requests(mut stream: TcpStream, seen: &Mutex<Vec<Seen>>, reply: &Reply
             Ok(n) => pending.extend_from_slice(&buf[..n]),
         }
     }
+}
+
+/// Read and drop the body that follows a request head: `Content-Length` bytes, or the chunks of a
+/// `Transfer-Encoding: chunked` body (which is how libgit2 streams a push). Returns false when
+/// the client went away first. `pending` holds whatever has been read past the head.
+fn skip_body(stream: &mut TcpStream, pending: &mut Vec<u8>, head: &str) -> bool {
+    let header = |name: &str| {
+        head.lines()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim().to_string())
+    };
+    // Read more into `pending`; false at the end of the stream.
+    fn fill(stream: &mut TcpStream, pending: &mut Vec<u8>) -> bool {
+        let mut buf = [0u8; 8192];
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => false,
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                true
+            }
+        }
+    }
+    if let Some(length) = header("content-length").and_then(|v| v.parse::<usize>().ok()) {
+        while pending.len() < length {
+            if !fill(stream, pending) {
+                return false;
+            }
+        }
+        pending.drain(..length);
+        return true;
+    }
+    if header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+        loop {
+            let line_end = loop {
+                if let Some(i) = pending.windows(2).position(|w| w == b"\r\n") {
+                    break i;
+                }
+                if !fill(stream, pending) {
+                    return false;
+                }
+            };
+            let size_text = String::from_utf8_lossy(&pending[..line_end]).into_owned();
+            let Ok(size) =
+                usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16)
+            else {
+                return false;
+            };
+            pending.drain(..line_end + 2);
+            // The chunk and the CRLF after it (for the last, empty chunk: the end of the body).
+            while pending.len() < size + 2 {
+                if !fill(stream, pending) {
+                    return false;
+                }
+            }
+            pending.drain(..size + 2);
+            if size == 0 {
+                return true;
+            }
+        }
+    }
+    true
 }
 
 /// Standard base64, to compare against Basic auth headers.
@@ -559,6 +624,35 @@ mod tests {
         assert_eq!(base64("ada:secret"), "YWRhOnNlY3JldA==");
         assert_eq!(base64("ab"), "YWI=");
         assert_eq!(base64("abc"), "YWJj");
+    }
+
+    #[test]
+    fn the_stub_server_reads_past_request_bodies_to_the_next_request() {
+        let server = StubServer::start(|_| "HTTP/1.1 204 No Content\r\n\r\n".to_string());
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+        // A body with a length, a chunked body (the second chunk holds what looks like a
+        // request head), and a GET: all on one connection.
+        stream
+            .write_all(
+                b"POST /a HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello\
+                  POST /b HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                  3\r\nabc\r\n16\r\nGET /fake HTTP/1.1\r\n\r\n\r\n0\r\n\r\n\
+                  GET /c HTTP/1.1\r\n\r\n",
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.requests().len() < 3 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let lines: Vec<String> = server
+            .requests()
+            .into_iter()
+            .map(|s| s.request_line)
+            .collect();
+        assert_eq!(
+            lines,
+            ["POST /a HTTP/1.1", "POST /b HTTP/1.1", "GET /c HTTP/1.1"]
+        );
     }
 
     #[test]

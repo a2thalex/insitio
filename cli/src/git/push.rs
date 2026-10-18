@@ -344,7 +344,8 @@ fn outcome(
 ///   `Rejected` (exit 6), `permission denied`. libgit2 does not hand on the server's text,
 ///   only the status, so the repository is named from what nsit pushed to;
 /// * HTTP 404: no such repository, or none this account may see;
-/// * anything else: exit 1, one line, naming the server when it was a network matter.
+/// * anything else: exit 1, one line (`plain_failure`): "cannot reach <server>" for the network,
+///   "<server> reported a problem" when the server said it failed (a pack it could not unpack).
 fn push_error(err: NsitError, target: &RepoRef, refname: &str) -> NsitError {
     let NsitError::Git(git) = err else {
         return err;
@@ -366,11 +367,27 @@ fn push_error(err: NsitError, target: &RepoRef, refname: &str) -> NsitError {
     }
 }
 
-/// One line for a libgit2 failure that is neither a refusal nor an HTTP status: the server named
-/// when it was a network matter (`cannot reach <server>: <why>`), libgit2's own words otherwise.
+/// One line for a libgit2 failure that is neither a refusal nor an HTTP status. Always exit 1;
+/// what the line says depends on who failed:
+///
+/// * nsit itself, which libgit2 hands back as `ErrorCode::User` (the credential provider's
+///   "refusing to send your token to a host other than ..."): its own words. It is class `Http`,
+///   but nothing was sent and nobody was asked, so it must not read as a connection problem.
+/// * the server, which answered and said it failed (`reported_by_server`):
+///   `<server> reported a problem: <libgit2's words>`. A push the server could not unpack is
+///   the main case.
+/// * the network (`Net`, `Os`, `Http`, `Ssl`): `cannot reach <server>: <why>`.
+/// * anything else: libgit2's own words.
+///
 /// Used by `pull` too.
 pub(super) fn plain_failure(git: &git2::Error, target: &RepoRef) -> NsitError {
     let text = one_line(git.message(), MAX_REASON);
+    if git.code() == ErrorCode::User {
+        return NsitError::Other(text);
+    }
+    if reported_by_server(git) {
+        return NsitError::Other(format!("{} reported a problem: {text}", target.host_key()));
+    }
     let network = matches!(
         git.class(),
         ErrorClass::Net | ErrorClass::Os | ErrorClass::Http | ErrorClass::Ssl
@@ -382,9 +399,48 @@ pub(super) fn plain_failure(git: &git2::Error, target: &RepoRef) -> NsitError {
     }
 }
 
+/// Did the server answer and say that it failed, as opposed to not answering? libgit2 gives all
+/// of these class `Net`, like a dropped connection, and has no code that tells them apart, so
+/// this reads the message, like `http_status` does.
+///
+/// Pinned to libgit2 1.9.7 (libgit2-sys 0.18.8, git2 0.21). A libgit2 update has to re-check the
+/// markers against its sources (`src/libgit2/` in libgit2-sys); the push test in
+/// `tests/nsit.e2e.test.ts` that makes a real server refuse a pack (`receive.maxInputSize`) fails
+/// if the first one stops matching.
+///
+/// * `push.c`, `git_push_finish` (line 539): "unpacking the sent packfile failed on the remote".
+///   The server's report-status said that `unpack` did not work: it could not store the pack (a
+///   size limit, a full disk, a broken repository). libgit2 stops there, so no per-ref status
+///   reaches `Hooks::on_status`.
+/// * `transports/smart_protocol.c`: "remote error: <text>" (line 72), an `ERR` packet the server
+///   sent instead of what was asked; "report-status: Error reported: <text>" (line 1004) and
+///   "report-status: protocol error" (lines 897, 1081, 1096), the server's reply to a push.
+fn reported_by_server(git: &git2::Error) -> bool {
+    const MARKERS: [&str; 3] = [
+        "unpacking the sent packfile failed on the remote",
+        "remote error:",
+        "report-status:",
+    ];
+    git.class() == ErrorClass::Net && MARKERS.iter().any(|m| git.message().contains(m))
+}
+
 /// The HTTP status libgit2 names in an error, when it refused to go on because of one:
 /// "unexpected http status code: 403" from its own HTTP client, "request failed with status
 /// code: 403" from WinHTTP.
+///
+/// Pinned to libgit2 1.9.7 (libgit2-sys 0.18.8, git2 0.21), and read from the message because
+/// libgit2 gives the status no field of its own. A libgit2 update has to re-check both sources:
+///
+/// * `src/libgit2/transports/http.c`, `handle_response` (line 282):
+///   `git_error_set(GIT_ERROR_HTTP, "unexpected http status code: %d", ...)`;
+/// * `src/libgit2/transports/winhttp.c` (line 1274), the transport used on Windows:
+///   `git_error_set(GIT_ERROR_HTTP, "request failed with status code: %lu", ...)`.
+///
+/// Both are class `Http` and both put the number straight after "status code: ". (A 401 is not
+/// read here: in http.c it is "unexpected authentication failure", `GIT_EAUTH`, which
+/// `remote_error` turns into exit 3.) The 403 and 404 tests in this file pin the two wordings, and
+/// the read-only collaborator test in `tests/nsit.e2e.test.ts` gets a real 403 through each
+/// platform's own transport, so a change of wording fails CI on the platform it affects.
 pub(super) fn http_status(err: &git2::Error) -> Option<u16> {
     if err.class() != ErrorClass::Http {
         return None;
@@ -402,8 +458,12 @@ mod tests {
     use url::Url;
 
     use super::*;
+    use crate::config::Config;
+    use crate::credentials::{host_key_for, store_token};
     use crate::repo_ref::parse_repo_ref;
-    use crate::test_support::{commit_file, local_repo};
+    use crate::test_support::{
+        commit_file, host_entry_for, isolated_env, local_repo, out_with, StubServer,
+    };
 
     fn target() -> RepoRef {
         parse_repo_ref("ada/demo", "", &Url::parse("https://git.iam.bot/").unwrap()).unwrap()
@@ -1071,6 +1131,199 @@ mod tests {
             "refs/heads/main",
         );
         assert!(err.to_string().chars().count() < 260, "{err}");
+    }
+
+    #[test]
+    fn a_failure_the_server_reported_says_so_instead_of_cannot_reach() {
+        // What libgit2 1.9.7 says when the server answered and said it failed: all class `Net`,
+        // like a dropped connection (see `reported_by_server`).
+        for message in [
+            "unpacking the sent packfile failed on the remote",
+            "remote error: access denied or repository not exported",
+            "report-status: Error reported: out of space\n",
+            "report-status: protocol error",
+        ] {
+            let err = push_error(
+                NsitError::Git(git2::Error::new(
+                    ErrorCode::GenericError,
+                    ErrorClass::Net,
+                    message,
+                )),
+                &target(),
+                "refs/heads/main",
+            );
+            assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+            assert_eq!(err.exit_code(), 1, "still a general error");
+            let text = err.to_string();
+            assert_eq!(
+                text,
+                format!("git.iam.bot reported a problem: {}", message.trim_end()),
+                "{message}"
+            );
+            assert!(!text.contains("cannot reach"), "{text}");
+            assert!(!text.contains('\n'), "{text:?}");
+        }
+        // The same words from another class are not the server's report.
+        let err = push_error(
+            NsitError::Git(git2::Error::new(
+                ErrorCode::GenericError,
+                ErrorClass::Odb,
+                "remote error: x",
+            )),
+            &target(),
+            "refs/heads/main",
+        );
+        assert_eq!(err.to_string(), "remote error: x");
+        // And a connection that broke is still the network's.
+        let err = push_error(
+            NsitError::Git(git2::Error::new(
+                ErrorCode::GenericError,
+                ErrorClass::Net,
+                "could not read from remote repository",
+            )),
+            &target(),
+            "refs/heads/main",
+        );
+        assert_eq!(
+            err.to_string(),
+            "cannot reach git.iam.bot: could not read from remote repository"
+        );
+    }
+
+    // ---- libgit2's own words for a push the server could not unpack ---------------------------
+
+    /// One pkt-line: four hex digits of its length (counting them), then the text.
+    fn pkt(text: &str) -> String {
+        format!("{:04x}{text}", text.len() + 4)
+    }
+
+    /// A server with no branches that takes any pack and answers the push with `report`, the
+    /// report-status as pkt-lines. It does not offer side-band, so the report is not wrapped. It
+    /// asks for no sign-in: the first request goes through.
+    fn server_answering_a_push_with(report: String) -> StubServer {
+        StubServer::start(move |seen| {
+            let (kind, body) = if seen.request_line.starts_with("POST ") {
+                ("result", report.clone())
+            } else {
+                let capabilities = "report-status delete-refs ofs-delta agent=stub";
+                let head = format!("{} capabilities^{{}}\0{capabilities}\n", "0".repeat(40));
+                (
+                    "advertisement",
+                    format!(
+                        "{}0000{}0000",
+                        pkt("# service=git-receive-pack\n"),
+                        pkt(&head)
+                    ),
+                )
+            };
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-receive-pack-{kind}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        })
+    }
+
+    /// A push of `main` (one commit) to `server`, through the real `push_branch` and libgit2's
+    /// HTTP transport, with a stored token for it. A failed push moves no ref, which is checked here.
+    fn push_to(server: &StubServer, dir: &Path) -> Result<Pushed, NsitError> {
+        let host = server.host();
+        store_token(&host, "ada", "ins_stored_token").unwrap();
+        let mut config = Config::load().unwrap();
+        config.hosts.insert(
+            host_key_for(&host).unwrap(),
+            host_entry_for("ada", None, None),
+        );
+        config.save().unwrap();
+
+        let work = dir.join("work");
+        std::fs::create_dir(&work).unwrap();
+        let repo = local_repo(&work);
+        commit_file(&repo, "a.txt", "a");
+        let before = all_refs(&repo);
+        let target = parse_repo_ref("ada/demo", "ada", &Url::parse(&host).unwrap()).unwrap();
+        let result = push_branch(
+            &repo,
+            &target,
+            &host,
+            &out_with(false, false),
+            "main",
+            Mode::FastForward,
+            false,
+        );
+        assert_eq!(all_refs(&repo), before, "a failed push moves no ref");
+        result
+    }
+
+    /// The failure `reported_by_server` is for, from a real libgit2 push: the server's report says
+    /// the pack could not be unpacked and gives no per-ref refusal (which would be a rejection
+    /// instead), so libgit2 stops with its own words. If a libgit2 update rewords them, this is
+    /// where it shows.
+    #[test]
+    fn a_pack_the_server_could_not_unpack_is_its_failure_and_not_a_connection_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = isolated_env(dir.path());
+        let report = format!(
+            "{}{}0000",
+            pkt("unpack index-pack abnormal exit\n"),
+            pkt("ok refs/heads/main\n")
+        );
+        let server = server_answering_a_push_with(report);
+
+        let err = push_to(&server, dir.path()).unwrap_err();
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "{} reported a problem: unpacking the sent packfile failed on the remote",
+                server.host_key()
+            )
+        );
+        assert!(
+            server
+                .requests()
+                .iter()
+                .any(|r| r.request_line.starts_with("POST ")),
+            "the pack was sent: {:?}",
+            server.requests()
+        );
+    }
+
+    /// The other side of it: the same server saying `ng` for the ref is a rejection (exit 6) with
+    /// the server's reason, as before.
+    #[test]
+    fn the_same_failure_with_a_per_ref_refusal_stays_a_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = isolated_env(dir.path());
+        let report = format!(
+            "{}{}0000",
+            pkt("unpack index-pack abnormal exit\n"),
+            pkt("ng refs/heads/main unpacker error\n")
+        );
+        let server = server_answering_a_push_with(report);
+
+        let err = push_to(&server, dir.path()).unwrap_err();
+        assert!(matches!(err, NsitError::Rejected(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 6);
+        assert_eq!(err.to_string(), "refs/heads/main: unpacker error");
+    }
+
+    #[test]
+    fn nsits_own_refusal_to_send_the_token_is_not_called_a_network_failure() {
+        // The credential provider's refusals are class `Http` with code `User`.
+        for message in [
+            "refusing to send your token to a host other than git.iam.bot",
+            "the server asked for a kind of sign-in that nsit does not support",
+        ] {
+            let err = push_error(
+                NsitError::Git(git2::Error::new(ErrorCode::User, ErrorClass::Http, message)),
+                &target(),
+                "refs/heads/main",
+            );
+            assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+            assert_eq!(err.exit_code(), 1);
+            assert_eq!(err.to_string(), message);
+        }
     }
 
     #[test]
