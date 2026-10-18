@@ -38,6 +38,27 @@ target), plus `gh help` output for the command tree. Raw evidence is in
 - `pr`: create, list, status, view, checkout, diff, checks, comment, review, edit, ready, merge, update-branch, close, reopen, revert, lock, unlock
 - `release`: create, list, view, edit, upload, download, delete, delete-asset, verify, verify-asset
 
+## Reference 2: Jujutsu (`jj`), a git-compatible CLI in Rust
+
+Target: `jj-v0.46.0-x86_64-pc-windows-msvc.zip` from the official jj-vcs/jj
+release (SHA-256 `c42316b1…999b83`, matches GitHub's published digest);
+`jj.exe` is 30 MB. Raw evidence in `docs/rea-evidence/jj/` (gitignored).
+
+- **REA `inspect-rust-binary`** (observed): no cargo-auditable dependency
+  metadata is embedded; rustc commit `b940084d7eb6` (inferred from embedded
+  paths).
+- **Crate inventory** (observed, recovered from 153 cargo registry paths left
+  in panic locations): `gix` 0.88 with ~40 `gix-*` crates (odb, pack, index,
+  ref, diff, worktree, config, filter, ignore, attributes, discover), `clap`
+  4.6 (+ completions, man pages), `crossterm` + `ratatui` (terminal UI),
+  `sapling-streampager` (pager), `sapling-renderdag` (graph log), `tokio`,
+  `rayon`, `serde_json`, `pest` (revset language), `watchman_client`,
+  `zlib-rs`, `sha1dc`.
+- **Not present:** `gix-transport`, `gix-protocol`, `gix-credentials`, `curl`,
+  `reqwest`; `gix-command` is present. Inference: jj does all local repository
+  work in pure Rust through gitoxide but runs the user's `git` for fetch and
+  push, so jj alone does not work for remotes on a machine without git.
+
 ## What this means for an Insitio CLI
 
 1. Insitio needs a JSON API first. Today the web app serves HTML (plus the
@@ -48,3 +69,7 @@ target), plus `gh help` output for the command tree. Raw evidence is in
    know `gh` already know `insitio`.
 4. `--json`/`--jq` output and TTY-aware formatting are what make `gh`
    scriptable; they belong in the first version.
+5. A git CLI that works without git installed can follow jj's local design
+   (gitoxide for everything on disk) but must also do the network side itself:
+   gitoxide's HTTP transport for clone/fetch, plus a receive-pack client for
+   push, which gitoxide does not provide.
