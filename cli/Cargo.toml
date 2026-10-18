@@ -1,0 +1,39 @@
+[package]
+name = "nsit"
+version = "0.1.0"
+edition = "2021"
+description = "nsit: the Insitio command-line tool for people and agents, used instead of git"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "nsit"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+dirs = "7"
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }
+jaq-core = "3.1"
+jaq-json = "2.0"
+jaq-std = "3.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "1.1"
+url = "2"
+
+# libgit2 over HTTPS uses OpenSSL on Linux; build it from source so the musl
+# release binary stays static. Windows and macOS use their native TLS stacks.
+[target.'cfg(target_os = "linux")'.dependencies]
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https", "vendored-openssl"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
