@@ -1,0 +1,627 @@
+name: nsit release
+
+# Builds the nsit binaries for four targets and publishes them, with a SHA256SUMS file, as a GitHub
+# release. The Insitio server's /download page and its install.ps1 / install.sh scripts fetch exactly
+# these file names from the latest release (src/web/routes/downloads.tsx):
+#
+#   nsit-windows-x64.exe   x86_64-pc-windows-msvc, C runtime linked in, not code-signed
+#   nsit-linux-x64         x86_64-unknown-linux-musl, fully static
+#   nsit-macos-arm64       aarch64-apple-darwin, Developer ID signed and notarized
+#   nsit-macos-x64         x86_64-apple-darwin, Developer ID signed and notarized
+#   SHA256SUMS             "<sha256>  <bare file name>" lines, which is the form the installers read
+#
+# Triggers
+#   * Pushing a tag nsit-vX.Y.Z makes a real release. X.Y.Z must equal `version` in cli/Cargo.toml, and
+#     all six Apple secrets (below) must exist, or the run stops before it builds anything.
+#   * "Run workflow" by hand (workflow_dispatch) with dry_run on, which is the default, builds
+#     everything, signs and notarizes when the Apple secrets exist, and keeps the binaries as artifacts
+#     of the run. Nothing is published. A dispatch can only make a real release when the tag itself is
+#     chosen as the ref (a way to redo a release whose last job failed).
+#   Note: the Actions tab lists this workflow for manual runs once the file is on the default branch.
+#
+# Secrets (Settings > Secrets and variables > Actions), all six needed to sign and notarize on macOS:
+#   APPLE_CERT_P12_BASE64     the "Developer ID Application" certificate with its private key, as .p12, base64
+#   APPLE_CERT_PASSWORD       the password the .p12 was exported with
+#   APPLE_SIGNING_IDENTITY    the certificate's name, e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_API_KEY_P8_BASE64   the App Store Connect API key (AuthKey_XXXX.p8), base64
+#   APPLE_API_KEY_ID          that key's Key ID
+#   APPLE_API_ISSUER_ID       the Issuer ID shown on the App Store Connect keys page
+#
+# Trust boundaries: the cargo builds (which run every dependency's build script) never see a secret, and
+# the Apple secrets are only handed to the few macOS steps that use them, after the build. Only the last
+# job can write to the repository.
+on:
+  push:
+    tags: ["nsit-v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: build, sign and notarize if the Apple secrets exist, keep the binaries as run artifacts, publish nothing"
+        type: boolean
+        default: true
+
+# A second run for the same ref would only race the first; never cancel a release half way.
+concurrency:
+  group: nsit-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# bash everywhere (Git Bash on Windows) so `-e -o pipefail` applies to every script; steps that need
+# PowerShell say so.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Decides what this run is, and stops early (before 30 minutes of builds) when it cannot succeed.
+  prepare:
+    name: check version, mode and secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      sign: ${{ steps.secrets.outputs.sign }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Work out the version and the mode
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # `version` of the [package] table in cli/Cargo.toml.
+          version=$(awk '/^\[package\]/ {p=1; next} /^\[/ {p=0} p && /^version[[:space:]]*=/ {gsub(/^[^"]*"|".*$/, ""); print; exit}' cli/Cargo.toml)
+          semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          if ! [[ "$version" =~ $semver ]]; then
+            echo "::error file=cli/Cargo.toml::Could not read a version like 1.2.3 from the [package] table of cli/Cargo.toml."
+            exit 1
+          fi
+          tag="nsit-v$version"
+
+          # A tag push is always a real release. A manual run is a dry run unless dry_run was switched off.
+          dry_run=true
+          if [ "$EVENT" = "push" ] || [ "$DRY_RUN_INPUT" = "false" ]; then
+            dry_run=false
+          fi
+
+          if [ "$dry_run" = "false" ]; then
+            if [ "$REF_TYPE" != "tag" ]; then
+              echo "::error::A real release is built from a tag. Run this workflow with dry_run on, or choose the tag $tag as the ref."
+              exit 1
+            fi
+            # The tag filter above only says nsit-v*; the whole name must be nsit-v plus the crate version.
+            if [ "$REF_NAME" != "$tag" ]; then
+              echo "::error::This run is for the tag $REF_NAME, but cli/Cargo.toml has version $version, so the tag must be $tag. Change the version (and Cargo.lock) or tag again; nothing was built."
+              exit 1
+            fi
+          fi
+
+          # 1.2.3-rc.1 is a pre-release: GitHub keeps it out of /releases/latest, which the installers use.
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "dry_run=$dry_run"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$dry_run" = "true" ]; then
+            echo "Dry run for nsit $version: binaries are kept as artifacts of this run and nothing is published." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Release $tag for nsit $version (pre-release: $prerelease)." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check the Apple signing secrets
+        id: secrets
+        env:
+          DRY_RUN: ${{ steps.meta.outputs.dry_run }}
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in APPLE_CERT_P12_BASE64 APPLE_CERT_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_KEY_P8_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+            if [ -z "${!name:-}" ]; then missing="$missing $name"; fi
+          done
+
+          if [ -z "$missing" ]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+            echo "All six Apple secrets are set: the macOS binaries will be signed and notarized."
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=macOS binaries will not be signed::Missing secrets:$missing. This is a dry run, so it carries on with unsigned macOS binaries."
+          else
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "::error title=Cannot release: Apple signing secrets are missing::Add these in Settings > Secrets and variables > Actions, then push the tag again:$missing"
+            exit 1
+          fi
+
+  build-windows:
+    name: build windows x64
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # +crt-static links the Visual C++ and Universal C runtimes into the exe, so a clean Windows
+      # machine needs no redistributable. With --target, cargo applies RUSTFLAGS to nsit and its
+      # dependencies but not to build scripts. GITHUB_SHA reaches cli/build.rs by itself (the commit that
+      # `nsit --version` prints). aws-lc-sys needs no NASM here: rustls turns on its prebuilt objects.
+      - name: Build
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --locked --release --manifest-path cli/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Collect the binary
+        run: |
+          mkdir dist
+          cp cli/target/x86_64-pc-windows-msvc/release/nsit.exe dist/nsit-windows-x64.exe
+
+      # The imports of a PE file are plain ASCII DLL names. With the runtime linked in, neither the
+      # Visual C++ runtime nor the Universal CRT may be among them.
+      - name: Check the C runtime is linked in
+        shell: pwsh
+        run: |
+          $path = (Resolve-Path "dist/nsit-windows-x64.exe").Path
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($path))
+          $found = @('VCRUNTIME140', 'MSVCP140', 'api-ms-win-crt-') |
+            Where-Object { $text.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }
+          if ($found) {
+            Write-Host "::error::nsit-windows-x64.exe still imports a C runtime DLL ($($found -join ', ')), so it would need the Visual C++ redistributable. Check that RUSTFLAGS reached the build."
+            exit 1
+          }
+          Write-Host "No Visual C++ or Universal CRT DLL is imported: no redistributable is needed."
+
+      # Runs the binary and checks it reports this version and this commit.
+      - name: Smoke test
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $expected = "nsit $env:VERSION ($($env:GITHUB_SHA.Substring(0, 7)))"
+          $actual = (& "./dist/nsit-windows-x64.exe" --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::nsit-windows-x64.exe --version exited with code $LASTEXITCODE."
+            exit 1
+          }
+          Write-Host $actual
+          if ($actual -ne $expected) {
+            Write-Host "::error::--version printed '$actual' but '$expected' was expected."
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsit-windows-x64.exe
+          path: dist/nsit-windows-x64.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: build linux x64 (musl, static)
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # What the musl build needs, from the sources of the C dependencies:
+      #   * a C compiler that targets musl: musl-tools provides musl-gcc, which the cc crate looks for
+      #     by that name for x86_64-unknown-linux-musl. aws-lc-sys (rustls), libgit2-sys and libz-sys
+      #     build with it. aws-lc-sys has pre-generated bindings for this target and uses its own
+      #     cc-based builder, so neither the cmake program, clang nor bindgen is needed.
+      #   * perl and make (both on the runner) for openssl-src, which libgit2 uses over HTTPS here:
+      #     cli/Cargo.toml turns on git2/vendored-openssl for Linux, so there is no flag to pass.
+      #     openssl-src builds without engines and async on musl by itself.
+      - name: Install musl-gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      # CC_... names the compiler outright rather than leaving it to be found. LIBZ_SYS_STATIC makes
+      # libz-sys compile its bundled zlib instead of looking for the runner's (glibc) libz.
+      - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          LIBZ_SYS_STATIC: "1"
+        run: cargo build --locked --release --manifest-path cli/Cargo.toml --target x86_64-unknown-linux-musl
+
+      - name: Collect the binary
+        run: |
+          mkdir dist
+          cp cli/target/x86_64-unknown-linux-musl/release/nsit dist/nsit-linux-x64
+
+      # `file` says "statically linked" for a plain static executable but "static-pie linked" for the
+      # position-independent kind that musl targets produce by default (and an older `file` may call
+      # that "dynamically linked"), so the check reads the ELF headers: a static binary has no
+      # interpreter (INTERP) and needs no shared library (NEEDED).
+      - name: Check the binary is static
+        run: |
+          set -euo pipefail
+          bin=dist/nsit-linux-x64
+          file "$bin"
+          ldd "$bin" || true
+          # The output is captured first: with pipefail, `readelf | grep -q` can fail when grep quits early.
+          program_headers=$(readelf -lW "$bin")
+          dynamic_section=$(readelf -dW "$bin" 2>&1 || true)
+          if grep -q 'INTERP' <<< "$program_headers"; then
+            echo "::error::nsit-linux-x64 asks for a dynamic loader (it has an INTERP header), so it is not static."
+            exit 1
+          fi
+          if grep -q '(NEEDED)' <<< "$dynamic_section"; then
+            echo "::error::nsit-linux-x64 needs shared libraries, so it is not static:"
+            grep '(NEEDED)' <<< "$dynamic_section"
+            exit 1
+          fi
+          echo "nsit-linux-x64 is statically linked: no interpreter, no shared libraries."
+
+      - name: Smoke test
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x dist/nsit-linux-x64
+          expected="nsit $VERSION (${GITHUB_SHA:0:7})"
+          actual=$(./dist/nsit-linux-x64 --version)
+          echo "$actual"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::--version printed '$actual' but '$expected' was expected."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsit-linux-x64
+          path: dist/nsit-linux-x64
+          if-no-files-found: error
+          retention-days: 7
+
+  # One leg per Mac architecture, on the same (Apple silicon) runner; the Intel binary is cross-built.
+  # Order inside a leg: build with no secrets, then, only when all six secrets exist, sign, notarize
+  # and check; the temporary keychain and key file are removed whatever happens.
+  build-macos:
+    name: build ${{ matrix.asset }}
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            asset: nsit-macos-arm64
+          - target: x86_64-apple-darwin
+            asset: nsit-macos-x64
+    env:
+      # The C code (libgit2, aws-lc) is built for the same oldest macOS as the Rust code; without this it
+      # targets the runner's own, newer, macOS. 11 is the first release that runs on Apple silicon.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      BUILD_TARGET: ${{ matrix.target }}
+      ASSET: ${{ matrix.asset }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --locked --release --manifest-path cli/Cargo.toml --target "$BUILD_TARGET"
+
+      - name: Collect the binary
+        run: |
+          mkdir dist
+          cp "cli/target/$BUILD_TARGET/release/nsit" "dist/$ASSET"
+
+      - name: Say that the binary will be unsigned
+        if: needs.prepare.outputs.sign != 'true'
+        run: echo "::warning title=$ASSET is not signed::The Apple secrets are missing (dry run), so this binary is neither signed nor notarized."
+
+      # The p12 holds the Developer ID Application certificate and its private key. It goes into a
+      # keychain made for this job, which only /usr/bin/codesign may use without a prompt.
+      - name: Import the signing certificate into a temporary keychain
+        if: needs.prepare.outputs.sign == 'true'
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERT_P12_BASE64 APPLE_CERT_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::The secret $name is missing."
+              exit 1
+            fi
+          done
+
+          keychain="$RUNNER_TEMP/nsit-signing.keychain-db"
+          cert="$RUNNER_TEMP/nsit-cert.p12"
+          # Made up for this run; the cleanup step deletes the keychain it protects.
+          keychain_password=$(openssl rand -hex 24)
+          echo "::add-mask::$keychain_password"
+          echo "NSIT_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+          (umask 077; printf '%s' "$APPLE_CERT_P12_BASE64" | base64 --decode > "$cert")
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$cert" -k "$keychain" -f pkcs12 -P "$APPLE_CERT_PASSWORD" -x -T /usr/bin/codesign
+          rm -f "$cert"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+
+          # Search the new keychain first, and keep the ones already there.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+          identities=$(security find-identity -v -p codesigning "$keychain" || true)
+          if ! grep -qF -- "$APPLE_SIGNING_IDENTITY" <<< "$identities"; then
+            echo "::error::The certificate imported, but the keychain has no valid code-signing identity matching APPLE_SIGNING_IDENTITY. Use the name 'security find-identity -v -p codesigning' prints for the Developer ID Application certificate."
+            echo "$identities"
+            exit 1
+          fi
+
+      # --options runtime turns on the hardened runtime and --timestamp asks Apple's timestamp server for
+      # a secure timestamp; notarization refuses a binary that lacks either. The identifier is fixed so
+      # the signature (and with it the keychain access nsit is granted to its stored token) is the same
+      # for every release and both Mac architectures.
+      - name: Sign
+        if: needs.prepare.outputs.sign == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          bin="dist/$ASSET"
+          codesign --force --options runtime --timestamp --identifier nsit \
+            --keychain "$NSIT_KEYCHAIN" -s "$APPLE_SIGNING_IDENTITY" "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+
+          details=$(codesign -d --verbose=4 "$bin" 2>&1)
+          echo "$details"
+          if ! grep -Eq 'flags=0x[0-9a-f]+\([^)]*runtime' <<< "$details"; then
+            echo "::error::$ASSET was signed without the hardened runtime, which notarization requires."
+            exit 1
+          fi
+          if ! grep -q '^Timestamp=' <<< "$details"; then
+            echo "::error::$ASSET was signed without a secure timestamp, which notarization requires."
+            exit 1
+          fi
+
+      # notarytool signs in with the App Store Connect API key (the .p8 file) and uploads a zip, since
+      # it cannot take a bare binary. It waits for Apple's verdict. The key file is made readable by this
+      # user only and is deleted at the end of the step and again by the cleanup step.
+      - name: Notarize
+        if: needs.prepare.outputs.sign == 'true'
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/nsit-notary-key.p8"
+          zip="$RUNNER_TEMP/$ASSET.zip"
+          (umask 077; printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$key")
+          chmod 600 "$key"
+          ditto -c -k --keepParent "dist/$ASSET" "$zip"
+
+          status=0
+          output=$(xcrun notarytool submit "$zip" \
+            --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" \
+            --wait --timeout 30m 2>&1) || status=$?
+          echo "$output"
+
+          # Never trust the exit code alone: look for the verdict itself.
+          if [ "$status" -ne 0 ] || ! grep -Eq '^[[:space:]]*status:[[:space:]]*Accepted[[:space:]]*$' <<< "$output"; then
+            echo "::error::Apple did not accept $ASSET for notarization. The submission output and Apple's log are above."
+            submission=$(awk '/^[[:space:]]*id:/ {print $2; exit}' <<< "$output")
+            if [ -n "$submission" ]; then
+              xcrun notarytool log "$submission" --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" || true
+            fi
+            rm -f "$key" "$zip"
+            exit 1
+          fi
+          rm -f "$key" "$zip"
+          echo "$ASSET was accepted by Apple's notary service."
+
+      # A bare command-line binary cannot carry a stapled ticket (stapling is for apps, disk images and
+      # installer packages), so Gatekeeper looks the notarization up online the first time the file is
+      # opened after a download with a browser. These two checks show what Gatekeeper and codesign make
+      # of the file. They are for the log and never fail the job, because spctl does not assess a bare
+      # executable the way it assesses an app. Expected on success:
+      #   spctl:    "<file>: accepted", "source=Notarized Developer ID", "origin=Developer ID Application: ..."
+      #   codesign: no output and exit status 0 (the file satisfies the "notarized" requirement)
+      - name: Check what Gatekeeper makes of it (informational)
+        if: needs.prepare.outputs.sign == 'true'
+        run: |
+          bin="dist/$ASSET"
+          spctl --assess --type install --verbose=4 "$bin" || echo "::notice::spctl did not accept $ASSET as an installer-type object. For a bare executable that is not by itself a failure; the notarization status above is what counts."
+          codesign --verify --strict --verbose=2 --test-requirement="=notarized" "$bin" \
+            && echo "codesign confirms $ASSET is notarized." \
+            || echo "::notice::codesign could not confirm the notarization of $ASSET (the check looks it up online and needs a recent macOS)."
+
+      # Runs even when an earlier step failed or the run was cancelled. Deleting the keychain also takes
+      # it out of the search list.
+      - name: Remove the temporary keychain and key files
+        if: always()
+        run: |
+          keychain="${NSIT_KEYCHAIN:-$RUNNER_TEMP/nsit-signing.keychain-db}"
+          if [ -e "$keychain" ]; then
+            security delete-keychain "$keychain" || true
+          fi
+          rm -f "$RUNNER_TEMP/nsit-cert.p12" "$RUNNER_TEMP/nsit-notary-key.p8" "$RUNNER_TEMP/$ASSET.zip"
+
+      # The Intel binary runs under Rosetta on this Apple silicon runner. If Rosetta is not installed
+      # that is a warning, not a failure, because the arm64 leg and the checks above already passed.
+      - name: Smoke test
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x "dist/$ASSET"
+          expected="nsit $VERSION (${GITHUB_SHA:0:7})"
+          if [ "$BUILD_TARGET" = "x86_64-apple-darwin" ]; then
+            actual=$(arch -x86_64 "./dist/$ASSET" --version) || {
+              echo "::warning::Could not run $ASSET under Rosetta here, so it was not smoke tested."
+              exit 0
+            }
+          else
+            actual=$("./dist/$ASSET" --version)
+          fi
+          echo "$actual"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::--version printed '$actual' but '$expected' was expected."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job that can write to the repository, and it only runs for a real release.
+  release:
+    name: publish the release
+    needs: [prepare, build-windows, build-linux, build-macos]
+    if: needs.prepare.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      SIGNED: ${{ needs.prepare.outputs.sign }}
+    steps:
+      - name: Refuse to release unsigned macOS binaries
+        run: |
+          if [ "$SIGNED" != "true" ]; then
+            echo "::error::The macOS binaries were not signed and notarized, so this release is not published."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nsit-*
+          merge-multiple: true
+          path: dist
+
+      # The installers match the exact file names in SHA256SUMS, so the sums are written from inside
+      # the directory (bare names, no dist/ prefix).
+      - name: Check the four binaries are there and write SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          assets=(nsit-linux-x64 nsit-macos-arm64 nsit-macos-x64 nsit-windows-x64.exe)
+          for f in "${assets[@]}"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::The binary $f is missing or empty."
+              exit 1
+            fi
+          done
+          if [ "$(find . -maxdepth 1 -type f | wc -l)" -ne "${#assets[@]}" ]; then
+            echo "::error::dist holds files other than the four binaries:"
+            ls -l
+            exit 1
+          fi
+          sha256sum "${assets[@]}" > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Write the release notes
+        run: |
+          cat > notes.md <<EOF
+          nsit $VERSION
+
+          The quickest way to install is the one-line installer on your Insitio server's /download page: it downloads the right file from this release and checks it against SHA256SUMS before installing. To install by hand, download the file for your system, check it against SHA256SUMS, and put it on your PATH.
+
+          | File | System |
+          | --- | --- |
+          | nsit-windows-x64.exe | Windows 10 or later, 64-bit |
+          | nsit-linux-x64 | Linux, 64-bit (static: runs on any distribution) |
+          | nsit-macos-arm64 | macOS 11 or later, Apple silicon |
+          | nsit-macos-x64 | macOS 11 or later, Intel |
+
+          The macOS binaries are signed with a Developer ID certificate and notarized by Apple. The Windows binary is not code-signed, so Windows may ask about an unknown publisher the first time it runs.
+          EOF
+
+      # Created as a draft with every file attached, then published, so nobody sees (or installs from) a
+      # release that is missing a file. --verify-tag stops it if the tag is not on GitHub. An existing
+      # release for the tag is never overwritten.
+      - name: Create the release
+        run: |
+          set -euo pipefail
+          # Drafts are listed too, so the leftover of an earlier, failed run is caught as well.
+          existing=$(gh release list --limit 200 --json tagName --jq '.[].tagName')
+          if grep -qxF -- "$TAG" <<< "$existing"; then
+            echo "::error::A release for $TAG already exists (possibly a draft). Delete it, and its assets, first if you really mean to publish it again."
+            exit 1
+          fi
+
+          create=(--verify-tag --draft --title "nsit $VERSION" --notes-file notes.md)
+          publish=(--draft=false)
+          if [ "$PRERELEASE" = "true" ]; then
+            create+=(--prerelease)
+          else
+            publish+=(--latest)
+          fi
+          gh release create "$TAG" "${create[@]}" \
+            dist/nsit-windows-x64.exe dist/nsit-linux-x64 dist/nsit-macos-arm64 dist/nsit-macos-x64 dist/SHA256SUMS
+          gh release edit "$TAG" "${publish[@]}"
+
+      # Download what was published and check it against the published SHA256SUMS, the way an installer does.
+      - name: Check the published release
+        run: |
+          set -euo pipefail
+          mkdir published
+          gh release download "$TAG" --dir published
+          (cd published && ls -l && sha256sum -c SHA256SUMS)
+          {
+            echo "Published $TAG: https://github.com/$GH_REPO/releases/tag/$TAG"
+            echo
+            echo '```'
+            cat published/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "::notice::$TAG is a pre-release, so /releases/latest (what install.ps1, install.sh and the /download page use) does not point to it."
+          fi

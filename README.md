@@ -13,6 +13,7 @@ The page layouts, URL scheme and data-loading approach come from evidence gather
 - **Pull requests**: compare branches, open a PR, then use the Conversation, Commits and Files changed tabs. Merges happen server-side with a merge commit, and conflicts are detected before you click merge.
 - **People**: invite-only sign-up, profiles, stars, collaborators with read, write or admin roles, and a site-admin page.
 - **Code search**: case-insensitive search across the default branch (`git grep`).
+- **Command line**: `nsit`, a single-file client for people and AI agents that does everyday git work without git installed and signs in, creates repositories and pushes from the terminal. See [The nsit command line](#the-nsit-command-line).
 - Light and dark themes that follow the system setting, built on Primer CSS and Octicons (both MIT).
 
 ## Requirements
@@ -60,6 +61,128 @@ git clone http://localhost:3000/yourname/your-repo.git
 
 A new empty repository shows these push instructions on its page. If the first push is a `master` branch instead of `main`, Insitio makes it the default branch.
 
+Prefer a single tool? [`nsit`](#the-nsit-command-line) signs in without you copying a token, and does the cloning and pushing itself.
+
+## The nsit command line
+
+`nsit` is the Insitio command-line client, for people at a terminal and for AI agents. It is one file with nothing to install alongside it: it does the everyday git work (init, clone, status, add, commit, log, branch, switch, pull, push) itself, so git does not have to be installed on the machine, and it signs in, creates repositories and talks to the `/api/v1` of an Insitio server. Use it where you would use `git`. It reads your git configuration when there is one (name and email, `core.autocrlf`, ignore files) and writes only a repository's own `.git/config` and its own config file.
+
+### Install
+
+Every Insitio server serves installers and a `/download` page that shows these two commands with its own address. Replace `git.example.com` with your server:
+
+```powershell
+# Windows (PowerShell)
+irm https://git.example.com/install.ps1 | iex
+```
+
+```bash
+# macOS and Linux
+curl -fsSL https://git.example.com/install.sh | sh
+```
+
+Each script downloads the binary for your system from the latest GitHub release, checks its SHA-256 against the release's `SHA256SUMS` and stops if it does not match. Nothing needs admin rights: nsit goes to `%LOCALAPPDATA%\Programs\nsit` on Windows (and onto your user PATH) and to `~/.local/bin` on macOS and Linux. Open a script in your browser first if you want to read it.
+
+To install by hand, take the file for your system from the [latest release](https://github.com/a2thalex/gitfkd/releases/latest) and check it against `SHA256SUMS` from the same release:
+
+| File | System |
+|---|---|
+| `nsit-windows-x64.exe` | Windows, 64-bit |
+| `nsit-linux-x64` | Linux, 64-bit (static, so any distribution) |
+| `nsit-macos-arm64` | macOS, Apple silicon |
+| `nsit-macos-x64` | macOS, Intel |
+
+`nsit --version` prints the version and the commit it was built from.
+
+- The macOS binaries are signed with a Developer ID certificate and notarized by Apple.
+- The Windows binary is **not code-signed** (there is no Microsoft certificate yet), so Windows may warn about an unknown publisher the first time a downloaded copy runs. The installer checks the checksum instead. The C runtime is built in, so no redistributable is needed.
+- A pre-release (a version with a suffix such as `-rc.1`) is never "latest", so the installers do not pick it up. Download those by hand.
+
+### Sign in
+
+```bash
+nsit auth login
+```
+
+nsit prints a short code such as `BCDF-GHJK` and the address of your server's approval page, and opens that page in the browser when it is running in a terminal. Approve it there as yourself, from this machine or any other: no password or token is typed into the terminal. The token goes into the system credential store (Windows Credential Manager, macOS Keychain, or the Secret Service on Linux). On a machine with no credential store at all, such as a headless Linux box, it goes into an owner-only file beside nsit's config instead. `nsit auth status` says which. `nsit auth logout` revokes this machine's token on the server and forgets it.
+
+Agents, scripts and CI cannot approve in a browser. Make a token under **Settings → Personal access tokens**, then either store it:
+
+```bash
+printf %s "$TOKEN" | nsit auth login --with-token
+```
+
+or give it to a single run, without storing anything, in `NSIT_TOKEN`. nsit never takes a token as a command-line argument (it would land in shell history and process lists) and never writes one into `.git/config`, a remote URL, a log or an error message. Without a token, a command that needs one exits with code 3 at once and a hint, and never waits for input.
+
+### Commands
+
+Global flags work before or after the subcommand: `--host <host>` (default: `$NSIT_HOST`, then the server built into nsit), `--json`, `--jq <expr>`, `-q`/`--quiet`, `--no-color` and `-C <dir>` (run as if started in that directory).
+
+| Command | What it does |
+|---|---|
+| `nsit auth login [--with-token]` | Sign in with a browser approval, or with a token read from stdin. |
+| `nsit auth logout` | Revoke this machine's token on the server and forget it. |
+| `nsit auth status` | Show the signed-in account and where its token is stored. |
+| `nsit init [name] [--remote] [--readme] [--public]` | Start a repository (branch `main`) here, or in a new directory called `name`. With a name, or with `--remote`, it also creates the repository on Insitio (private unless `--public`), sets `origin`, and pushes if there are commits. `--readme` writes a starter README and makes the first commit. |
+| `nsit clone <repo> [dir]` | Copy a repository. `<repo>` is `name` (yours), `owner/name`, or a full URL. |
+| `nsit status` | Staged, unstaged and untracked changes, and how far ahead of or behind the upstream you are. |
+| `nsit add <paths>` | Stage files or directories. |
+| `nsit commit [-m <msg>] [--staged] [--allow-secret <path>]` | Stage every change, including new files but never anything ignored, and commit. `--staged` commits only what `nsit add` staged. Without `-m` it can only finish a merge, using the message the merge left. Commits are by your git `user.name` and `user.email`, else by the name and email Insitio gave nsit at sign-in. |
+| `nsit log [-n N] [--oneline]` | History of the current branch. |
+| `nsit branch [name] [-d name]` | List branches, create `name`, or delete a branch. |
+| `nsit switch <branch> [-c]` | Switch branches (`-c` creates the branch first). Refuses when uncommitted changes would be overwritten. |
+| `nsit pull [--abort]` | Fetch, then fast-forward or merge. A conflict leaves the merge in progress with conflict markers in the files and exits with code 4: fix the files, then `nsit commit`. `--abort` goes back to how things were before the pull. |
+| `nsit push [-u] [--force-with-lease] [branch]` | Send the current branch (or `branch`). Refuses a push that is not a fast-forward unless `--force-with-lease`, which overwrites the remote branch only if it is where you last saw it. `-u` sets the upstream; the first push of a branch does that by itself. |
+| `nsit readme` | Write a starter `README.md` if there is none. |
+| `nsit repo create <name> [--description <text>] [--public]` | Create a repository on Insitio (private unless `--public`). |
+| `nsit repo list [--owner <user>]` | List the repositories you can see. |
+| `nsit repo view <repo>` | Show one repository. |
+
+There is no command to delete a repository: tokens are not scoped, so an agent holding yours could otherwise delete your repositories. Deleting stays in the web UI, where you type the repository's name to confirm.
+
+### For scripts and agents
+
+- `--json` prints stable, machine-readable JSON from every command that prints data. `--jq <expr>` filters it with jq syntax and implies `--json`; a string result prints raw and anything else prints as JSON, as in `gh`. For example, `nsit auth status --jq .user` prints just the user name.
+- Data goes to stdout; progress, hints and errors go to stderr.
+- Nothing prompts when stdin or stdout is not a terminal.
+- Color and progress appear only on a terminal, and `NO_COLOR` or `--no-color` turns color off. `-q` hides progress and hints.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | General error (network, files, anything not listed below) |
+| 2 | Usage error: bad arguments, or something the command needs is missing (for example, no `origin`) |
+| 3 | Not signed in, or the server refused the token |
+| 4 | Merge conflict (`nsit pull`) |
+| 5 | Blocked by the secret guard (`nsit commit`) |
+| 6 | Rejected by the server, for example a push that is not a fast-forward |
+
+### The secret guard
+
+Before it commits, `nsit commit` refuses (exit code 5, listing the files) when a file the commit adds or changes looks like a secret. The file name is one of `.env`, `.env.*` (except `.env.example` and `.env.sample`), `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `*.pfx` or `credentials.json`; or the contents hold a private-key header or an Insitio, GitHub or AWS token; or it is an `.npmrc` or `.pypirc` with an auth line. It applies to `--staged` too.
+
+To commit such a file anyway, say so by name: `nsit commit -m "..." --allow-secret path/to/file`. That adds the exact path to `.nsit-allow-secrets` (one path per line, `#` for comments) as part of the same commit, so every exception shows up in review and in the history. There is no switch that turns the guard off.
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `NSIT_TOKEN` | A token to use instead of a stored one, for agents and CI. It is only ever sent to the selected host. Blank counts as unset. |
+| `NSIT_HOST` | The Insitio server (a host name or a URL) when `--host` is not given. The default is the server built into nsit, `git.iam.bot`. |
+| `NSIT_CONFIG_DIR` | An absolute path for nsit's own files (`nsit.toml`, and the token file on a machine with no credential store). The default is `%APPDATA%\insitio` on Windows, and `$XDG_CONFIG_HOME/insitio` or `~/.config/insitio` elsewhere. |
+| `NSIT_NO_KEYCHAIN` | `1` makes nsit behave as if the machine had no credential store, so tokens go in the owner-only file in the config directory. The test suites use it. |
+| `NO_COLOR` | Any value other than empty turns color off. |
+
+### Building from source
+
+```bash
+cargo build --release --manifest-path cli/Cargo.toml   # writes cli/target/release/nsit
+```
+
+This needs Rust 1.89 or later and a C compiler: libgit2 is compiled into the binary, and so is OpenSSL on Linux (which also needs `perl` and `make`). Git is not needed. For the static Linux binary that the releases ship, install `musl-tools`, run `rustup target add x86_64-unknown-linux-musl`, and add `--target x86_64-unknown-linux-musl` to the command above.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -87,16 +210,16 @@ For anything beyond your own machine, put Insitio behind an HTTPS reverse proxy 
 - `setup.sh` installs Node 24, git and Caddy, creates a `gitfkd` service user, installs the app to `/opt/gitfkd` with data in `/var/lib/gitfkd`, and starts the `gitfkd` systemd service. It is safe to re-run for updates.
 - `gitfkd.service` is a hardened systemd unit that can only write its data directory.
 - `Caddyfile` proxies your domain to the app on 127.0.0.1:3000, allows git pushes up to 2 GB, and gives clients 30 s to send their request headers (the app bounds the rest, see `REQUEST_TIMEOUT_MS`).
-- `deploy.sh` packs the committed code and runs `setup.sh` on a Google Cloud VM over IAP SSH.
+- `deploy.sh` packs the committed code and runs `setup.sh` on a Google Cloud VM over IAP SSH. It has no defaults: you give it five environment variables, `PROJECT` (the Google Cloud project), `ZONE`, `VM` (the instance name), `DOMAIN` (the host name Caddy serves) and `ACCOUNT` (the Google account gcloud runs as). If any is missing it names them all and exits with status 2.
 
 ```bash
-deploy/deploy.sh
+PROJECT=my-project ZONE=us-central1-a VM=my-vm DOMAIN=git.example.com ACCOUNT=you@example.com deploy/deploy.sh
 ```
 
 Point your domain's A record at the VM first, so Caddy can get a certificate. Then create the first admin on the server:
 
 ```bash
-gcloud compute ssh gitfkd-1 --zone us-central1-a --tunnel-through-iap --command 'cd /opt/gitfkd && sudo -u gitfkd env DATA_DIR=/var/lib/gitfkd BASE_URL=https://git.example.com node --disable-warning=ExperimentalWarning --import tsx src/cli/admin-create.ts yourname you@example.com'
+gcloud compute ssh my-vm --project my-project --account you@example.com --zone us-central1-a --tunnel-through-iap --command 'cd /opt/gitfkd && sudo -u gitfkd env DATA_DIR=/var/lib/gitfkd BASE_URL=https://git.example.com node --disable-warning=ExperimentalWarning --import tsx src/cli/admin-create.ts yourname you@example.com'
 ```
 
 ## Development
@@ -111,6 +234,23 @@ The end-to-end tests start a real server and run `git clone` and `git push` agai
 
 `.github/workflows/ci.yml` runs all of the above, plus `cargo fmt`, `cargo clippy` and the type check, on Windows, Linux and macOS for every push and pull request.
 
+### Releasing nsit
+
+`.github/workflows/nsit-release.yml` builds the four `nsit` binaries and publishes them, with `SHA256SUMS`, as a GitHub release when a tag `nsit-vX.Y.Z` is pushed. The tag must match `version` in `cli/Cargo.toml`, so raise that (and `cli/Cargo.lock`) first. To try the pipeline without publishing anything, run it by hand from the Actions tab: it is a dry run by default, and the binaries stay as artifacts of that run.
+
+The macOS binaries are signed with a Developer ID certificate and notarized by Apple inside the workflow. That needs six repository secrets (Settings → Secrets and variables → Actions), and a tag build stops at once if any is missing:
+
+| Secret | What it holds |
+|---|---|
+| `APPLE_CERT_P12_BASE64` | The Developer ID Application certificate with its private key, exported as a `.p12` file and base64-encoded |
+| `APPLE_CERT_PASSWORD` | The password that `.p12` file was exported with |
+| `APPLE_SIGNING_IDENTITY` | The certificate's name, as `security find-identity -v -p codesigning` prints it, such as `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_API_KEY_P8_BASE64` | An App Store Connect API key (`AuthKey_XXXX.p8`), base64-encoded, which notarization signs in with |
+| `APPLE_API_KEY_ID` | That key's Key ID |
+| `APPLE_API_ISSUER_ID` | The Issuer ID shown above the key list in App Store Connect |
+
+The Windows binary is not signed.
+
 Layout:
 
 ```
@@ -118,9 +258,11 @@ src/git/        bare-repo access through the git CLI (reads, server-side merge, 
 src/githttp/    smart-HTTP bridge to git http-backend
 src/services/   users, invites, tokens, repos, permissions, issues, pull requests
 src/web/        Hono routes and server-rendered JSX views
+cli/            the nsit command-line client (Rust)
+deploy/         VM install and deploy scripts, systemd unit, Caddyfile
 docs/           design spec, implementation plan, REA findings
 ```
 
 ## Not included (yet)
 
-SSH access, organizations and teams, forks, Actions/CI, webhooks, releases, wikis, line-level review comments, and email notifications.
+SSH access, organizations and teams, forks, Actions/CI, webhooks, releases, wikis, line-level review comments, and email notifications. `nsit` covers git and repositories only: for now, issues and pull requests are used in the web UI.
