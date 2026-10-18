@@ -4,7 +4,7 @@ import { listAllVisible, listReposForMember, listStarred, searchRepos, type Repo
 import { recentOpenIssues } from "../../services/issues.js";
 import type { Env } from "../env.js";
 import { render } from "../render.js";
-import { Avatar, Octicon, TimeAgo } from "../views/layout.js";
+import { Avatar, InsitioMark, Octicon, TimeAgo } from "../views/layout.js";
 import { RepoListItem } from "../views/repoList.js";
 
 function RepoLink({ repo }: { repo: RepoRow }) {
@@ -26,14 +26,31 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
       return render(
         c,
         "",
-        <div class="container-md p-responsive py-6 text-center">
-          <Octicon name="git-merge" size={64} />
-          <h1 class="f00-light mt-4">Where your code lives.</h1>
-          <p class="f3 color-fg-muted mt-2 mb-4">
-            Insitio is a private, invite-only home for git repositories, issues and pull requests.
-          </p>
-          <a class="btn btn-primary btn-large" href="/login">Sign in</a>
-          <p class="color-fg-muted mt-3">Have an invite link? Open it to create your account.</p>
+        <div class="constellation">
+          <div class="container-md p-responsive py-6 text-center">
+            <InsitioMark size={72} />
+            <span class="eyebrow mt-4">Private, invite-only git hosting</span>
+            <h1 class="f00-light mt-2">Code that stays where it belongs.</h1>
+            <p class="f2 serif color-fg-accent mt-1">In situ.</p>
+            <p class="f4 color-fg-muted mt-3 mb-5 mx-auto" style="max-width:520px">
+              Repositories, issues and pull requests on your own server, for the people you invite.
+            </p>
+            <a class="btn btn-primary btn-large" href="/login">Sign in</a>
+            <p class="color-fg-muted f6 mt-3">Have an invite link? Open it to create your account.</p>
+            <div class="d-flex flex-wrap flex-justify-center mt-6 text-left" style="gap:16px">
+              {[
+                ["01", "Repositories", "Push and clone over HTTPS with personal access tokens. Browse code, history and diffs."],
+                ["02", "Issues", "Track work with Markdown discussions, labels and filters."],
+                ["03", "Pull requests", "Review changes side by side and merge them on the server."],
+              ].map(([n, title, body]) => (
+                <div class="Box p-4" style="flex:1 1 220px;max-width:280px">
+                  <span class="eyebrow eyebrow-accent">{n}</span>
+                  <h2 class="f3 mt-1 mb-2">{title}</h2>
+                  <p class="f6 color-fg-muted mb-0">{body}</p>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>,
       );
     }

@@ -1,0 +1,233 @@
+/*
+ * Insitio theme: dark slate, Fraunces + Geist, orange accent.
+ * Overrides Primer 21's design tokens (higher specificity than Primer's own
+ * [data-color-mode][data-dark-theme] rules), then restyles a few components.
+ */
+
+html[data-color-mode="dark"][data-dark-theme="dark"] {
+  --ins-bg: #131c21;
+  --ins-surface: #172227;
+  --ins-surface-2: #1c2930;
+  --ins-inset: #0f171b;
+  --ins-fg: #f1efe6;
+  --ins-fg-2: #cfd1c9;
+  --ins-fg-muted: #939ea0;
+  --ins-border: rgba(241, 239, 230, 0.16);
+  --ins-border-soft: rgba(241, 239, 230, 0.09);
+  --ins-accent: #ff6a2b;
+  --ins-accent-hover: #ff8044;
+  --ins-accent-ink: #221007;
+  --ins-link: #ff8d5c;
+  --ins-success: #6cc68b;
+  --ins-success-strong: #3f8f5c;
+  --ins-danger: #f0644b;
+  --ins-danger-strong: #c8432b;
+  --ins-done: #b392f0;
+  --ins-done-strong: #8a63d2;
+  --ins-attention: #e3b856;
+  --ins-teal: #56b8cf;
+
+  color-scheme: dark;
+
+  /* Primer foundations */
+  --bgColor-default: var(--ins-bg);
+  --bgColor-muted: var(--ins-surface-2);
+  --bgColor-inset: var(--ins-inset);
+  --bgColor-emphasis: #2a373e;
+  --bgColor-neutral-muted: rgba(241, 239, 230, 0.08);
+  --bgColor-accent-muted: rgba(255, 106, 43, 0.14);
+  --bgColor-accent-emphasis: var(--ins-accent);
+  --bgColor-success-muted: rgba(108, 198, 139, 0.14);
+  --bgColor-success-emphasis: var(--ins-success-strong);
+  --bgColor-danger-muted: rgba(240, 100, 75, 0.14);
+  --bgColor-danger-emphasis: var(--ins-danger-strong);
+  --bgColor-done-muted: rgba(179, 146, 240, 0.14);
+  --bgColor-done-emphasis: var(--ins-done-strong);
+  --bgColor-attention-muted: rgba(227, 184, 86, 0.14);
+  --fgColor-default: var(--ins-fg);
+  --fgColor-muted: var(--ins-fg-muted);
+  --fgColor-accent: var(--ins-link);
+  --fgColor-success: var(--ins-success);
+  --fgColor-danger: var(--ins-danger);
+  --fgColor-done: var(--ins-done);
+  --fgColor-attention: var(--ins-attention);
+  --fgColor-onEmphasis: #fff9f0;
+  --borderColor-default: var(--ins-border);
+  --borderColor-muted: var(--ins-border-soft);
+  --borderColor-accent-muted: rgba(255, 106, 43, 0.4);
+  --borderColor-accent-emphasis: var(--ins-accent);
+  --borderColor-success-emphasis: var(--ins-success-strong);
+  --borderColor-done-emphasis: var(--ins-done-strong);
+  --borderColor-attention-emphasis: var(--ins-attention);
+  --focus-outlineColor: var(--ins-accent);
+
+  /* Header, overlays, controls */
+  --header-bgColor: var(--ins-bg);
+  --header-fgColor-default: var(--ins-fg-2);
+  --header-fgColor-logo: var(--ins-fg);
+  --header-borderColor-divider: var(--ins-border);
+  --overlay-bgColor: var(--ins-surface);
+  --overlay-borderColor: var(--ins-border);
+  --control-bgColor-rest: var(--ins-inset);
+  --control-bgColor-hover: #142026;
+  --control-transparent-bgColor-hover: rgba(241, 239, 230, 0.06);
+  --counter-bgColor-muted: rgba(241, 239, 230, 0.1);
+  --underlineNav-borderColor-active: var(--ins-accent);
+
+  /* Buttons: orange primary with dark ink, outlined default */
+  --button-primary-bgColor-rest: var(--ins-accent);
+  --button-primary-bgColor-hover: var(--ins-accent-hover);
+  --button-primary-bgColor-active: #e85a1e;
+  --button-primary-bgColor-disabled: rgba(255, 106, 43, 0.45);
+  --button-primary-borderColor-rest: transparent;
+  --button-primary-borderColor-hover: transparent;
+  --button-primary-borderColor-active: transparent;
+  --button-primary-borderColor-disabled: transparent;
+  --button-primary-fgColor-rest: var(--ins-accent-ink);
+  --button-primary-fgColor-disabled: rgba(34, 16, 7, 0.7);
+  --button-primary-iconColor-rest: var(--ins-accent-ink);
+  --button-default-bgColor-rest: transparent;
+  --button-default-bgColor-hover: rgba(241, 239, 230, 0.06);
+  --button-default-bgColor-active: rgba(241, 239, 230, 0.1);
+  --button-default-bgColor-selected: rgba(241, 239, 230, 0.1);
+  --button-default-borderColor-rest: var(--ins-border);
+  --button-default-borderColor-hover: rgba(241, 239, 230, 0.3);
+  --button-default-fgColor-rest: var(--ins-fg);
+  --button-default-shadow-resting: none;
+  --button-default-shadow-inset: none;
+  --button-danger-bgColor-rest: transparent;
+  --button-danger-fgColor-rest: var(--ins-danger);
+  --button-danger-borderColor-rest: var(--ins-border);
+  --button-danger-bgColor-hover: var(--ins-danger-strong);
+  --button-danger-fgColor-hover: #fff9f0;
+
+  /* Syntax colors, warm and readable on slate */
+  --color-prettylights-syntax-comment: #6f7f86;
+  --color-prettylights-syntax-keyword: #ff8d5c;
+  --color-prettylights-syntax-string: #a8d08d;
+  --color-prettylights-syntax-constant: #7cc4d8;
+  --color-prettylights-syntax-entity: #e8c37b;
+  --color-prettylights-syntax-entity-tag: #8fd1a8;
+  --color-prettylights-syntax-variable: #f2a477;
+  --color-prettylights-syntax-markup-deleted-text: #ffb4a6;
+  --color-prettylights-syntax-markup-deleted-bg: rgba(240, 100, 75, 0.18);
+}
+
+/* Type */
+body {
+  font-family: "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+  background-color: var(--ins-bg);
+  color: var(--ins-fg);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, .Subhead-heading, .f00-light, .blankslate-heading, .markdown-body h1, .markdown-body h2, .serif {
+  font-family: "Fraunces", "Fraunces Fallback", Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+}
+h1.f1, .f00-light { letter-spacing: -0.03em; }
+code, kbd, pre, samp, tt, .text-mono, .blob-table, .diff-table, .branch-name, .markdown-body code, .markdown-body pre {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+a { color: var(--ins-link); }
+.Link--primary { color: var(--ins-fg) !important; }
+.Link--primary:hover { color: var(--ins-link) !important; }
+.Link--secondary { color: var(--ins-fg-muted) !important; }
+.Link--secondary:hover { color: var(--ins-link) !important; }
+
+/* Eyebrow labels: small, uppercase, tracked (vanderbot's section labels) */
+.eyebrow {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ins-fg-muted);
+}
+.eyebrow-accent { color: var(--ins-accent); }
+
+/* Buttons: uppercase, tracked, 8px corners. Names (branches, SHAs) keep their case. */
+.btn {
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.btn-sm { font-size: 11px; }
+.btn-large { font-size: 13px; padding: 12px 22px; }
+.btn.text-mono, .btn.btn-plain-case, .btn .branch-name { text-transform: none; letter-spacing: 0; }
+.btn-octicon, .btn-link { text-transform: none; letter-spacing: normal; }
+.btn .Counter { letter-spacing: 0; }
+
+/* Header */
+.Header {
+  background-color: var(--ins-bg);
+  border-bottom: 1px solid var(--ins-border);
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+.Header-link { color: var(--ins-fg); }
+.Header-link:hover { color: var(--ins-link); }
+.Header-input {
+  background-color: var(--ins-inset) !important;
+  border: 1px solid var(--ins-border) !important;
+  color: var(--ins-fg) !important;
+  border-radius: 8px;
+}
+.header-wordmark {
+  font-family: "Fraunces", Georgia, serif;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+/* Cards */
+.Box {
+  background-color: var(--ins-surface);
+  border-color: var(--ins-border);
+  border-radius: 12px;
+}
+.Box-header { background-color: var(--ins-surface-2); border-color: var(--ins-border); border-radius: 12px 12px 0 0; }
+.Box-row { border-color: var(--ins-border-soft); }
+.Box-row--hover-gray:hover, .file-table tbody tr:hover { background-color: rgba(241, 239, 230, 0.04); }
+.Box--danger { border-color: rgba(240, 100, 75, 0.5); }
+.timeline-comment { background-color: var(--ins-surface); border-color: var(--ins-border); border-radius: 12px; }
+.timeline-comment-header { background-color: var(--ins-surface-2); border-color: var(--ins-border); border-radius: 12px 12px 0 0; }
+.merge-box { border-radius: 12px; background-color: var(--ins-surface); }
+.dropdown-menu, .SelectMenu-modal { border-radius: 12px; background-color: var(--ins-surface); border-color: var(--ins-border); }
+.form-control, .form-select { background-color: var(--ins-inset); border-color: var(--ins-border); color: var(--ins-fg); border-radius: 8px; }
+.form-control:focus, .form-select:focus { border-color: var(--ins-accent); box-shadow: 0 0 0 3px rgba(255, 106, 43, 0.2); }
+.flash { border-radius: 12px; }
+.Label, .IssueLabel { letter-spacing: 0.02em; }
+.State { border-radius: 2em; font-weight: 500; }
+.State--open { background-color: var(--ins-success-strong); }
+.State--merged { background-color: var(--ins-done-strong); }
+.State--closed { background-color: var(--ins-danger-strong); }
+.UnderlineNav { border-bottom-color: var(--ins-border); }
+.UnderlineNav-item[aria-current]:not([aria-current="false"]) { font-weight: 600; }
+.tabnav-tab[aria-current]:not([aria-current="false"]) { background-color: var(--ins-surface); border-color: var(--ins-border); }
+.menu { border-radius: 12px; background-color: var(--ins-surface); border-color: var(--ins-border); }
+.menu-item[aria-current]:not([aria-current="false"])::before { background-color: var(--ins-accent); }
+.blankslate { border-radius: 12px; }
+
+.file-table .octicon-file-directory-fill { color: var(--ins-teal); }
+
+/* Code surfaces */
+.markdown-body pre, .markdown-body .highlight pre { background-color: var(--ins-inset); border: 1px solid var(--ins-border-soft); border-radius: 10px; }
+.markdown-body code { background-color: rgba(241, 239, 230, 0.08); }
+.diff-table .hunk td { background-color: rgba(86, 184, 207, 0.08); }
+.diff-table .hunk .blob-num { background-color: rgba(86, 184, 207, 0.14); }
+
+/* Constellation backdrop for the landing and sign-in pages */
+.constellation {
+  background-image: url("/static/constellation.svg");
+  background-size: cover;
+  background-position: center top;
+  min-height: calc(100vh - 140px);
+}
+
+/* Insitio mark */
+.insitio-mark .node { fill: currentColor; }
+.insitio-mark .edge { stroke: currentColor; opacity: 0.45; }
+.insitio-mark .spark { fill: var(--ins-accent); }

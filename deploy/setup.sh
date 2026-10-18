@@ -61,5 +61,5 @@ systemctl restart gitfkd
 systemctl reload caddy || systemctl restart caddy
 
 sleep 2
-systemctl is-active --quiet gitfkd && echo "GitFkd is running" || { journalctl -u gitfkd -n 30 --no-pager; exit 1; }
+systemctl is-active --quiet gitfkd && echo "Insitio is running" || { journalctl -u gitfkd -n 30 --no-pager; exit 1; }
 curl -fsS -o /dev/null -w "Local health check: HTTP %{http_code}\n" http://127.0.0.1:3000/login

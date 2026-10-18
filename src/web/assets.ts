@@ -18,6 +18,8 @@ function asset(path: string, type: string): Asset {
 export const ASSETS: Record<string, Asset> = {
   "primer.css": asset(require.resolve("@primer/css/dist/primer.css"), "text/css; charset=utf-8"),
   "app.css": asset(join(PUBLIC, "app.css"), "text/css; charset=utf-8"),
+  "theme.css": asset(join(PUBLIC, "theme.css"), "text/css; charset=utf-8"),
+  "constellation.svg": asset(join(PUBLIC, "constellation.svg"), "image/svg+xml"),
   "app.js": asset(join(PUBLIC, "app.js"), "text/javascript; charset=utf-8"),
   "favicon.svg": asset(join(PUBLIC, "favicon.svg"), "image/svg+xml"),
 };

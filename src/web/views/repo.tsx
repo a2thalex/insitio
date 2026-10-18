@@ -66,7 +66,7 @@ export function RefPicker({ current, branches, tags, hrefFor }: { current: strin
   );
   return (
     <details class="details-reset details-overlay d-inline-block">
-      <summary class="btn btn-sm css-truncate" aria-label={`Switch branches or tags, current ${shortCurrent}`}>
+      <summary class="btn btn-sm btn-plain-case css-truncate" aria-label={`Switch branches or tags, current ${shortCurrent}`}>
         <Octicon name="git-branch" class="mr-1" />
         <span class="css-truncate-target text-bold" style="max-width:160px">{shortCurrent}</span>
         <span class="dropdown-caret ml-1"></span>

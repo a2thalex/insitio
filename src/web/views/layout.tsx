@@ -5,7 +5,10 @@ import type { User } from "../../services/users.js";
 import { formatDate, timeAgo } from "../format.js";
 import { assetUrl } from "../assets.js";
 
-export type PageProps = { title: string; user: User | null; csrf: string; children?: Child };
+const FONTS_URL =
+  "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap";
+
+export type PageProps ={ title: string; user: User | null; csrf: string; children?: Child };
 
 export function Octicon({ name, size = 16, class: cls }: { name: string; size?: number; class?: string }) {
   const icon = octicons[name];
@@ -63,13 +66,29 @@ export function LabelChip({ label, href }: { label: { name: string; color: strin
   );
 }
 
+/** The Insitio mark: a small constellation forming an "i", with an orange spark for the dot. */
+export function InsitioMark({ size = 28 }: { size?: number }) {
+  return (
+    <svg class="insitio-mark" width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
+      <line class="edge" x1="16" y1="8" x2="16" y2="25" stroke-width="1.4" />
+      <line class="edge" x1="16" y1="15" x2="9" y2="19" stroke-width="1.4" />
+      <line class="edge" x1="16" y1="15" x2="23" y2="11" stroke-width="1.4" />
+      <circle class="node" cx="16" cy="15" r="2.2" />
+      <circle class="node" cx="16" cy="25" r="2.2" />
+      <circle class="node" cx="9" cy="19" r="1.6" />
+      <circle class="node" cx="23" cy="11" r="1.6" />
+      <circle class="spark" cx="16" cy="7.5" r="3" />
+    </svg>
+  );
+}
+
 function Header({ user, csrf }: { user: User | null; csrf: string }) {
   return (
     <header class="Header px-3 px-md-4" role="banner">
       <div class="Header-item">
-        <a href="/" class="Header-link f4 d-flex flex-items-center" aria-label="Insitio home">
-          <Octicon name="git-merge" size={28} />
-          <span class="ml-2 text-bold header-wordmark">Insitio</span>
+        <a href="/" class="Header-link d-flex flex-items-center" aria-label="Insitio home">
+          <InsitioMark size={28} />
+          <span class="ml-2 header-wordmark">Insitio</span>
         </a>
       </div>
       <div class="Header-item Header-item--full min-width-0">
@@ -117,7 +136,7 @@ function Header({ user, csrf }: { user: User | null; csrf: string }) {
         </>
       ) : (
         <div class="Header-item mr-0">
-          <a href="/login" class="Header-link">Sign in</a>
+          <a href="/login" class="btn btn-sm">Sign in</a>
         </div>
       )}
     </header>
@@ -128,13 +147,18 @@ export function Layout({ title, user, csrf, children }: PageProps) {
   return (
     <>
       {raw("<!doctype html>")}
-      <html lang="en" data-color-mode="auto" data-light-theme="light" data-dark-theme="dark">
+      <html lang="en" data-color-mode="dark" data-light-theme="dark" data-dark-theme="dark">
         <head>
           <meta charset="utf-8" />
           <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <meta name="theme-color" content="#131c21" />
           <title>{title ? `${title} · Insitio` : "Insitio"}</title>
+          <link rel="preconnect" href="https://fonts.googleapis.com" />
+          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+          <link rel="stylesheet" href={FONTS_URL} />
           <link rel="stylesheet" href={assetUrl("primer.css")} />
           <link rel="stylesheet" href={assetUrl("app.css")} />
+          <link rel="stylesheet" href={assetUrl("theme.css")} />
           <link rel="icon" href={assetUrl("favicon.svg")} type="image/svg+xml" />
           <script src={assetUrl("app.js")} defer></script>
         </head>

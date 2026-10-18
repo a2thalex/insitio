@@ -8,7 +8,7 @@ import { authenticate, createSession, deleteSession, inviteStatus, redeemInvite 
 import type { Env } from "../env.js";
 import { SESSION_COOKIE, cookieOptions, field, form, safeNext } from "../middleware.js";
 import { render, renderError } from "../render.js";
-import { CsrfField, Flash, Octicon } from "../views/layout.js";
+import { CsrfField, Flash, InsitioMark } from "../views/layout.js";
 
 // Failed sign-ins per username+address, to slow down password guessing.
 const failures = new Map<string, { count: number; until: number }>();
@@ -38,12 +38,14 @@ function recordFailure(key: string) {
 
 function AuthBox({ title, children }: { title: string; children: any }) {
   return (
-    <div class="container-sm px-3 py-6" style="max-width:340px">
-      <div class="text-center mb-4">
-        <Octicon name="git-merge" size={48} />
-        <h1 class="f3 text-normal mt-3">{title}</h1>
+    <div class="constellation">
+      <div class="container-sm px-3 py-6" style="max-width:360px">
+        <div class="text-center mb-4">
+          <InsitioMark size={56} />
+          <h1 class="f1 mt-2">{title}</h1>
+        </div>
+        {children}
       </div>
-      {children}
     </div>
   );
 }
@@ -52,7 +54,7 @@ function LoginPage({ csrf, next, error, username }: { csrf: string; next: string
   return (
     <AuthBox title="Sign in to Insitio">
       <Flash error={error} />
-      <div class="Box color-bg-subtle p-3">
+      <div class="Box p-4">
         <form method="post" action={`/login?next=${encodeURIComponent(next)}`}>
           <CsrfField csrf={csrf} />
           <label for="login_field" class="d-block mb-2">Username</label>
@@ -62,7 +64,7 @@ function LoginPage({ csrf, next, error, username }: { csrf: string; next: string
           <button class="btn btn-primary btn-block" type="submit">Sign in</button>
         </form>
       </div>
-      <p class="text-center color-fg-muted f6 mt-3 p-3 border rounded-2">
+      <p class="text-center color-fg-muted f6 mt-3">
         Insitio is invite-only. Ask an admin for an invite link.
       </p>
     </AuthBox>
@@ -73,7 +75,7 @@ function JoinPage({ csrf, token, error, values }: { csrf: string; token: string;
   return (
     <AuthBox title="Create your Insitio account">
       <Flash error={error} />
-      <div class="Box color-bg-subtle p-3">
+      <div class="Box p-4">
         <form method="post" action={`/join/${token}`}>
           <CsrfField csrf={csrf} />
           <label for="username" class="d-block mb-2">Username</label>
