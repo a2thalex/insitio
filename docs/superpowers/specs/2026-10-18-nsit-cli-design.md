@@ -69,10 +69,7 @@ Both, equally (user's answer):
 | Concern | Choice | Reason |
 |---|---|---|
 | Language | Rust (stable 1.94 installed locally with MSVC build tools) | User's call; matches jj |
-| Local git | `gix` (gitoxide), same family of crates jj ships | Pure Rust, no git binary |
-| Clone/fetch | `gix` HTTP transport with the reqwest + rustls backend | No OpenSSL to bundle |
-| Push | Own smart-HTTP receive-pack client, packs built with `gix-pack` | gitoxide has no push (REA: jj shells out to git for this) |
-| Merge on pull | `gix-merge` (tree/blob merge with conflict markers) | Pure Rust |
+| Git engine | `git2` 0.21 with `vendored-libgit2` (libgit2 statically linked; WinHTTP on Windows, SecureTransport on macOS, vendored OpenSSL on Linux) | Changed during planning: gix 0.89 still has no push (confirmed from its feature list), and libgit2 provides push, merge with conflict markers, safe checkout, staging and git-config/autocrlf handling, so no custom protocol client is needed. Still no git binary required. |
 | CLI | `clap` with derive | jj's choice; Rust analog of gh's cobra |
 | Credentials | `keyring` crate (Windows Credential Manager, macOS Keychain, Secret Service) | Analog of gh's go-keyring |
 | HTTP API | `reqwest` (rustls) + `serde` | |
@@ -164,8 +161,8 @@ config; `nsit auth login` fills them from the Insitio account the first time.
 
 ### Existing git configuration (builder check; my call)
 
-`nsit` reads standard git configuration whenever it exists, through gix's
-config loading: system, global (`~/.gitconfig`, XDG) and repository files.
+`nsit` reads standard git configuration whenever it exists, through libgit2's
+config loading (system, global (`~/.gitconfig`, XDG) and repository files.
 That includes `user.*`, `core.autocrlf`, `core.eol`, `core.excludesFile` and
 `.gitattributes` `text`/`eol` rules, so a repo behaves the same under `nsit`
 and git on the same machine (no "every file modified" on Windows with
@@ -198,18 +195,16 @@ config (`.git/config`) and its own `nsit.toml`.
 ### Pull
 
 - Fetch the upstream branch, fast-forward if possible, otherwise merge with
-  `gix-merge`. On conflict: write standard conflict markers, leave the merge
+  libgit2. On conflict: write standard conflict markers, leave the merge
   in progress (`MERGE_HEAD`) so real git recognizes it, list the files, exit
   code 4. `nsit commit` after resolving completes the merge;
   `nsit pull --abort` restores the pre-merge state.
 
-### Push
+### Push (via libgit2)
 
-- Advertise refs from the server, compute objects reachable from the local
-  commit and not from any advertised ref, build a pack with `gix-pack`, send
-  the receive-pack request with `report-status`, parse the result.
-- Thin packs and delta compression are optional for v1 (full objects are
-  acceptable); pushes up to the server's 2 GB limit must work.
+- libgit2's `Remote::push` handles ref advertisement, pack building and
+  report-status; `nsit` turns per-ref rejections into exit code 6.
+- Pushes up to the server's 2 GB limit must work.
 - `-u` sets the upstream in `.git/config`.
 
 ### Output and exit codes
