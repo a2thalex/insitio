@@ -127,7 +127,7 @@ describe("nsit auth login --with-token", () => {
 
   it("ignores a leading UTF-8 byte-order mark, as Windows PowerShell and editors write one", async () => {
     const configDir = tmpDir();
-    const login = await nsit(auth("login", "--with-token"), { configDir, input: `﻿${newToken()}\r\n` });
+    const login = await nsit(auth("login", "--with-token"), { configDir, input: `\uFEFF${newToken()}\r\n` });
     expect(login.code, login.stderr).toBe(0);
     expect((await statusJson(configDir)).user).toBe("ada");
   });
@@ -201,7 +201,8 @@ describe("nsit auth status", () => {
     await signIn(configDir);
     const result = await nsit(auth("status", "--jq", ".user"), { configDir });
     expect(result.code, result.stderr).toBe(0);
-    expect(result.stdout).toBe('"ada"\n');
+    // gh's rule: a string result is printed as its text, without quotes.
+    expect(result.stdout).toBe("ada\n");
   });
 
   it("prints a readable line without --json, and never the token", async () => {
@@ -494,8 +495,21 @@ describe("nsit repo", () => {
   it("list --json --jq '.[].name' prints the names", async () => {
     const result = await nsit(repo("list", "--json", "--jq", ".[].name"), { configDir: adaDir });
     expect(result.code, result.stderr).toBe(0);
-    // jq's own output form: a string is JSON-quoted (as in `auth status --jq .user`).
-    expect(result.stdout).toBe('"tools"\n');
+    expect(result.stdout).toBe("tools\n");
+  });
+
+  it("--jq prints strings raw and everything else as compact JSON, one result per line", async () => {
+    const run = async (expr: string) => {
+      const result = await nsit(repo("view", "ada/tools", "--jq", expr), { configDir: adaDir });
+      expect(result.code, `${expr}: ${result.stderr}`).toBe(0);
+      expect(result.stderr).toBe("");
+      return result.stdout;
+    };
+    expect(await run(".name, .private, .description, .default_branch")).toBe("tools\ntrue\n\nmain\n");
+    expect(await run("[.name, .private]")).toBe('["tools",true]\n');
+    expect(await run("{name, private}")).toBe('{"name":"tools","private":true}\n');
+    expect(await run(".missing")).toBe("null\n");
+    expect(await run('"owner is " + .owner')).toBe("owner is ada\n");
   });
 
   it("list prints an aligned table; --json is the server's own fields, unchanged", async () => {
@@ -557,7 +571,7 @@ describe("nsit repo", () => {
     for (const input of [`${ins.base}/ada/tools.git`, `${ins.base}/ada/tools`, "ada/tools.git"]) {
       const result = await nsit(repo("view", input, "--jq", ".full_name"), { configDir: adaDir });
       expect(result.code, `${input}: ${result.stderr}`).toBe(0);
-      expect(result.stdout).toBe('"ada/tools"\n');
+      expect(result.stdout).toBe("ada/tools\n");
     }
   });
 
@@ -589,11 +603,11 @@ describe("nsit repo", () => {
   it("list --owner shows only what the caller may see of that owner's repositories", async () => {
     const asGrace = await nsit(repo("list", "--owner", "ada", "--jq", ".[].full_name"), { configDir: graceDir });
     expect(asGrace.code, asGrace.stderr).toBe(0);
-    expect(asGrace.stdout).toBe('"ada/open"\n');
+    expect(asGrace.stdout).toBe("ada/open\n");
 
     const asAda = await nsit(repo("list", "--owner", "ada", "--jq", ".[].full_name"), { configDir: adaDir });
     expect(asAda.code, asAda.stderr).toBe(0);
-    expect(asAda.stdout.trimEnd().split("\n").sort()).toEqual(['"ada/open"', '"ada/tools"']);
+    expect(asAda.stdout.trimEnd().split("\n").sort()).toEqual(["ada/open", "ada/tools"]);
 
     const nobody = await nsit(repo("list", "--owner", "nobody"), { configDir: adaDir });
     expect(nobody.code, nobody.stderr).toBe(1);
@@ -625,7 +639,8 @@ describe("nsit repo", () => {
     expect(result.code, result.stderr).toBe(3);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("NSIT_TOKEN");
-    expect(result.stderr).toContain("--host");
+    expect(result.stderr).toBe("nsit: NSIT_TOKEN is sent only to the selected host, and other.example is not it\n");
+    expect(result.stderr).not.toContain("--host");
     expect(oneLine(result.stderr), result.stderr).toBe(true);
   });
 

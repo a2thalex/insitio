@@ -55,6 +55,10 @@ impl NsitError {
             // Task 5 maps 401 to `Auth`; this keeps a raw 401 from slipping
             // through as a general failure.
             NsitError::Auth(_) | NsitError::Api { status: 401, .. } => 3,
+            // A refused login that reached us as a bare libgit2 error: `run_remote`
+            // turns these into `Auth` with a hint, this keeps the exit code right
+            // for any caller that did not go through it.
+            NsitError::Git(e) if e.code() == git2::ErrorCode::Auth => 3,
             NsitError::Conflict(_) => 4,
             NsitError::SecretGuard(_) => 5,
             NsitError::Rejected(_) => 6,
@@ -142,6 +146,20 @@ mod tests {
         assert_eq!(api(401).exit_code(), 3);
         assert_eq!(api(404).exit_code(), 1);
         assert_eq!(api(403).exit_code(), 1);
+    }
+
+    #[test]
+    fn a_git_authentication_failure_is_exit_3_even_when_nobody_mapped_it() {
+        // `run_remote` maps these to `Auth`; this is the net under a caller that
+        // lets `?` convert a libgit2 error on its own.
+        let auth = git2::Error::new(git2::ErrorCode::Auth, git2::ErrorClass::Http, "rejected");
+        assert_eq!(NsitError::from(auth).exit_code(), 3);
+        let other = git2::Error::new(
+            git2::ErrorCode::GenericError,
+            git2::ErrorClass::Net,
+            "connection reset",
+        );
+        assert_eq!(NsitError::from(other).exit_code(), 1);
     }
 
     #[test]

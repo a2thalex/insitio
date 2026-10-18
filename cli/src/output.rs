@@ -1,4 +1,4 @@
-//! How nsit prints: data to stdout (human text, JSON, or `--jq` lines),
+//! How nsit prints: data to stdout (human text, JSON, or `--jq` lines: strings raw, anything else as compact JSON),
 //! progress and notes to stderr.
 
 use std::io::{self, IsTerminal, Write};
@@ -159,7 +159,9 @@ fn compile_jq(expr: &str) -> Result<JqFilter, NsitError> {
         .map_err(|errs| bad_jq(describe_compile_errors(&errs)))
 }
 
-/// Run `expr` over one JSON document; each output becomes one compact line.
+/// Run `expr` over one JSON document; each output becomes one line, by gh's
+/// rule: a string prints as its text (no quotes, nothing escaped), anything
+/// else (number, bool, null, array, object) as compact JSON.
 fn run_jq(expr: &str, input_json: &[u8]) -> Result<Vec<String>, NsitError> {
     let filter = compile_jq(expr)?;
     let input = jaq_json::read::parse_single(input_json)
@@ -169,7 +171,7 @@ fn run_jq(expr: &str, input_json: &[u8]) -> Result<Vec<String>, NsitError> {
     let mut lines = Vec::new();
     for item in filter.id.run((ctx, input)) {
         match item {
-            Ok(value) => lines.push(value.to_string()),
+            Ok(value) => lines.push(jq_line(&value)),
             Err(exception) => match exception.get_err() {
                 // A syntax or compile error was already rejected up front
                 // (exit 2). This one depends on the data, and the command may
@@ -182,6 +184,15 @@ fn run_jq(expr: &str, input_json: &[u8]) -> Result<Vec<String>, NsitError> {
         }
     }
     Ok(lines)
+}
+
+/// One `--jq` result as printed: raw text for a string (a byte string, which
+/// jq's `@base64d` produces, counts as text), compact JSON for the rest.
+fn jq_line(value: &Val) -> String {
+    match value {
+        Val::TStr(text) | Val::BStr(text) => String::from_utf8_lossy(&text[..]).into_owned(),
+        other => other.to_string(),
+    }
 }
 
 fn describe_load_errors(errs: &[(File<&str, ()>, load::Error<&str>)]) -> String {
@@ -267,11 +278,66 @@ mod tests {
     }
 
     #[test]
-    fn jq_name_prints_the_quoted_json_string() {
+    fn jq_string_results_print_raw_without_quotes() {
+        // gh's rule: a string is printed as its text, not as a JSON string.
         assert_eq!(
             jq(".name", json!({"name": "tools"})).unwrap(),
-            vec!["\"tools\""]
+            vec!["tools"]
         );
+        // Quotes and newlines inside it are printed as they are.
+        assert_eq!(
+            jq(".", json!("say \"hi\"\nthen go")).unwrap(),
+            vec!["say \"hi\"\nthen go"]
+        );
+        assert_eq!(jq(".", json!("")).unwrap(), vec![""]);
+    }
+
+    #[test]
+    fn jq_strings_inside_arrays_and_objects_stay_json() {
+        assert_eq!(
+            jq(".", json!({"name": "tools", "tags": ["a", "b"]})).unwrap(),
+            vec![r#"{"name":"tools","tags":["a","b"]}"#]
+        );
+        assert_eq!(
+            jq("[.name, .n]", json!({"name": "tools", "n": 1})).unwrap(),
+            vec![r#"["tools",1]"#]
+        );
+    }
+
+    #[test]
+    fn jq_mixed_results_are_raw_text_or_compact_json_one_per_line() {
+        let lines = jq(
+            ".[]",
+            json!(["a", 1, true, null, 2.5, ["b"], {"c": "d"}, "line\nbreak"]),
+        )
+        .unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                "a",
+                "1",
+                "true",
+                "null",
+                "2.5",
+                r#"["b"]"#,
+                r#"{"c":"d"}"#,
+                "line\nbreak"
+            ]
+        );
+    }
+
+    #[test]
+    fn jq_results_built_by_the_expression_follow_the_same_rule() {
+        // A string made by the expression, and bytes decoded to text.
+        assert_eq!(
+            jq(r#""n=" + (.n | tostring)"#, json!({"n": 3})).unwrap(),
+            vec!["n=3"]
+        );
+        assert_eq!(
+            jq(".s | @base64d", json!({"s": "dG9vbHM="})).unwrap(),
+            vec!["tools"]
+        );
+        assert_eq!(jq(".n | tostring", json!({"n": 3})).unwrap(), vec!["3"]);
     }
 
     #[test]
@@ -281,7 +347,7 @@ mod tests {
             json!([{"name": "a"}, {"name": "b"}, {"name": "c"}]),
         )
         .unwrap();
-        assert_eq!(lines, vec!["\"a\"", "\"b\"", "\"c\""]);
+        assert_eq!(lines, vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -299,7 +365,7 @@ mod tests {
     fn jq_keeps_non_ascii_text() {
         assert_eq!(
             jq(".name", json!({"name": "café ☃"})).unwrap(),
-            vec!["\"café ☃\""]
+            vec!["café ☃"]
         );
     }
 
@@ -327,10 +393,7 @@ mod tests {
 
     #[test]
     fn jq_halt_stops_quietly_instead_of_exiting_the_process() {
-        assert_eq!(
-            jq("\"x\", halt, \"y\"", json!(null)).unwrap(),
-            vec!["\"x\""]
-        );
+        assert_eq!(jq("\"x\", halt, \"y\"", json!(null)).unwrap(), vec!["x"]);
     }
 
     #[test]
@@ -378,7 +441,7 @@ mod tests {
         let lines = o
             .render(&json!({"name": "tools"}), |_| unreachable!())
             .unwrap();
-        assert_eq!(lines, vec!["\"tools\""]);
+        assert_eq!(lines, vec!["tools"]);
     }
 
     #[test]

@@ -12,12 +12,12 @@
 use crate::api::{Api, RepoJson};
 use crate::cli::{GlobalArgs, RepoArgs, RepoCommand, RepoCreateArgs, RepoListArgs, RepoViewArgs};
 use crate::config::{base_url, resolve_host};
-use crate::credentials::{token_for, TokenSource};
+use crate::credentials::token_for;
 use crate::error::{one_line, NsitError};
-use crate::git::{
+use crate::output::Out;
+use crate::repo_ref::{
     needs_default_owner, parse_repo_ref, signed_in_login, token_for_repo, validate_repo_name,
 };
-use crate::output::Out;
 
 /// Longest description shown in a table row.
 const TABLE_DESCRIPTION_CHARS: usize = 60;
@@ -32,15 +32,15 @@ pub fn run(args: &RepoArgs, global: &GlobalArgs, out: &Out) -> Result<(), NsitEr
 }
 
 /// A client with this host's token. Signed out is `Auth` right here.
-fn signed_in(host: &str) -> Result<(Api, TokenSource), NsitError> {
-    let (token, source) = token_for(host, None)?;
-    Ok((Api::new(host, Some(token))?, source))
+fn signed_in(host: &str) -> Result<Api, NsitError> {
+    let (token, _) = token_for(host, None)?;
+    Api::new(host, Some(token))
 }
 
 // ---- create ------------------------------------------------------------------------
 
 fn create(host: &str, args: &RepoCreateArgs, out: &Out) -> Result<(), NsitError> {
-    let (api, _) = signed_in(host)?;
+    let api = signed_in(host)?;
     validate_repo_name(&args.name)?;
     // Private unless --public. A name that is taken comes back as the server's
     // own message (exit 1).
@@ -61,7 +61,7 @@ fn created_text(repo: &RepoJson) -> String {
 // ---- list --------------------------------------------------------------------------
 
 fn list(host: &str, args: &RepoListArgs, out: &Out) -> Result<(), NsitError> {
-    let (api, _) = signed_in(host)?;
+    let api = signed_in(host)?;
     let repos = api.repos(args.owner.as_deref())?;
     if repos.is_empty() && !out.json {
         out.info("No repositories.");
@@ -124,8 +124,8 @@ fn view(host: &str, args: &RepoViewArgs, out: &Out) -> Result<(), NsitError> {
     // A bare name is yours: that needs to know who you are. Signed out is
     // reported here, with no network traffic.
     let default_owner = if needs_default_owner(&args.repo) {
-        let (api, source) = signed_in(host)?;
-        signed_in_login(host, source, &api)?
+        let (token, source) = token_for(host, None)?;
+        signed_in_login(host, source, &token)?
     } else {
         String::new()
     };

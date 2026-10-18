@@ -12,8 +12,11 @@ mod credentials;
 mod error;
 mod git;
 mod output;
+mod repo_ref;
 #[cfg(test)]
 pub(crate) mod test_env;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::io::Write;
 

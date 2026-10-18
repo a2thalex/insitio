@@ -469,9 +469,11 @@ fn sign_out_with(
 /// update the config.
 ///
 /// If the token could not be read, that original error comes first (exit 1,
-/// the wording the user needs to fix it); a cleanup failure on top of it is
-/// added to the same line. If it was read, a failed delete or a failed config
-/// write is the error.
+/// the wording the user needs to fix it), followed by what is now true: when
+/// the cleanup worked, the local token and account are gone but the server's
+/// token was never revoked (and where to do that); when it did not, the
+/// cleanup failure is added to the same line. If the token was read, a failed
+/// delete or a failed config write is the error.
 fn sign_out_outcome(
     revocation: Result<Revocation, NsitError>,
     deleted: Result<(), NsitError>,
@@ -485,6 +487,12 @@ fn sign_out_outcome(
         }
         Err(original) => {
             let first = original.to_string();
+            if deleted.is_ok() && saved.is_ok() {
+                return Err(NsitError::Other(format!(
+                    "{first}; the local token and account were removed, but the token was not \
+                     revoked on the server: revoke it in Settings > Personal access tokens"
+                )));
+            }
             let also: Vec<String> = [deleted, saved]
                 .into_iter()
                 .filter_map(Result::err)
@@ -1164,11 +1172,23 @@ mod tests {
             Err(NsitError::Other(original.into()))
         })
         .unwrap_err();
-        // The original failure is what gets reported (exit 1)...
+        // The original failure is what gets reported (exit 1), followed by what
+        // the user needs to know: the local token is gone, the server's is not.
         assert!(matches!(err, NsitError::Other(_)), "{err:?}");
-        assert_eq!(err.to_string(), original);
+        let text = err.to_string();
+        assert!(text.starts_with(original), "{text}");
+        assert!(
+            text.contains("local token and account were removed"),
+            "{text}"
+        );
+        assert!(text.contains("not revoked on the server"), "{text}");
+        assert!(
+            text.ends_with("revoke it in Settings > Personal access tokens"),
+            "{text}"
+        );
+        assert!(!text.contains('\n'), "one line please: {text:?}");
         assert_eq!(err.exit_code(), 1);
-        // ...but the token is gone here and the account is forgotten.
+        // ...and the token is indeed gone here and the account forgotten.
         assert!(!dir.path().join(TOKEN_FILE).exists());
         assert!(token_for(HOST, Some("ada")).is_err());
         assert!(Config::load().unwrap().hosts.is_empty());
@@ -1203,16 +1223,25 @@ mod tests {
         let read_failed = || Err(NsitError::Other("cannot read the token".into()));
         let failure = |why: &str| Err(NsitError::Other(why.into()));
 
-        // Cleanup fine: the original error, untouched.
+        // Cleanup fine: the original error, then that the local token and account
+        // are gone while the server's token was not revoked.
         let err = sign_out_outcome(read_failed(), ok(), ok()).unwrap_err();
-        assert_eq!(err.to_string(), "cannot read the token");
+        let text = err.to_string();
+        assert!(text.starts_with("cannot read the token; "), "{text}");
+        assert!(
+            text.contains("local token and account were removed"),
+            "{text}"
+        );
+        assert!(text.contains("Settings > Personal access tokens"), "{text}");
+        assert_eq!(err.exit_code(), 1);
         // Cleanup failed too: both are said, on one line.
         let err = sign_out_outcome(read_failed(), failure("cannot remove it"), ok()).unwrap_err();
         let text = err.to_string();
         assert!(text.starts_with("cannot read the token"), "{text}");
         assert!(text.contains("cannot remove it"), "{text}");
         assert!(!text.contains('\n'), "{text:?}");
-        // The same words are not said twice.
+        // The same words are not said twice, and nothing claims the token was
+        // removed when it was not.
         let err =
             sign_out_outcome(read_failed(), failure("cannot read the token"), ok()).unwrap_err();
         assert_eq!(err.to_string(), "cannot read the token");
