@@ -218,6 +218,23 @@ pub(crate) fn clean_for_terminal(text: &str) -> String {
         .collect()
 }
 
+/// Text that came from a repository (file names, commit text, branch names), as
+/// it goes to stdout: on a terminal (`tty`) cleaned with `clean_for_terminal`,
+/// piped exactly as it is. Every command that prints such text goes through this.
+pub(crate) fn for_display(text: &str, tty: bool) -> String {
+    if tty {
+        clean_for_terminal(text)
+    } else {
+        text.to_string()
+    }
+}
+
+/// `text` without any control character, line breaks and tabs included: a file
+/// name or path that goes inside a one-line message, whatever the output is.
+pub(crate) fn strip_controls(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
 fn describe_load_errors(errs: &[(File<&str, ()>, load::Error<&str>)]) -> String {
     let mut parts = Vec::new();
     for (_file, err) in errs {
@@ -427,6 +444,19 @@ mod tests {
         assert_eq!(clean_for_terminal("\u{1b}]0;title\u{7}ok"), "]0;titleok");
         assert_eq!(clean_for_terminal("a\u{0}b\u{7f}c\u{85}d"), "abcd");
         assert_eq!(clean_for_terminal(""), "");
+    }
+
+    #[test]
+    fn for_display_cleans_on_a_terminal_and_leaves_piped_text_exact() {
+        let text = "a\u{1b}[31mb\nc\td\u{7}";
+        assert_eq!(for_display(text, true), "a[31mb\nc\td");
+        assert_eq!(for_display(text, false), text);
+    }
+
+    #[test]
+    fn strip_controls_drops_line_breaks_and_tabs_too() {
+        assert_eq!(strip_controls("a\nb\tc\u{1b}[0m d"), "abc[0m d");
+        assert_eq!(strip_controls("café ☃"), "café ☃");
     }
 
     #[test]

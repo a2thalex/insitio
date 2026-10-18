@@ -14,7 +14,7 @@ use crate::error::NsitError;
 use crate::git::open_repo;
 use crate::git::paths::repo_relative;
 use crate::git::stage::stage_paths;
-use crate::output::{clean_for_terminal, Out};
+use crate::output::{for_display, Out};
 
 /// How many staged paths the text lists before it counts the rest.
 const LISTED: usize = 20;
@@ -42,14 +42,7 @@ fn describe(staged: &[String], tty: bool) -> String {
     if staged.is_empty() {
         return "nothing new to stage".to_string();
     }
-    let show = |path: &str| {
-        let path = if tty {
-            clean_for_terminal(path)
-        } else {
-            path.to_string()
-        };
-        format!("staged {path}")
-    };
+    let show = |path: &str| format!("staged {}", for_display(path, tty));
     let mut lines: Vec<String> = staged.iter().take(LISTED).map(|p| show(p)).collect();
     if staged.len() > LISTED {
         lines.push(format!("... and {} more", staged.len() - LISTED));

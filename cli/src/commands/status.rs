@@ -17,7 +17,7 @@ use crate::cli::GlobalArgs;
 use crate::error::NsitError;
 use crate::git::open_repo;
 use crate::git::stage::{current_branch, head_commit};
-use crate::output::{clean_for_terminal, Out};
+use crate::output::{for_display, Out};
 
 /// `--json` for `nsit status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -168,13 +168,7 @@ fn against_upstream(repo: &Repository, name: &str) -> (Option<String>, usize, us
 
 /// The text for people, in sections like git's.
 pub fn render(report: &Report, tty: bool) -> String {
-    let clean = |text: &str| {
-        if tty {
-            clean_for_terminal(text)
-        } else {
-            text.to_string()
-        }
-    };
+    let clean = |text: &str| for_display(text, tty);
     let json = &report.json;
     let mut lines = Vec::new();
     match (&json.branch, &report.detached_at) {
@@ -241,17 +235,11 @@ fn commits(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use git2::build::CheckoutBuilder;
-
     use super::*;
     use crate::git::stage::{stage_all, stage_paths};
-    use crate::test_support::{commit_file, local_repo};
-
-    fn write(repo: &Repository, rel: &str, text: &str) {
-        let path = repo.workdir().unwrap().join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
+    use crate::test_support::{
+        checkout_branch, commit_file, diverged_repo, local_repo, merge_branch, write_file as write,
+    };
 
     fn stage(repo: &Repository, rels: &[&str]) {
         let mut index = repo.index().unwrap();
@@ -473,22 +461,12 @@ mod tests {
     #[test]
     fn a_file_in_conflict_is_listed_only_as_conflicted() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = local_repo(dir.path());
-        commit_file(&repo, "a.txt", "base\n");
-        let base = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.branch("theirs", &base, false).unwrap();
-        let switch = |name: &str| {
-            repo.set_head(&format!("refs/heads/{name}")).unwrap();
-            repo.checkout_head(Some(CheckoutBuilder::new().force()))
-                .unwrap();
-        };
-        switch("theirs");
+        let repo = diverged_repo(dir.path());
+        checkout_branch(&repo, "theirs");
         commit_file(&repo, "a.txt", "theirs\n");
-        switch("main");
+        checkout_branch(&repo, "main");
         commit_file(&repo, "a.txt", "ours\n");
-        let theirs = repo.find_branch("theirs", BranchType::Local).unwrap();
-        let theirs = repo.reference_to_annotated_commit(theirs.get()).unwrap();
-        repo.merge(&[&theirs], None, None).unwrap();
+        merge_branch(&repo, "theirs");
 
         let report = collect(&repo).unwrap();
         assert_eq!(report.json.conflicted, ["a.txt"]);

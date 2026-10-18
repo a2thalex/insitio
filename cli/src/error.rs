@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 
+use crate::output::strip_controls;
+
 /// A file the secret guard refused to commit, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecretHit {
@@ -70,11 +72,7 @@ impl NsitError {
 /// `max_chars` with `...` when longer.
 pub(crate) fn one_line(text: &str, max_chars: usize) -> String {
     let words: Vec<&str> = text.split_whitespace().collect();
-    let cleaned: String = words
-        .join(" ")
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
+    let cleaned = strip_controls(&words.join(" "));
     if cleaned.chars().count() <= max_chars {
         return cleaned;
     }
@@ -87,10 +85,7 @@ fn conflict_summary(paths: &[String]) -> String {
     if paths.is_empty() {
         "merge conflict".to_string()
     } else {
-        let names: Vec<String> = paths
-            .iter()
-            .map(|p| p.chars().filter(|c| !c.is_control()).collect())
-            .collect();
+        let names: Vec<String> = paths.iter().map(|p| strip_controls(p)).collect();
         format!("merge conflict in {}", names.join(", "))
     }
 }
@@ -101,10 +96,7 @@ fn conflict_summary(paths: &[String]) -> String {
 fn secret_summary(hits: &[SecretHit]) -> String {
     let list: Vec<String> = hits
         .iter()
-        .map(|h| {
-            let path: String = h.path.chars().filter(|c| !c.is_control()).collect();
-            format!("{path} ({})", h.reason)
-        })
+        .map(|h| format!("{} ({})", strip_controls(&h.path), h.reason))
         .collect();
     format!(
         "blocked by the secret guard: {}; to commit a file anyway, add --allow-secret <path> \

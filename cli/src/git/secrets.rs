@@ -5,29 +5,38 @@
 //! header, an Insitio, GitHub or AWS token). Both are judged on the *staged*
 //! blob, the bytes that would be committed, not on the working file.
 //!
+//! **Paths are raw bytes here.** A file name on Unix can be any bytes, and the
+//! guard decides on those bytes: every candidate is looked up in the index by
+//! its bytes (`stage::entries_at`), the base name is matched on bytes, and a
+//! candidate the index does not have is an error, never a skip. Text made from a
+//! path (`display`) is only ever for showing it.
+//!
 //! Limits, so a commit stays fast and cannot be made to read gigabytes: only
 //! the first 1 MiB of a blob is scanned, and a blob with a NUL byte in its
-//! first 8 KiB counts as binary and is not scanned (its name still is).
+//! first 8 KiB counts as binary: its name is still judged, and so is a private
+//! key header (a key file can start with a stray byte), but the token and
+//! `.npmrc` rules look at text only.
 //!
 //! **Overrides are recorded.** `.nsit-allow-secrets`, in the repository root and
 //! committed like any file, lists one repository-relative path per line (forward
 //! slashes, `#` starts a comment, blank lines are ignored, exact match, no
 //! patterns). The copy that counts is the staged one, so an allowance takes
 //! effect in the same commit that records it, and an uncommitted edit of the
-//! working file does not count. `allow` appends a path and stages the file.
+//! working file does not count. `record_allowances` writes the new entries in one
+//! go and stages the file in the index it is given; it never writes that index.
 //!
 //! A hit names the path and *why* ("name matches .env", "contains a private
 //! key"). The matched text is never part of a hit, an error or any output.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use git2::{Index, Repository};
 use regex::bytes::Regex;
 
-use super::paths::{slash, workdir};
-use super::stage::{entry, read_start};
+use super::paths::{display, workdir, RawPath};
+use super::stage::{entries_at, entry, read_start};
 use crate::error::{NsitError, SecretHit};
 
 /// The file that lists the paths the guard lets through.
@@ -44,29 +53,34 @@ const GITLINK: u32 = 0o160_000;
 
 // ---- what counts as a secret ---------------------------------------------------------
 
+/// The last part of a path.
+fn base_name(path: &[u8]) -> &[u8] {
+    path.rsplit(|b| *b == b'/').next().unwrap_or(path)
+}
+
 /// Why `path` is refused for its **name**, or `None`. Matched on the last
-/// part of the path, at any depth, ignoring case (Windows and macOS file
+/// part of the path, at any depth, ignoring ASCII case (Windows and macOS file
 /// systems do not tell `.ENV` from `.env`). `.npmrc` and `.pypirc` are judged
 /// on their content (`content_hit`), not here.
-pub fn name_hit(path: &str) -> Option<String> {
-    let base = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-    let pattern = if base == ".env" {
+pub fn name_hit(path: &[u8]) -> Option<String> {
+    let base = base_name(path).to_ascii_lowercase();
+    let pattern = if base == b".env" {
         ".env"
-    } else if base.starts_with(".env.") && base != ".env.example" && base != ".env.sample" {
+    } else if base.starts_with(b".env.") && base != b".env.example" && base != b".env.sample" {
         ".env.*"
-    } else if base.ends_with(".pem") {
+    } else if base.ends_with(b".pem") {
         "*.pem"
-    } else if base.ends_with(".key") {
+    } else if base.ends_with(b".key") {
         "*.key"
-    } else if base.starts_with("id_rsa") {
+    } else if base.starts_with(b"id_rsa") {
         "id_rsa*"
-    } else if base.starts_with("id_ed25519") {
+    } else if base.starts_with(b"id_ed25519") {
         "id_ed25519*"
-    } else if base.ends_with(".p12") {
+    } else if base.ends_with(b".p12") {
         "*.p12"
-    } else if base.ends_with(".pfx") {
+    } else if base.ends_with(b".pfx") {
         "*.pfx"
-    } else if base == "credentials.json" {
+    } else if base == b"credentials.json" {
         "credentials.json"
     } else {
         return None;
@@ -77,23 +91,35 @@ pub fn name_hit(path: &str) -> Option<String> {
 struct ContentRule {
     pattern: Regex,
     reason: &'static str,
+    /// Also applied to a blob that looks binary.
+    in_binary_too: bool,
 }
 
 fn content_rules() -> &'static [ContentRule] {
     static RULES: OnceLock<Vec<ContentRule>> = OnceLock::new();
     RULES.get_or_init(|| {
-        let rule = |pattern: &str, reason| ContentRule {
+        let rule = |pattern: &str, reason, in_binary_too| ContentRule {
             pattern: Regex::new(pattern).expect("a valid built-in pattern"),
             reason,
+            in_binary_too,
         };
         vec![
             rule(
                 r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
                 "contains a private key",
+                true,
             ),
-            rule(r"(gfk|ins)_[A-Za-z0-9_-]{30,}", "contains an Insitio token"),
-            rule(r"gh[pousr]_[A-Za-z0-9]{36,}", "contains a GitHub token"),
-            rule(r"AKIA[0-9A-Z]{16}", "contains an AWS access key"),
+            rule(
+                r"(gfk|ins)_[A-Za-z0-9_-]{30,}",
+                "contains an Insitio token",
+                false,
+            ),
+            rule(
+                r"gh[pousr]_[A-Za-z0-9]{36,}",
+                "contains a GitHub token",
+                false,
+            ),
+            rule(r"AKIA[0-9A-Z]{16}", "contains an AWS access key", false),
         ]
     })
 }
@@ -105,20 +131,18 @@ fn auth_line() -> &'static Regex {
 }
 
 /// Why `content` (the start of the staged file at `path`) is refused, or
-/// `None`. Binary content is not looked at.
-pub fn content_hit(path: &str, content: &[u8]) -> Option<&'static str> {
-    let probe = &content[..content.len().min(BINARY_PROBE)];
-    if probe.contains(&0) {
-        return None;
-    }
-    if let Some(rule) = content_rules()
+/// `None`. A blob that looks binary is only checked for a private key header.
+pub fn content_hit(path: &[u8], content: &[u8]) -> Option<&'static str> {
+    let binary = content[..content.len().min(BINARY_PROBE)].contains(&0);
+    let by_content = content_rules()
         .iter()
-        .find(|rule| rule.pattern.is_match(content))
-    {
+        .find(|rule| (!binary || rule.in_binary_too) && rule.pattern.is_match(content));
+    if let Some(rule) = by_content {
         return Some(rule.reason);
     }
-    let base = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-    if matches!(base.as_str(), ".npmrc" | ".pypirc") && auth_line().is_match(content) {
+    let base = base_name(path).to_ascii_lowercase();
+    let login_file = base == b".npmrc" || base == b".pypirc";
+    if !binary && login_file && auth_line().is_match(content) {
         return Some("contains credentials");
     }
     None
@@ -126,29 +150,29 @@ pub fn content_hit(path: &str, content: &[u8]) -> Option<&'static str> {
 
 // ---- the allow file ------------------------------------------------------------------
 
-/// The paths a text of `.nsit-allow-secrets` allows: trimmed lines, without
+/// The paths a `.nsit-allow-secrets` allows, as bytes: trimmed lines, without
 /// blank lines and `#` comments.
-pub fn parse_allow_list(text: &str) -> BTreeSet<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_string)
+pub fn parse_allow_list(bytes: &[u8]) -> BTreeSet<RawPath> {
+    bytes
+        .split(|b| *b == b'\n')
+        .map(<[u8]>::trim_ascii)
+        .filter(|line| !line.is_empty() && line[0] != b'#')
+        .map(<[u8]>::to_vec)
         .collect()
 }
 
 /// The paths allowed by the staged copy of `.nsit-allow-secrets`.
-pub fn allowed_paths(repo: &Repository, index: &Index) -> Result<BTreeSet<String>, NsitError> {
+pub fn allowed_paths(repo: &Repository, index: &Index) -> Result<BTreeSet<RawPath>, NsitError> {
     let Some(file) = entry(index, ALLOW_FILE) else {
         return Ok(BTreeSet::new());
     };
     let bytes = read_start(repo, file.id, ALLOW_FILE_LIMIT)?;
-    Ok(parse_allow_list(&String::from_utf8_lossy(&bytes)))
+    Ok(parse_allow_list(&bytes))
 }
 
-/// Let `path` (repository-relative, forward slashes) through the guard: append
-/// it to `.nsit-allow-secrets` unless it is listed, and stage that file, so the
-/// allowance is committed with the commit that needed it.
-pub fn allow(repo: &Repository, path: &str) -> Result<(), NsitError> {
+/// A usage error unless `.nsit-allow-secrets` can hold `path` (repository-relative,
+/// forward slashes): one line, without surrounding spaces, not starting with `#`.
+pub fn check_recordable(path: &str) -> Result<(), NsitError> {
     if path.is_empty()
         || path.trim() != path
         || path.starts_with('#')
@@ -159,66 +183,117 @@ pub fn allow(repo: &Repository, path: &str) -> Result<(), NsitError> {
              without surrounding spaces, and cannot start with #"
         )));
     }
+    Ok(())
+}
+
+/// Let `paths` (repository-relative, forward slashes) through the guard: every
+/// path is checked first, then the ones not listed yet are appended to
+/// `.nsit-allow-secrets` in a single write, and the file is staged in `index`.
+///
+/// The index is only changed in memory: when it reaches the disk is the
+/// caller's decision. That keeps the allowance in the commit that needed it
+/// without touching the index file of a commit that then fails.
+pub fn record_allowances(
+    repo: &Repository,
+    index: &mut Index,
+    paths: &[String],
+) -> Result<(), NsitError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    for path in paths {
+        check_recordable(path)?;
+    }
     let file = workdir(repo)?.join(ALLOW_FILE);
     let mut bytes = match std::fs::read(&file) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e.into()),
     };
-    if !parse_allow_list(&String::from_utf8_lossy(&bytes)).contains(path) {
+    let listed = parse_allow_list(&bytes);
+    let new: BTreeSet<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !listed.contains(path.as_bytes()))
+        .collect();
+    if !new.is_empty() {
         if !bytes.is_empty() && !bytes.ends_with(b"\n") {
             bytes.push(b'\n');
         }
-        bytes.extend_from_slice(path.as_bytes());
-        bytes.push(b'\n');
+        for path in new {
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(b'\n');
+        }
         std::fs::write(&file, bytes)?;
     }
-    let mut index = repo.index()?;
     index.add_path(Path::new(ALLOW_FILE))?;
+    Ok(())
+}
+
+/// Let `path` through the guard on its own: record it (see `record_allowances`),
+/// stage `.nsit-allow-secrets` and write the repository's index.
+#[allow(dead_code)] // the plan's entry point; `commit` uses `record_allowances`, which leaves the index file to it
+pub fn allow(repo: &Repository, path: &str) -> Result<(), NsitError> {
+    let mut index = repo.index()?;
+    record_allowances(repo, &mut index, &[path.to_string()])?;
     index.write()?;
     Ok(())
 }
 
 // ---- scanning ------------------------------------------------------------------------
 
-/// Check the staged files at `candidates` (repository-relative paths) against
-/// the guard. "Staged" is the repository's index as it is in memory now, which
-/// is what `commit` has just filled and not yet written: a refusal can leave the
-/// index file untouched because nothing here needs it on disk. Paths allowed in
-/// `.nsit-allow-secrets` are skipped. One hit per refused path, sorted.
-pub fn scan(repo: &Repository, candidates: &[PathBuf]) -> Result<Vec<SecretHit>, NsitError> {
+/// `scan_index` over the repository's own index (the one in memory, which is
+/// what a command has filled and not yet written).
+#[allow(dead_code)] // the plan's entry point; `commit` passes the index it holds to `scan_index`
+pub fn scan(repo: &Repository, candidates: &[RawPath]) -> Result<Vec<SecretHit>, NsitError> {
     let index = repo.index()?;
-    scan_index(repo, &index, candidates)
+    scan_index(repo, &index, candidates, &[])
 }
 
-fn scan_index(
+/// Check the staged files at `candidates` (raw repository-relative paths) in
+/// `index` against the guard. Paths allowed in the staged `.nsit-allow-secrets`,
+/// or named in `also_allowed` (what `--allow-secret` asks for, before it is
+/// recorded), are skipped. One hit per refused path, sorted.
+///
+/// Every candidate must be in the index: a path the guard cannot find is an
+/// error, not a path it may skip. (A commit's candidates are what the index adds
+/// or changes, deletions excluded, so this does not happen; if it ever does, the
+/// guard must not let the file through unread.)
+pub(crate) fn scan_index(
     repo: &Repository,
     index: &Index,
-    candidates: &[PathBuf],
+    candidates: &[RawPath],
+    also_allowed: &[String],
 ) -> Result<Vec<SecretHit>, NsitError> {
-    let allowed = allowed_paths(repo, index)?;
+    let mut allowed = allowed_paths(repo, index)?;
+    allowed.extend(also_allowed.iter().map(|path| path.as_bytes().to_vec()));
+    let staged = entries_at(index, candidates);
     let mut hits = Vec::new();
     for candidate in candidates {
-        let path = slash(candidate);
-        if allowed.contains(&path) {
+        if allowed.contains(candidate.as_slice()) {
             continue;
         }
-        // Not staged (it was deleted): nothing would be committed.
-        let Some(staged) = entry(index, &path) else {
-            continue;
+        let Some(file) = staged.get(candidate) else {
+            return Err(NsitError::Other(format!(
+                "cannot check {} for secrets: it is not in the index (this is a bug in nsit)",
+                display(candidate)
+            )));
         };
-        if staged.mode == GITLINK {
+        if file.mode == GITLINK {
             continue;
         }
-        let reason = match name_hit(&path) {
+        let reason = match name_hit(candidate) {
             Some(reason) => Some(reason),
             None => {
-                let start = read_start(repo, staged.id, SCAN_LIMIT)?;
-                content_hit(&path, &start).map(str::to_string)
+                let start = read_start(repo, file.id, SCAN_LIMIT)?;
+                content_hit(candidate, &start).map(str::to_string)
             }
         };
         if let Some(reason) = reason {
-            hits.push(SecretHit { path, reason });
+            hits.push(SecretHit {
+                path: display(candidate),
+                reason,
+            });
         }
     }
     hits.sort_by(|a, b| a.path.cmp(&b.path));
@@ -230,7 +305,23 @@ fn scan_index(
 mod tests {
     use super::*;
     use crate::git::stage::stage_all;
-    use crate::test_support::local_repo;
+    use crate::test_support::{commit_file, local_repo, stage_raw, write_file as write};
+
+    fn hit(path: &str, content: &[u8]) -> Option<&'static str> {
+        content_hit(path.as_bytes(), content)
+    }
+
+    fn name(path: &str) -> Option<String> {
+        name_hit(path.as_bytes())
+    }
+
+    fn scan_it(
+        repo: &Repository,
+        index: &Index,
+        candidates: &[RawPath],
+    ) -> Result<Vec<SecretHit>, NsitError> {
+        scan_index(repo, index, candidates, &[])
+    }
 
     // ---- names ---------------------------------------------------------------------
 
@@ -257,7 +348,7 @@ mod tests {
             "credentials.json",
             "gcp/credentials.json",
         ] {
-            let reason = name_hit(path).unwrap_or_else(|| panic!("{path} should be flagged"));
+            let reason = name(path).unwrap_or_else(|| panic!("{path} should be flagged"));
             assert!(reason.starts_with("name matches "), "{reason}");
         }
     }
@@ -281,16 +372,16 @@ mod tests {
             ".npmrc",
             ".pypirc",
         ] {
-            assert_eq!(name_hit(path), None, "{path} should pass");
+            assert_eq!(name(path), None, "{path} should pass");
         }
     }
 
     #[test]
     fn a_name_hit_says_which_pattern_matched() {
-        assert_eq!(name_hit(".env").unwrap(), "name matches .env");
-        assert_eq!(name_hit(".env.dev").unwrap(), "name matches .env.*");
-        assert_eq!(name_hit("a.pem").unwrap(), "name matches *.pem");
-        assert_eq!(name_hit("id_rsa").unwrap(), "name matches id_rsa*");
+        assert_eq!(name(".env").unwrap(), "name matches .env");
+        assert_eq!(name(".env.dev").unwrap(), "name matches .env.*");
+        assert_eq!(name("a.pem").unwrap(), "name matches *.pem");
+        assert_eq!(name("id_rsa").unwrap(), "name matches id_rsa*");
     }
 
     // ---- content -------------------------------------------------------------------
@@ -306,7 +397,7 @@ mod tests {
         ] {
             let text = format!("notes\n{header}\nabc\n");
             assert_eq!(
-                content_hit("notes.txt", text.as_bytes()),
+                hit("notes.txt", text.as_bytes()),
                 Some("contains a private key"),
                 "{header}"
             );
@@ -316,11 +407,7 @@ mod tests {
             "-----BEGIN CERTIFICATE-----",
             "BEGIN PRIVATE KEY",
         ] {
-            assert_eq!(
-                content_hit("a.txt", harmless.as_bytes()),
-                None,
-                "{harmless}"
-            );
+            assert_eq!(hit("a.txt", harmless.as_bytes()), None, "{harmless}");
         }
     }
 
@@ -329,79 +416,67 @@ mod tests {
         let ins = format!("ins_{}", "a1B2-_".repeat(5));
         let gfk = format!("gfk_{}", "x".repeat(30));
         assert_eq!(
-            content_hit("a.txt", format!("token={ins}").as_bytes()),
+            hit("a.txt", format!("token={ins}").as_bytes()),
             Some("contains an Insitio token")
         );
         assert_eq!(
-            content_hit("a.txt", gfk.as_bytes()),
+            hit("a.txt", gfk.as_bytes()),
             Some("contains an Insitio token")
         );
         // One character short: not a token.
         assert_eq!(
-            content_hit("a.txt", format!("ins_{}", "a".repeat(29)).as_bytes()),
+            hit("a.txt", format!("ins_{}", "a".repeat(29)).as_bytes()),
             None
         );
 
         for prefix in ["ghp", "gho", "ghu", "ghs", "ghr"] {
             let token = format!("{prefix}_{}", "Z9".repeat(18));
             assert_eq!(
-                content_hit("a.txt", token.as_bytes()),
+                hit("a.txt", token.as_bytes()),
                 Some("contains a GitHub token"),
                 "{prefix}"
             );
         }
         assert_eq!(
-            content_hit("a.txt", format!("ghp_{}", "a".repeat(35)).as_bytes()),
+            hit("a.txt", format!("ghp_{}", "a".repeat(35)).as_bytes()),
             None
         );
         assert_eq!(
-            content_hit("a.txt", format!("ghx_{}", "a".repeat(40)).as_bytes()),
+            hit("a.txt", format!("ghx_{}", "a".repeat(40)).as_bytes()),
             None
         );
 
         assert_eq!(
-            content_hit("a.txt", b"key = AKIAIOSFODNN7EXAMPLE"),
+            hit("a.txt", b"key = AKIAIOSFODNN7EXAMPLE"),
             Some("contains an AWS access key")
         );
-        assert_eq!(content_hit("a.txt", b"AKIAIOSFODNN7EXAMPL"), None);
-        assert_eq!(content_hit("a.txt", b"akiaiosfodnn7example1"), None);
+        assert_eq!(hit("a.txt", b"AKIAIOSFODNN7EXAMPL"), None);
+        assert_eq!(hit("a.txt", b"akiaiosfodnn7example1"), None);
     }
 
     #[test]
     fn npmrc_and_pypirc_are_flagged_only_with_an_auth_line() {
         let npm_token = b"//registry.npmjs.org/:_authToken=abc123\n";
+        assert_eq!(hit(".npmrc", npm_token), Some("contains credentials"));
         assert_eq!(
-            content_hit(".npmrc", npm_token),
+            hit("web/.npmrc", b"//host/:_AUTHTOKEN=x"),
             Some("contains credentials")
         );
         assert_eq!(
-            content_hit("web/.npmrc", b"//host/:_AUTHTOKEN=x"),
+            hit(".pypirc", b"[pypi]\nusername = me\npassword = hunter2\n"),
             Some("contains credentials")
         );
-        assert_eq!(
-            content_hit(".pypirc", b"[pypi]\nusername = me\npassword = hunter2\n"),
-            Some("contains credentials")
-        );
-        assert_eq!(
-            content_hit(".npmrc", b"registry=https://r.example/\n"),
-            None
-        );
-        assert_eq!(
-            content_hit(".pypirc", b"[distutils]\nindex-servers = pypi\n"),
-            None
-        );
+        assert_eq!(hit(".npmrc", b"registry=https://r.example/\n"), None);
+        assert_eq!(hit(".pypirc", b"[distutils]\nindex-servers = pypi\n"), None);
         // The same words in an ordinary file are not a finding.
-        assert_eq!(
-            content_hit("notes.txt", b"the password is in the vault"),
-            None
-        );
+        assert_eq!(hit("notes.txt", b"the password is in the vault"), None);
     }
 
     #[test]
     fn a_reason_never_contains_the_secret() {
         let secret = format!("ins_{}", "q".repeat(40));
         let text = format!("-----BEGIN RSA PRIVATE KEY-----\n{secret}\nAKIAIOSFODNN7EXAMPLE");
-        let reason = content_hit("a.txt", text.as_bytes()).unwrap();
+        let reason = hit("a.txt", text.as_bytes()).unwrap();
         assert!(
             !reason.contains("qqqq") && !reason.contains("AKIA"),
             "{reason}"
@@ -409,18 +484,30 @@ mod tests {
     }
 
     #[test]
-    fn binary_content_is_not_scanned_but_a_late_nul_is_not_binary() {
+    fn binary_content_gets_the_key_rule_only_and_a_late_nul_is_not_binary() {
         let mut binary = b"\x89PNG\r\n\x1a\n\0\0".to_vec();
         binary.extend_from_slice(b"-----BEGIN PRIVATE KEY-----");
-        assert_eq!(content_hit("logo.png", &binary), None);
+        // A private key header is found even after a NUL: key files do start with stray bytes.
+        assert_eq!(hit("logo.png", &binary), Some("contains a private key"));
+        // The token and login rules read text only.
+        let mut tokens = b"\0".to_vec();
+        tokens.extend_from_slice(
+            format!(
+                "ghp_{} ins_{} AKIAIOSFODNN7EXAMPLE",
+                "a".repeat(40),
+                "b".repeat(40)
+            )
+            .as_bytes(),
+        );
+        assert_eq!(hit("blob.bin", &tokens), None);
+        let mut npmrc = b"\0".to_vec();
+        npmrc.extend_from_slice(b"//host/:_authToken=abc");
+        assert_eq!(hit(".npmrc", &npmrc), None);
 
         let mut late = vec![b'a'; BINARY_PROBE];
         late.push(0);
         late.extend_from_slice(b"-----BEGIN PRIVATE KEY-----");
-        assert_eq!(
-            content_hit("odd.txt", &late),
-            Some("contains a private key")
-        );
+        assert_eq!(hit("odd.txt", &late), Some("contains a private key"));
     }
 
     // ---- the allow file ------------------------------------------------------------
@@ -428,28 +515,29 @@ mod tests {
     #[test]
     fn the_allow_file_ignores_comments_blanks_and_whitespace() {
         let list = parse_allow_list(
-            "# why these are fine\n\n.env\r\n  config/.env.local  \n#.hidden\n\t\nsecrets/a b.pem\n",
+            b"# why these are fine\n\n.env\r\n  config/.env.local  \n#.hidden\n\t\nsecrets/a b.pem\n",
         );
-        let want: BTreeSet<String> = [".env", "config/.env.local", "secrets/a b.pem"]
+        let want: BTreeSet<RawPath> = [".env", "config/.env.local", "secrets/a b.pem"]
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| s.as_bytes().to_vec())
             .collect();
         assert_eq!(list, want);
     }
 
     #[test]
+    fn the_allow_file_can_name_a_path_that_is_not_text() {
+        let list = parse_allow_list(b"donn\xe9es/.env\n# note\n");
+        assert_eq!(list.len(), 1);
+        assert!(list.contains(&b"donn\xe9es/.env"[..]));
+    }
+
+    #[test]
     fn allow_entries_are_exact_paths_not_patterns() {
-        let list = parse_allow_list("*.pem\n.env*\nsrc/\n");
-        assert!(list.contains("*.pem") && !list.contains("a.pem"));
+        let list = parse_allow_list(b"*.pem\n.env*\nsrc/\n");
+        assert!(list.contains(&b"*.pem"[..]) && !list.contains(&b"a.pem"[..]));
     }
 
     // ---- scanning staged files -----------------------------------------------------
-
-    fn write(repo: &Repository, rel: &str, content: impl AsRef<[u8]>) {
-        let path = repo.workdir().unwrap().join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, content).unwrap();
-    }
 
     fn staged(repo: &Repository) -> Index {
         let mut index = repo.index().unwrap();
@@ -457,8 +545,8 @@ mod tests {
         index
     }
 
-    fn paths(names: &[&str]) -> Vec<PathBuf> {
-        names.iter().map(PathBuf::from).collect()
+    fn paths(names: &[&str]) -> Vec<RawPath> {
+        names.iter().map(|n| n.as_bytes().to_vec()).collect()
     }
 
     fn hit_paths(hits: &[SecretHit]) -> Vec<&str> {
@@ -479,7 +567,7 @@ mod tests {
         write(&repo, "src/ok.rs", "fn main() {}\n");
         let index = staged(&repo);
         let candidates = paths(&[".env", ".env.example", "notes/deploy.txt", "src/ok.rs"]);
-        let hits = scan_index(&repo, &index, &candidates).unwrap();
+        let hits = scan_it(&repo, &index, &candidates).unwrap();
         assert_eq!(hit_paths(&hits), [".env", "notes/deploy.txt"]);
         assert_eq!(hits[0].reason, "name matches .env");
         assert_eq!(hits[1].reason, "contains a private key");
@@ -493,21 +581,105 @@ mod tests {
         let index = staged(&repo);
         // Edited after staging: what would be committed is still harmless.
         write(&repo, "config.txt", "-----BEGIN PRIVATE KEY-----\n");
-        assert!(scan_index(&repo, &index, &paths(&["config.txt"]))
+        assert!(scan_it(&repo, &index, &paths(&["config.txt"]))
             .unwrap()
             .is_empty());
     }
 
     #[test]
-    fn scan_skips_paths_that_are_not_staged() {
+    fn a_candidate_the_index_does_not_have_is_an_error_not_a_skip() {
         let dir = tempfile::tempdir().unwrap();
         let repo = local_repo(dir.path());
         write(&repo, ".env", "KEY=1\n");
         let index = repo.index().unwrap();
-        // Only the candidate list names it; nothing is staged.
-        assert!(scan_index(&repo, &index, &paths(&[".env", "gone.pem"]))
-            .unwrap()
-            .is_empty());
+        // Only the candidate list names it; nothing is staged. The guard must not
+        // treat what it cannot find as safe.
+        for missing in [".env", "gone.pem", "deep/er/missing.txt"] {
+            let err = scan_it(&repo, &index, &paths(&[missing])).unwrap_err();
+            assert!(matches!(err, NsitError::Other(_)), "{missing}: {err:?}");
+            assert!(err.to_string().contains(missing), "{err}");
+            assert!(err.to_string().contains("not in the index"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_text_is_judged_by_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        // A Latin-1 é (0xE9) is not UTF-8. The base names are what the rules see.
+        stage_raw(&repo, b"donn\xe9es/.env", b"KEY=1\n");
+        stage_raw(&repo, b"donn\xe9es/.env.example", b"KEY=\n");
+        stage_raw(&repo, b"d\xe9/server.PEM", b"x");
+        stage_raw(&repo, b"d\xe9/notes.txt", b"fine");
+        stage_raw(&repo, b"\xff\xfe/id_rsa", b"x");
+        let index = repo.index().unwrap();
+        let candidates = vec![
+            b"donn\xe9es/.env".to_vec(),
+            b"donn\xe9es/.env.example".to_vec(),
+            b"d\xe9/server.PEM".to_vec(),
+            b"d\xe9/notes.txt".to_vec(),
+            b"\xff\xfe/id_rsa".to_vec(),
+        ];
+        let hits = scan_it(&repo, &index, &candidates).unwrap();
+        let reasons: Vec<&str> = hits.iter().map(|h| h.reason.as_str()).collect();
+        assert_eq!(hits.len(), 3, "{hits:?}");
+        assert!(reasons.contains(&"name matches .env"), "{reasons:?}");
+        assert!(reasons.contains(&"name matches *.pem"), "{reasons:?}");
+        assert!(reasons.contains(&"name matches id_rsa*"), "{reasons:?}");
+        // The path shown is the text form; the decision was made on the bytes.
+        assert!(
+            hits.iter().any(|h| h.path == "donn\u{fffd}es/.env"),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn a_secret_inside_a_file_whose_name_is_not_text_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        let token = format!("ghp_{}", "Zy9".repeat(14));
+        stage_raw(
+            &repo,
+            b"caf\xe9/notes.txt",
+            format!("TOKEN={token}\n").as_bytes(),
+        );
+        stage_raw(
+            &repo,
+            b"caf\xe9/key.txt",
+            b"-----BEGIN RSA PRIVATE KEY-----\nAA\n",
+        );
+        stage_raw(&repo, b"caf\xe9/ok.txt", b"nothing here");
+        let index = repo.index().unwrap();
+        let candidates = vec![
+            b"caf\xe9/notes.txt".to_vec(),
+            b"caf\xe9/key.txt".to_vec(),
+            b"caf\xe9/ok.txt".to_vec(),
+        ];
+        let hits = scan_it(&repo, &index, &candidates).unwrap();
+        let reasons: BTreeSet<&str> = hits.iter().map(|h| h.reason.as_str()).collect();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(
+            reasons.contains("contains a GitHub token")
+                && reasons.contains("contains a private key")
+        );
+    }
+
+    #[test]
+    fn a_path_in_also_allowed_is_matched_on_bytes_so_a_look_alike_is_not_let_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        // d\u{fffd}/.env (valid UTF-8, a real U+FFFD) and d\xe9/.env look the same as text.
+        stage_raw(&repo, "d\u{fffd}/.env".as_bytes(), b"A=1");
+        stage_raw(&repo, b"d\xe9/.env", b"B=2");
+        let index = repo.index().unwrap();
+        let candidates = vec!["d\u{fffd}/.env".as_bytes().to_vec(), b"d\xe9/.env".to_vec()];
+        let allowed = vec!["d\u{fffd}/.env".to_string()];
+        let hits = scan_index(&repo, &index, &candidates, &allowed).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "only the one that was named is allowed: {hits:?}"
+        );
     }
 
     #[test]
@@ -518,7 +690,7 @@ mod tests {
         write(&repo, "k.pem", "x");
         write(&repo, ALLOW_FILE, "# reviewed\n.env\n");
         let index = staged(&repo);
-        let hits = scan_index(&repo, &index, &paths(&[".env", "k.pem"])).unwrap();
+        let hits = scan_it(&repo, &index, &paths(&[".env", "k.pem"])).unwrap();
         assert_eq!(hit_paths(&hits), ["k.pem"]);
     }
 
@@ -530,7 +702,7 @@ mod tests {
         let index = staged(&repo);
         // Written (or edited) after staging, so the index does not have it.
         write(&repo, ALLOW_FILE, ".env\n");
-        let hits = scan_index(&repo, &index, &paths(&[".env"])).unwrap();
+        let hits = scan_it(&repo, &index, &paths(&[".env"])).unwrap();
         assert_eq!(hit_paths(&hits), [".env"]);
     }
 
@@ -565,22 +737,27 @@ mod tests {
         early.extend_from_slice(&padding);
         write(&repo, "early.txt", &early);
         let index = staged(&repo);
-        let hits = scan_index(&repo, &index, &paths(&["late.txt", "early.txt"])).unwrap();
+        let hits = scan_it(&repo, &index, &paths(&["late.txt", "early.txt"])).unwrap();
         assert_eq!(hit_paths(&hits), ["early.txt"]);
     }
 
     #[test]
-    fn a_binary_file_is_judged_by_name_only() {
+    fn a_binary_file_is_judged_by_name_and_key_header_but_not_by_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let repo = local_repo(dir.path());
-        let mut bytes = vec![0u8, 1, 2, 3];
-        bytes.extend_from_slice(b"-----BEGIN PRIVATE KEY-----");
-        write(&repo, "image.bin", &bytes);
-        write(&repo, "cert.p12", &bytes);
+        let mut with_key = vec![0u8, 1, 2, 3];
+        with_key.extend_from_slice(b"-----BEGIN PRIVATE KEY-----");
+        let mut with_token = vec![0u8, 1, 2, 3];
+        with_token.extend_from_slice(format!("ghp_{}", "q".repeat(40)).as_bytes());
+        write(&repo, "image.bin", &with_token);
+        write(&repo, "cert.p12", &with_token);
+        write(&repo, "key.dat", &with_key);
         let index = staged(&repo);
-        let hits = scan_index(&repo, &index, &paths(&["image.bin", "cert.p12"])).unwrap();
-        assert_eq!(hit_paths(&hits), ["cert.p12"]);
+        let candidates = paths(&["image.bin", "cert.p12", "key.dat"]);
+        let hits = scan_it(&repo, &index, &candidates).unwrap();
+        assert_eq!(hit_paths(&hits), ["cert.p12", "key.dat"]);
         assert_eq!(hits[0].reason, "name matches *.p12");
+        assert_eq!(hits[1].reason, "contains a private key");
     }
 
     #[test]
@@ -603,7 +780,7 @@ mod tests {
             path: b"vendor/lib".to_vec(),
         };
         index.add(&entry).unwrap();
-        let hits = scan_index(&repo, &index, &paths(&["vendor/lib"])).unwrap();
+        let hits = scan_it(&repo, &index, &paths(&["vendor/lib"])).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -627,7 +804,7 @@ mod tests {
         let index = reopened.index().unwrap();
         assert!(entry(&index, ALLOW_FILE).is_some());
         let allowed = allowed_paths(&reopened, &index).unwrap();
-        assert!(allowed.contains(".env") && allowed.contains("k/server.pem"));
+        assert!(allowed.contains(&b".env"[..]) && allowed.contains(&b"k/server.pem"[..]));
     }
 
     #[test]
@@ -656,12 +833,57 @@ mod tests {
     }
 
     #[test]
+    fn record_allowances_writes_all_new_paths_at_once_and_leaves_the_index_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        commit_file(&repo, "a.txt", "a");
+        let index_file = repo.path().join("index");
+        let before = std::fs::read(&index_file).unwrap();
+
+        let mut index = repo.index().unwrap();
+        let wanted: Vec<String> = [".env", "k.pem", ".env"].map(String::from).to_vec();
+        record_allowances(&repo, &mut index, &wanted).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(ALLOW_FILE)).unwrap(),
+            ".env\nk.pem\n"
+        );
+        assert!(entry(&index, ALLOW_FILE).is_some(), "staged in memory");
+        assert_eq!(
+            std::fs::read(&index_file).unwrap(),
+            before,
+            "the index file was written"
+        );
+
+        // Paths already listed add nothing.
+        record_allowances(&repo, &mut index, &[".env".to_string()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(ALLOW_FILE)).unwrap(),
+            ".env\nk.pem\n"
+        );
+    }
+
+    #[test]
+    fn record_allowances_checks_every_path_before_it_writes_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        let mut index = repo.index().unwrap();
+        let wanted: Vec<String> = [".env", "#not-recordable.env"].map(String::from).to_vec();
+        let err = record_allowances(&repo, &mut index, &wanted).unwrap_err();
+        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
+        assert!(
+            !dir.path().join(ALLOW_FILE).exists(),
+            "the good path was recorded anyway"
+        );
+        assert!(entry(&index, ALLOW_FILE).is_none());
+    }
+
+    #[test]
     fn scanning_never_writes_the_index_file() {
         let dir = tempfile::tempdir().unwrap();
         let repo = local_repo(dir.path());
         write(&repo, ".env", "KEY=1\n");
         let index = staged(&repo);
-        let _ = scan_index(&repo, &index, &paths(&[".env"])).unwrap();
+        let _ = scan_it(&repo, &index, &paths(&[".env"])).unwrap();
         assert!(
             !repo.path().join("index").exists(),
             "the guard touched the index file"

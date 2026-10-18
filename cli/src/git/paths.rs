@@ -24,6 +24,17 @@ pub fn slash(path: &Path) -> String {
     }
 }
 
+/// A path exactly as the index stores it: bytes, forward slashes. Not always
+/// text (on Unix a file name may be any bytes but NUL and `/`), so anything that
+/// has to *decide* something about a path works on these and never on `display`.
+pub type RawPath = Vec<u8>;
+
+/// A raw path for people to read: invalid UTF-8 shows as U+FFFD. For messages
+/// only; two different raw paths can look the same here.
+pub fn display(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).into_owned()
+}
+
 /// The working directory of `repo`, or a usage error for a bare repository.
 pub fn workdir(repo: &Repository) -> Result<&Path, NsitError> {
     repo.workdir().ok_or_else(|| {

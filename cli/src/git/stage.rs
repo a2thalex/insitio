@@ -5,13 +5,13 @@
 //! decide when to `write()` it. That is how `commit` can refuse (exit 5) and
 //! leave the index on disk exactly as it was.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use git2::{Commit, Delta, ErrorCode, Index, IndexAddOption, IndexEntry, Oid, Repository, Tree};
 
-use super::paths::{slash, workdir};
+use super::paths::{slash, workdir, RawPath};
 use crate::error::NsitError;
 
 /// Stage every change in the working directory, new files included. Files
@@ -187,19 +187,38 @@ pub fn merge_heads(repo: &Repository) -> Result<Vec<Oid>, NsitError> {
 }
 
 /// The paths a commit made from `index` would add or change compared with
-/// `base` (`None`: an empty tree, as before the first commit). Deleted paths
-/// are not included: there is nothing left to check in them.
+/// `base` (`None`: an empty tree, as before the first commit), as raw bytes.
+/// Deleted paths are not included: there is nothing left to check in them.
 pub fn changed_paths(
     repo: &Repository,
     index: &Index,
     base: Option<&Tree<'_>>,
-) -> Result<Vec<PathBuf>, NsitError> {
+) -> Result<Vec<RawPath>, NsitError> {
     let diff = repo.diff_tree_to_index(base, Some(index), None)?;
     Ok(diff
         .deltas()
         .filter(|delta| delta.status() != Delta::Deleted)
-        .filter_map(|delta| delta.new_file().path().map(Path::to_path_buf))
+        .filter_map(|delta| delta.new_file().path_bytes().map(<[u8]>::to_vec))
         .collect())
+}
+
+/// `GIT_INDEX_ENTRY_STAGEMASK`: the two bits of an entry's flags that hold its
+/// merge stage (0 is a normal entry, 1 to 3 are the sides of a conflict).
+const STAGE_MASK: u16 = 0x3000;
+
+/// The normal (stage 0) index entries at the given raw paths, found by comparing
+/// bytes. `Index::get_path` takes a `Path`, which cannot carry every byte
+/// string (a file name that is not UTF-8 on Windows, and on any system one that
+/// merely looks different once turned into text), so a lookup through it can
+/// miss a file that is in the index. A path that is not in the result is not in
+/// the index.
+pub fn entries_at(index: &Index, wanted: &[RawPath]) -> HashMap<RawPath, IndexEntry> {
+    let wanted: HashSet<&[u8]> = wanted.iter().map(Vec::as_slice).collect();
+    index
+        .iter()
+        .filter(|entry| entry.flags & STAGE_MASK == 0 && wanted.contains(entry.path.as_slice()))
+        .map(|entry| (entry.path.clone(), entry))
+        .collect()
 }
 
 /// The first `limit` bytes of a blob. Streams from the object database where it
@@ -221,13 +240,13 @@ fn read_start_from_blob(repo: &Repository, id: Oid, limit: usize) -> Result<Vec<
     Ok(content[..content.len().min(limit)].to_vec())
 }
 
-/// The paths with unresolved merge conflicts in `index`, sorted.
-pub fn conflicted_paths(index: &Index) -> Result<Vec<String>, NsitError> {
+/// The paths with unresolved merge conflicts in `index`, sorted, as raw bytes.
+pub fn conflicted_paths(index: &Index) -> Result<Vec<RawPath>, NsitError> {
     let mut paths = BTreeSet::new();
     for conflict in index.conflicts()? {
         let conflict = conflict?;
         if let Some(side) = conflict.our.or(conflict.their).or(conflict.ancestor) {
-            paths.insert(String::from_utf8_lossy(&side.path).into_owned());
+            paths.insert(side.path);
         }
     }
     Ok(paths.into_iter().collect())
@@ -236,13 +255,7 @@ pub fn conflicted_paths(index: &Index) -> Result<Vec<String>, NsitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::local_repo;
-
-    fn write(repo: &Repository, rel: &str, text: &str) {
-        let path = repo.workdir().unwrap().join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
+    use crate::test_support::{local_repo, stage_raw, write_file as write};
 
     fn staged_names(repo: &Repository) -> Vec<String> {
         let mut index = repo.index().unwrap();
@@ -487,7 +500,7 @@ mod tests {
         stage_all(&mut index).unwrap();
         let head_tree = head_commit(&repo).unwrap().unwrap().tree().unwrap();
         let paths = changed_paths(&repo, &index, Some(&head_tree)).unwrap();
-        assert_eq!(paths, [PathBuf::from("edit.txt"), PathBuf::from("new.txt")]);
+        assert_eq!(paths, [b"edit.txt".to_vec(), b"new.txt".to_vec()]);
         // Before the first commit everything staged is new.
         let empty_dir = tempfile::tempdir().unwrap();
         let fresh = local_repo(empty_dir.path());
@@ -495,7 +508,34 @@ mod tests {
         let mut index = fresh.index().unwrap();
         stage_all(&mut index).unwrap();
         let paths = changed_paths(&fresh, &index, None).unwrap();
-        assert_eq!(paths, [PathBuf::from("x.txt")]);
+        assert_eq!(paths, [b"x.txt".to_vec()]);
+    }
+
+    #[test]
+    fn changed_paths_and_entries_keep_names_that_are_not_text_as_raw_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        let odd = b"donn\xe9es/.env".to_vec();
+        let plain = b"plain.txt".to_vec();
+        stage_raw(&repo, &odd, b"secret");
+        stage_raw(&repo, &plain, b"fine");
+        let index = repo.index().unwrap();
+        let mut paths = changed_paths(&repo, &index, None).unwrap();
+        paths.sort();
+        assert_eq!(paths, [odd.clone(), plain.clone()]);
+
+        // Found by their bytes, where a lookup by the lossy text would miss.
+        let found = entries_at(&index, &paths);
+        assert_eq!(found.len(), 2);
+        assert!(found.contains_key(&odd));
+        let lossy = String::from_utf8_lossy(&odd).into_owned();
+        assert!(
+            entry(&index, &lossy).is_none(),
+            "the text form is a different path"
+        );
+        // Only what was asked for, and only normal entries.
+        assert_eq!(entries_at(&index, std::slice::from_ref(&plain)).len(), 1);
+        assert!(entries_at(&index, &[b"missing".to_vec()]).is_empty());
     }
 
     #[test]

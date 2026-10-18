@@ -22,7 +22,7 @@ use crate::error::NsitError;
 use crate::git::open_repo;
 use crate::git::paths::slash;
 use crate::git::stage::{current_branch, head_commit};
-use crate::output::{clean_for_terminal, Out};
+use crate::output::{for_display, strip_controls, Out};
 
 /// Where `switch` ended up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -49,11 +49,7 @@ pub fn run(
 }
 
 fn describe(done: &Switched, tty: bool) -> String {
-    let name = if tty {
-        clean_for_terminal(&done.branch)
-    } else {
-        done.branch.clone()
-    };
+    let name = for_display(&done.branch, tty);
     if done.already_there {
         format!("Already on '{name}'")
     } else if done.created {
@@ -148,10 +144,7 @@ fn checkout_safely(repo: &Repository, target: &Commit<'_>, name: &str) -> Result
         Ok(()) => Ok(()),
         Err(e) if e.code() == ErrorCode::Conflict => {
             let files = in_the_way.borrow();
-            let files: Vec<String> = files
-                .iter()
-                .map(|f| f.chars().filter(|c| !c.is_control()).collect())
-                .collect();
+            let files: Vec<String> = files.iter().map(|f| strip_controls(f)).collect();
             Err(NsitError::Other(if files.is_empty() {
                 format!(
                     "cannot switch to {name}: it would overwrite changes that are not committed"

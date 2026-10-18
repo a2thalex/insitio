@@ -352,6 +352,27 @@ fn a_refused_commit_leaves_the_index_exactly_as_it_was() {
 }
 
 #[test]
+fn a_private_key_in_a_file_that_looks_binary_is_refused() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.unicode_repo();
+    let before = head_sha(&dir);
+    // One stray NUL byte in front is all it takes to look binary.
+    let mut key = vec![0u8];
+    key.extend_from_slice(b"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAhidden-key-body\n");
+    std::fs::write(dir.join("deploy.dat"), &key).unwrap();
+    let refused = sandbox.nsit(&dir, &["commit", "-m", "x"]);
+    assert_eq!(code(&refused), 5, "{}", stderr(&refused));
+    let message = stderr(&refused);
+    assert!(
+        message.contains("deploy.dat (contains a private key)"),
+        "{message}"
+    );
+    assert!(!message.contains("hidden-key-body"), "{message}");
+    assert_eq!(head_sha(&dir), before);
+    assert_eq!(staged(&dir), ["a.txt"]);
+}
+
+#[test]
 fn the_guard_applies_to_staged_commits_and_never_to_a_file_that_was_not_staged() {
     let sandbox = Sandbox::new();
     let dir = sandbox.unicode_repo();
@@ -411,6 +432,36 @@ fn allow_secret_records_the_path_and_later_changes_to_it_commit_without_the_flag
         "{}",
         stderr(&refused)
     );
+}
+
+#[test]
+fn a_bad_second_allow_secret_path_records_nothing_for_the_first() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.unicode_repo();
+    let before = head_sha(&dir);
+    write(&dir, ".env", "TOKEN=abc\n");
+    // In the commit, but a name the allow file cannot hold (it would read as a comment).
+    write(&dir, "#notes.env", "x\n");
+    let out = sandbox.nsit(
+        &dir,
+        &[
+            "commit",
+            "-m",
+            "x",
+            "--allow-secret",
+            ".env",
+            "--allow-secret",
+            "#notes.env",
+        ],
+    );
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    assert!(stderr(&out).contains("#notes.env"), "{}", stderr(&out));
+    assert!(
+        !dir.join(".nsit-allow-secrets").exists(),
+        "the first path was recorded"
+    );
+    assert_eq!(staged(&dir), ["a.txt"]);
+    assert_eq!(head_sha(&dir), before);
 }
 
 #[test]

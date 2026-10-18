@@ -6,17 +6,23 @@
 //! in `auth` and `progress`; every network operation goes through
 //! `auth::run_remote`. Naming a repository is `crate::repo_ref`.
 //!
-//! The local commands share three more modules: `paths` (what a person typed
-//! to a path in the repository), `stage` (staging and the questions about
-//! the repository's state) and `secrets` (the guard `commit` applies).
+//! The local commands share these modules: `paths` (what a person typed to a
+//! path in the repository, and paths as raw bytes), `stage` (staging and the
+//! questions about the repository's state), `secrets` (the guard a commit
+//! applies), `commit` (making a commit: `nsit commit` and `nsit init`
+//! both call it), `readme` (the starter README) and `origin` (`origin` as
+//! a repository on the selected host). No command module is needed by another.
 //!
 //! What the network commands (`clone`, `pull`, `push`) will call is marked
 //! `allow(dead_code)` / `allow(unused_imports)`; the allows go away with the
 //! callers.
 
 pub mod auth;
+pub mod commit;
+pub mod origin;
 pub mod paths;
 pub mod progress;
+pub mod readme;
 pub mod secrets;
 pub mod stage;
 

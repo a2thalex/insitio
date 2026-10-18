@@ -16,7 +16,7 @@ use crate::cli::{BranchArgs, GlobalArgs};
 use crate::error::NsitError;
 use crate::git::open_repo;
 use crate::git::stage::head_commit;
-use crate::output::{clean_for_terminal, Out};
+use crate::output::{for_display, Out};
 
 /// One line of the listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -47,7 +47,7 @@ pub fn run(
             out.data(&done, |d| {
                 format!(
                     "created branch {} at {}",
-                    clean(&d.name, out.tty),
+                    for_display(&d.name, out.tty),
                     &d.sha[..7]
                 )
             })
@@ -57,7 +57,7 @@ pub fn run(
             out.data(&done, |d| {
                 format!(
                     "deleted branch {} (was {})",
-                    clean(&d.name, out.tty),
+                    for_display(&d.name, out.tty),
                     &d.sha[..7]
                 )
             })
@@ -66,14 +66,6 @@ pub fn run(
             let branches = list(&repo)?;
             out.data(&branches, |all| listing(all, out.tty))
         }
-    }
-}
-
-fn clean(text: &str, tty: bool) -> String {
-    if tty {
-        clean_for_terminal(text)
-    } else {
-        text.to_string()
     }
 }
 
@@ -103,7 +95,7 @@ fn listing(branches: &[BranchInfo], tty: bool) -> String {
             format!(
                 "{} {}",
                 if b.current { '*' } else { ' ' },
-                clean(&b.name, tty)
+                for_display(&b.name, tty)
             )
         })
         .collect::<Vec<_>>()
@@ -183,16 +175,8 @@ pub fn check_name(name: &str) -> Result<(), NsitError> {
 
 #[cfg(test)]
 mod tests {
-    use git2::build::CheckoutBuilder;
-
     use super::*;
-    use crate::test_support::{commit_file, local_repo};
-
-    fn switch(repo: &Repository, name: &str) {
-        repo.set_head(&format!("refs/heads/{name}")).unwrap();
-        repo.checkout_head(Some(CheckoutBuilder::new().force()))
-            .unwrap();
-    }
+    use crate::test_support::{checkout_branch as switch, commit_file, local_repo};
 
     fn names(repo: &Repository) -> Vec<String> {
         list(repo).unwrap().into_iter().map(|b| b.name).collect()

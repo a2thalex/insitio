@@ -853,6 +853,8 @@ describe("nsit init <name> against a server", () => {
     expect(again.code, again.stderr).toBe(1);
     expect(again.stdout).toBe("");
     expect(oneLine(again.stderr), again.stderr).toBe(true);
+    // The repository made before the server said no is left in place, and the error says so.
+    expect(again.stderr).toContain("without an origin; running nsit init taken again is safe");
     expect(readFileSync(join(cwd, "taken", ".git", "config"), "utf8")).not.toContain("origin");
   });
 

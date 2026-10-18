@@ -84,6 +84,63 @@ pub(crate) fn commit_file(repo: &Repository, name: &str, content: &str) {
         .unwrap();
 }
 
+/// Write `rel` (made with its directories) in the working directory of `repo`.
+pub(crate) fn write_file(repo: &Repository, rel: &str, content: impl AsRef<[u8]>) {
+    let path = repo.workdir().unwrap().join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+/// Point `HEAD` at `branch` and check it out, replacing the working files.
+pub(crate) fn checkout_branch(repo: &Repository, branch: &str) {
+    repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+}
+
+/// A repository on `main` with `a.txt` = "base\n" committed, and a branch
+/// `theirs` at that same commit.
+pub(crate) fn diverged_repo(dir: &Path) -> Repository {
+    let repo = local_repo(dir);
+    commit_file(&repo, "a.txt", "base\n");
+    {
+        let base = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("theirs", &base, false).unwrap();
+    }
+    repo
+}
+
+/// Start merging `branch` into `HEAD`, as `nsit pull` will: `MERGE_HEAD` is
+/// written and the index and working files are updated, with conflict markers
+/// where the two sides disagree. Nothing is committed.
+pub(crate) fn merge_branch(repo: &Repository, branch: &str) {
+    let theirs = repo.find_branch(branch, git2::BranchType::Local).unwrap();
+    let theirs = repo.reference_to_annotated_commit(theirs.get()).unwrap();
+    repo.merge(&[&theirs], None, None).unwrap();
+}
+
+/// Stage a file whose name is exactly these bytes (not necessarily text) with
+/// this content, in the repository's in-memory index, as if `nsit add` had done
+/// it. No file is made in the working directory. `Index::add` takes the bytes as
+/// they are, which `Path` cannot on every system.
+pub(crate) fn stage_raw(repo: &Repository, path: &[u8], content: &[u8]) {
+    let entry = git2::IndexEntry {
+        ctime: git2::IndexTime::new(0, 0),
+        mtime: git2::IndexTime::new(0, 0),
+        dev: 0,
+        ino: 0,
+        mode: 0o100_644,
+        uid: 0,
+        gid: 0,
+        file_size: content.len() as u32,
+        id: repo.blob(content).unwrap(),
+        flags: 0,
+        flags_extended: 0,
+        path: path.to_vec(),
+    };
+    repo.index().unwrap().add(&entry).unwrap();
+}
+
 /// A repository with a few commits, in `dir/source`.
 pub(crate) fn source_repo(dir: &Path) -> PathBuf {
     let path = dir.join("source");

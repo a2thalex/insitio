@@ -26,16 +26,17 @@ use std::path::{Path, PathBuf};
 use git2::{Repository, RepositoryInitOptions, Signature};
 use serde::Serialize;
 
-use super::commit::{commit_changes, Outcome, Request, Staging};
 use super::commit_signature;
-use super::readme::{description_of, origin_on, write_readme, Written, README};
 use super::repo::signed_in;
 use crate::api::Api;
 use crate::cli::{GlobalArgs, InitArgs};
 use crate::config::{base_url, resolve_host};
 use crate::error::NsitError;
+use crate::git::commit::{commit_changes, Outcome, Request, Staging};
+use crate::git::origin::origin_on;
+use crate::git::readme::{description_of, write_readme, Written, README};
 use crate::git::stage::{current_branch, head_commit, stage_paths};
-use crate::output::Out;
+use crate::output::{for_display, Out};
 use crate::repo_ref::{parse_repo_ref, validate_repo_name, RepoRef};
 
 /// The branch a new repository starts on.
@@ -117,7 +118,14 @@ pub fn run(args: &InitArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Resu
         .transpose()?;
 
     let wired = match (&api, &plan.remote_name) {
-        (Some(api), Some(name)) => Some(wire_remote(&repo, api, &host, name, args.public)?),
+        (Some(api), Some(name)) => {
+            let wired = wire_remote(&repo, api, &host, name, args.public);
+            // A repository made by this run stays behind if the server step fails.
+            Some(wired.map_err(|err| match created {
+                true => with_hint(err, &rerun_hint(&plan.dir, args)),
+                false => err,
+            })?)
+        }
         _ => None,
     };
     let target = wired.as_ref().and_then(|w| w.target.as_ref());
@@ -153,7 +161,61 @@ pub fn run(args: &InitArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Resu
         commit: commit.map(|id| id.to_string()),
         pushed,
     };
-    out.data(&json, |json| describe(json, args.readme))
+    out.data(&json, |json| describe(json, args.readme, out.tty))
+}
+
+/// What to tell someone whose server step failed after this run had made the
+/// local repository: where it is, that it has no origin, and how to go on.
+fn rerun_hint(dir: &Path, args: &InitArgs) -> String {
+    let again = match &args.name {
+        Some(name) => format!("nsit init {name}"),
+        None => "nsit init --remote".to_string(),
+    };
+    format!(
+        "{} is now a local repository without an origin; running {again} again is safe",
+        dir.display()
+    )
+}
+
+/// err with hint added to its one-line message. The exit code is kept: a
+/// server error stays exit 1, a refused login stays exit 3.
+fn with_hint(err: NsitError, hint: &str) -> NsitError {
+    let add = |message: String| format!("{message}; {hint}");
+    match err {
+        NsitError::Usage(message) => NsitError::Usage(add(message)),
+        NsitError::Auth(message) => NsitError::Auth(add(message)),
+        NsitError::Rejected(message) => NsitError::Rejected(add(message)),
+        NsitError::Other(message) => NsitError::Other(add(message)),
+        NsitError::Api {
+            status,
+            code,
+            message,
+        } => NsitError::Api {
+            status,
+            code,
+            message: add(message),
+        },
+        NsitError::Git(e) if e.code() != git2::ErrorCode::Auth => {
+            NsitError::Other(add(e.message().to_string()))
+        }
+        NsitError::Io(e) => NsitError::Other(add(e.to_string())),
+        other => other,
+    }
+}
+
+/// url without the user name and password, if it has any: they must never be
+/// printed (they may be a token). The authority is what follows scheme://, or
+/// the whole text for the user@host:path form, up to the first /.
+fn without_userinfo(url: &str) -> String {
+    let (prefix, rest) = match url.find("://") {
+        Some(at) => url.split_at(at + 3),
+        None => ("", url),
+    };
+    let (authority, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    match authority.rfind('@') {
+        Some(at) => format!("{prefix}{}{tail}", &authority[at + 1..]),
+        None => url.to_string(),
+    }
 }
 
 /// Work out where the repository is and what to name it on the server, from
@@ -239,7 +301,7 @@ fn wire_remote(
             json: RemoteJson {
                 owner: target.as_ref().map(|t| t.owner.clone()),
                 name: target.as_ref().map(|t| t.name.clone()),
-                clone_url: existing.url().unwrap_or_default().to_string(),
+                clone_url: without_userinfo(existing.url().unwrap_or_default()),
                 private: None,
                 created: false,
             },
@@ -318,16 +380,15 @@ pub fn push_first_commits(
     Ok(FirstPush::NotPushed)
 }
 
-fn describe(json: &InitJson, readme_asked: bool) -> String {
+fn describe(json: &InitJson, readme_asked: bool, tty: bool) -> String {
+    let clean = |text: &str| for_display(text, tty);
     let mut lines = Vec::new();
-    let branch = json.branch.as_deref().unwrap_or(INITIAL_BRANCH);
+    let branch = clean(json.branch.as_deref().unwrap_or(INITIAL_BRANCH));
+    let path = clean(&json.path);
     lines.push(if json.created {
-        format!("Created a repository in {} (branch {branch}).", json.path)
+        format!("Created a repository in {path} (branch {branch}).")
     } else {
-        format!(
-            "A repository already exists in {}; left as it is.",
-            json.path
-        )
+        format!("A repository already exists in {path}; left as it is.")
     });
     if let Some(remote) = &json.remote {
         lines.push(match (&remote.owner, &remote.name, remote.created) {
@@ -338,11 +399,16 @@ fn describe(json: &InitJson, readme_asked: bool) -> String {
                     "private"
                 };
                 format!(
-                    "Created {owner}/{name} on Insitio ({visibility}); origin is {}.",
-                    remote.clone_url
+                    "Created {}/{} on Insitio ({visibility}); origin is {}.",
+                    clean(owner),
+                    clean(name),
+                    clean(&remote.clone_url)
                 )
             }
-            _ => format!("origin is already {}; left as it is.", remote.clone_url),
+            _ => format!(
+                "origin is already {}; left as it is.",
+                clean(&remote.clone_url)
+            ),
         });
     }
     if readme_asked {
@@ -568,6 +634,140 @@ mod tests {
     }
 
     #[test]
+    fn an_origin_that_carries_a_token_is_never_echoed_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = local_repo(dir.path());
+        repo.remote(
+            "origin",
+            "https://ada:ins_secret_token_value@elsewhere.example/ada/old.git",
+        )
+        .unwrap();
+        let server = answering(created_json("https://git.example.invalid/ada/demo.git"));
+        let api = Api::new(&server.host(), Some("ins_test_token_value".into())).unwrap();
+        let wired = wire_remote(&repo, &api, &server.host(), "demo", false).unwrap();
+        assert!(!wired.json.created);
+        assert_eq!(
+            wired.json.clone_url,
+            "https://elsewhere.example/ada/old.git"
+        );
+        // Neither the JSON nor the text has it, and the config is not touched.
+        let json = InitJson {
+            path: "/work/demo".into(),
+            branch: Some("main".into()),
+            created: false,
+            remote: Some(wired.json),
+            readme: false,
+            commit: None,
+            pushed: false,
+        };
+        let shown = format!(
+            "{}{}",
+            serde_json::to_string(&json).unwrap(),
+            describe(&json, false, false)
+        );
+        assert!(
+            !shown.contains("ins_secret") && !shown.contains("ada:"),
+            "{shown}"
+        );
+        let config = std::fs::read_to_string(repo.path().join("config")).unwrap();
+        assert!(
+            config.contains("ins_secret_token_value"),
+            "origin was left as it was"
+        );
+    }
+
+    #[test]
+    fn user_info_is_taken_out_of_every_form_of_url() {
+        for (url, want) in [
+            (
+                "https://ada:tok@git.iam.bot/ada/x.git",
+                "https://git.iam.bot/ada/x.git",
+            ),
+            (
+                "https://tok@git.iam.bot:3000/ada/x.git",
+                "https://git.iam.bot:3000/ada/x.git",
+            ),
+            ("ssh://git@github.com/x/y.git", "ssh://github.com/x/y.git"),
+            ("git@github.com:x/y.git", "github.com:x/y.git"),
+            ("ada:tok@git.iam.bot/ada/x.git", "git.iam.bot/ada/x.git"),
+            ("https://a@b@git.iam.bot/x.git", "https://git.iam.bot/x.git"),
+            // Nothing to take out.
+            (
+                "https://git.iam.bot/ada/x.git",
+                "https://git.iam.bot/ada/x.git",
+            ),
+            (
+                "https://git.iam.bot/ada/a@b.git",
+                "https://git.iam.bot/ada/a@b.git",
+            ),
+            ("/local/path/repo.git", "/local/path/repo.git"),
+            ("", ""),
+        ] {
+            assert_eq!(without_userinfo(url), want, "{url}");
+        }
+    }
+
+    // ---- when the server step fails -------------------------------------------------
+
+    #[test]
+    fn a_failed_server_step_says_where_the_local_repository_is_and_that_a_rerun_is_safe() {
+        let dir = Path::new("/work/demo");
+        let named = rerun_hint(dir, &args(Some("demo"), false, false, false));
+        assert!(
+            named.contains("/work/demo") && named.contains("without an origin"),
+            "{named}"
+        );
+        assert!(
+            named.contains("running nsit init demo again is safe"),
+            "{named}"
+        );
+        let remote = rerun_hint(dir, &args(None, true, false, false));
+        assert!(
+            remote.contains("running nsit init --remote again is safe"),
+            "{remote}"
+        );
+    }
+
+    #[test]
+    fn the_hint_joins_the_error_line_and_keeps_its_exit_code() {
+        let hint = "the hint";
+        let api = NsitError::Api {
+            status: 409,
+            code: "conflict".into(),
+            message: "Repository already exists".into(),
+        };
+        let hinted = with_hint(api, hint);
+        assert_eq!(hinted.to_string(), "Repository already exists; the hint");
+        assert_eq!(hinted.exit_code(), 1);
+        assert!(matches!(hinted, NsitError::Api { status: 409, .. }));
+
+        let auth = with_hint(NsitError::Auth("not signed in".into()), hint);
+        assert_eq!(auth.exit_code(), 3);
+        assert_eq!(auth.to_string(), "not signed in; the hint");
+        let usage = with_hint(NsitError::Usage("bad name".into()), hint);
+        assert_eq!(usage.exit_code(), 2);
+        let io = with_hint(NsitError::Io(std::io::Error::other("disk")), hint);
+        assert_eq!(
+            (io.exit_code(), io.to_string().as_str()),
+            (1, "disk; the hint")
+        );
+        let git = with_hint(NsitError::Git(git2::Error::from_str("no remote")), hint);
+        assert_eq!(
+            (git.exit_code(), git.to_string().as_str()),
+            (1, "no remote; the hint")
+        );
+        // A refused login that arrived as a libgit2 error is still exit 3.
+        let refused = git2::Error::new(git2::ErrorCode::Auth, git2::ErrorClass::Http, "nope");
+        assert_eq!(with_hint(NsitError::Git(refused), hint).exit_code(), 3);
+        // One line stays one line.
+        assert!(!hinted_text(hint).contains('\n'));
+    }
+
+    fn hinted_text(hint: &str) -> String {
+        with_hint(NsitError::Other("failed".into()), hint).to_string()
+    }
+
+    #[test]
     fn a_clone_url_with_credentials_is_refused_and_origin_is_not_set() {
         let dir = tempfile::tempdir().unwrap();
         let repo = local_repo(dir.path());
@@ -689,7 +889,7 @@ mod tests {
 
     #[test]
     fn the_text_says_what_was_made() {
-        let text = describe(&sample(), true);
+        let text = describe(&sample(), true, false);
         assert_eq!(
             text,
             "Created a repository in /work/demo (branch main).\n\
@@ -706,7 +906,7 @@ mod tests {
         json.readme = false;
         json.commit = None;
         json.remote.as_mut().unwrap().created = false;
-        let text = describe(&json, true);
+        let text = describe(&json, true, false);
         assert!(
             text.contains("already exists in /work/demo; left as it is"),
             "{text}"
@@ -721,7 +921,7 @@ mod tests {
         );
         assert!(!text.contains("Committed"), "{text}");
         // Without --readme the README line is not there at all.
-        assert!(!describe(&json, false).contains("README"));
+        assert!(!describe(&json, false, false).contains("README"));
     }
 
     #[test]

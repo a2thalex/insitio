@@ -13,7 +13,7 @@ use crate::cli::{GlobalArgs, LogArgs};
 use crate::error::NsitError;
 use crate::git::open_repo;
 use crate::git::stage::head_commit;
-use crate::output::{clean_for_terminal, Out};
+use crate::output::{for_display, Out};
 
 /// How many commits `nsit log` shows without `-n`.
 const DEFAULT_COUNT: usize = 20;
@@ -80,7 +80,7 @@ fn entry_for(commit: &Commit<'_>) -> Entry {
 fn oneline(entries: &[Entry], tty: bool) -> String {
     entries
         .iter()
-        .map(|e| format!("{} {}", &e.sha[..7], terminal_safe(&e.subject, tty)))
+        .map(|e| format!("{} {}", &e.sha[..7], for_display(&e.subject, tty)))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -94,17 +94,17 @@ fn full(entries: &[Entry], tty: bool) -> String {
                 format!("commit {}", e.sha),
                 format!(
                     "Author: {} <{}>",
-                    terminal_safe(&e.author, tty),
-                    terminal_safe(&e.email, tty)
+                    for_display(&e.author, tty),
+                    for_display(&e.email, tty)
                 ),
                 format!("Date:   {}", e.date),
                 String::new(),
-                format!("    {}", terminal_safe(&e.subject, tty)),
+                format!("    {}", for_display(&e.subject, tty)),
             ];
             if !e.body.trim().is_empty() {
                 lines.push(String::new());
                 lines.extend(
-                    terminal_safe(e.body.trim_end(), tty)
+                    for_display(e.body.trim_end(), tty)
                         .lines()
                         .map(|line| format!("    {line}")),
                 );
@@ -113,16 +113,6 @@ fn full(entries: &[Entry], tty: bool) -> String {
         })
         .collect();
     blocks.join("\n\n")
-}
-
-/// Commit text is written by whoever made the commit: on a terminal it must not
-/// carry escape sequences.
-fn terminal_safe(text: &str, tty: bool) -> String {
-    if tty {
-        clean_for_terminal(text)
-    } else {
-        text.to_string()
-    }
 }
 
 /// A time as ISO-8601 with its UTC offset: `2026-10-18T14:30:00+02:00`.
