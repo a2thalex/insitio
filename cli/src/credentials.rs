@@ -47,12 +47,13 @@ pub enum TokenSource {
 }
 
 impl TokenSource {
-    /// Short stable name, for `--json` output.
+    /// Short stable name, for `--json` output: the variant name (`"Env"`,
+    /// `"Keychain"`, `"File"`), which is what the plan's e2e tests look for.
     pub fn as_str(self) -> &'static str {
         match self {
-            TokenSource::Env => "env",
-            TokenSource::Keychain => "keychain",
-            TokenSource::File => "file",
+            TokenSource::Env => "Env",
+            TokenSource::Keychain => "Keychain",
+            TokenSource::File => "File",
         }
     }
 
@@ -448,6 +449,7 @@ impl TokenFile {
     }
 }
 
+#[cfg(unix)]
 fn refuse_dir(dir: &Path, why: &str) -> NsitError {
     NsitError::Other(format!("will not keep tokens in {}: {why}", dir.display()))
 }
@@ -848,6 +850,17 @@ mod tests {
             "hosts = \"ins_secret_token_text\"",
         )
         .unwrap();
+        // On Unix a file others can read is refused before it is parsed; make
+        // it private so this test reaches the parse error it is about.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                token_file_path(dir.path()),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
         for result in [
             token_for(HOST, Some("ada")).map(|_| ()),
             store_token(HOST, "ada", TOKEN).map(|_| ()),
@@ -874,6 +887,19 @@ mod tests {
             .insert("ada".into(), TOKEN.into());
         let shown = format!("{file:?} {file:#?}");
         assert!(!shown.contains(TOKEN), "{shown}");
+    }
+
+    #[test]
+    fn token_sources_have_stable_names_for_json_and_words_for_people() {
+        let all = [
+            (TokenSource::Env, "Env", "NSIT_TOKEN"),
+            (TokenSource::Keychain, "Keychain", "credential store"),
+            (TokenSource::File, "File", "token file"),
+        ];
+        for (source, name, words) in all {
+            assert_eq!(source.as_str(), name);
+            assert!(source.describe().contains(words), "{}", source.describe());
+        }
     }
 
     #[test]

@@ -14,9 +14,6 @@ use url::{Host, Url};
 
 use crate::error::NsitError;
 
-// Used by the commands that pick a host; the allows on this item, `save` and
-// `resolve_host` go away with the first of them.
-#[allow(dead_code)]
 pub const DEFAULT_HOST: &str = "git.iam.bot";
 pub const CONFIG_FILE: &str = "nsit.toml";
 
@@ -42,7 +39,6 @@ impl Config {
         Config::load_from(&config_dir()?)
     }
 
-    #[allow(dead_code)]
     pub fn save(&self) -> Result<(), NsitError> {
         self.save_to(&config_dir()?)
     }
@@ -209,7 +205,6 @@ pub fn config_dir_from(
 }
 
 /// Pick the host: `--host` flag, then `NSIT_HOST`, then the default.
-#[allow(dead_code)]
 pub fn resolve_host(flag: Option<&str>) -> String {
     resolve_host_from(flag, env_value("NSIT_HOST").as_deref())
 }

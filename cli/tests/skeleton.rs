@@ -74,11 +74,9 @@ fn help_lists_every_v1_command_and_exits_zero() {
 }
 
 #[test]
-fn every_command_is_a_stub_that_exits_1_with_a_plain_message() {
+fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
+    // `auth` is implemented (see tests/nsit.e2e.test.ts); the rest are still stubs.
     let invocations: &[&[&str]] = &[
-        &["auth", "login", "--with-token"],
-        &["auth", "logout"],
-        &["auth", "status"],
         &["init", "demo", "--remote", "--readme"],
         &["clone", "ada/demo", "target"],
         &["status"],

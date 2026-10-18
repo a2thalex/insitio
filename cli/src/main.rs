@@ -1,16 +1,12 @@
 //! nsit: the Insitio command-line tool for people and agents.
 //!
-//! Skeleton: the global flags, errors, output modes, config, token storage
-//! and API client are in place and every subcommand is a stub. Later tasks
-//! fill in the commands, and with them use the helpers that nothing calls yet.
+//! `nsit auth` is implemented; the other subcommands are still stubs that later
+//! tasks fill in, and with them use the helpers that nothing calls yet.
 
-// The commands that call into these two arrive with `nsit auth` (Task 6); the
-// allow goes away then.
-#[allow(dead_code)]
 mod api;
 mod cli;
+mod commands;
 mod config;
-#[allow(dead_code)]
 mod credentials;
 mod error;
 mod output;
@@ -38,11 +34,11 @@ fn run(cli: &Cli) -> Result<(), NsitError> {
     // Resolve output settings first so a bad `--jq` fails (exit 2) before
     // any command has side effects.
     let g = &cli.global;
-    let _out = Out::new(g.json, g.jq.clone(), g.quiet, g.no_color)?;
+    let out = Out::new(g.json, g.jq.clone(), g.quiet, g.no_color)?;
 
     match &cli.command {
-        Command::Auth(_)
-        | Command::Init(_)
+        Command::Auth(args) => commands::auth::run(args, g, &out),
+        Command::Init(_)
         | Command::Clone(_)
         | Command::Status
         | Command::Add(_)

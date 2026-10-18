@@ -47,6 +47,9 @@ pub struct UserJson {
 }
 
 /// A repository, as listed and returned by `/api/v1/repos`.
+// `nsit repo` and `nsit clone` (Tasks 7 and 9) are the first callers; the
+// allows here and on `repos`, `create_repo` and `repo` go away with them.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoJson {
     pub owner: String,
@@ -199,6 +202,7 @@ impl Api {
 
     /// `GET /api/v1/repos[?owner=<name>]`: every repository the token can see,
     /// or only the ones owned by `owner`.
+    #[allow(dead_code)]
     pub fn repos(&self, owner: Option<&str>) -> Result<Vec<RepoJson>, NsitError> {
         let mut url = self.endpoint(&["repos"])?;
         if let Some(owner) = owner {
@@ -209,6 +213,7 @@ impl Api {
     }
 
     /// `POST /api/v1/repos`. Without a `description` the key is left out.
+    #[allow(dead_code)]
     pub fn create_repo(
         &self,
         name: &str,
@@ -226,6 +231,7 @@ impl Api {
 
     /// `GET /api/v1/repos/<owner>/<name>`. A repository the token may not see
     /// is a 404, like a missing one.
+    #[allow(dead_code)]
     pub fn repo(&self, owner: &str, name: &str) -> Result<RepoJson, NsitError> {
         let url = self.endpoint(&["repos", owner, name])?;
         let reply = self.send_authed(Method::GET, url, None)?;

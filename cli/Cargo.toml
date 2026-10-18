@@ -15,6 +15,8 @@ path = "src/main.rs"
 clap = { version = "4.6", features = ["derive"] }
 dirs = "7"
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }
+# The machine's name, shown on the approval page as "nsit on <name>".
+hostname = "0.4"
 jaq-core = "3.1"
 jaq-json = "2.0"
 jaq-std = "3.0"
@@ -22,6 +24,8 @@ jaq-std = "3.0"
 # Unix the Secret Service over D-Bus through the pure-Rust zbus (keyring's
 # default `v1` feature; no libdbus, so the musl build stays static).
 keyring = "4.2"
+# Opens the approval page in the browser, on a terminal only.
+open = "5"
 # rustls only (no OpenSSL / native-tls). 30 s timeouts are set on the client.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "http2", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
