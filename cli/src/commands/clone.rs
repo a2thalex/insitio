@@ -20,7 +20,10 @@
 //!   points at the server's default branch, unborn, with the same tracking.
 //! * When the clone fails, what nsit made is removed (the new directory, and the
 //!   parents made for it) and nothing else: not a directory that was there
-//!   already, not what was in it.
+//!   already, not what was in it, and nothing at all when libgit2 reports that
+//!   the directory has been filled in since it was checked (another process
+//!   put something there: it is theirs). A removal that fails is reported on
+//!   stderr even with `-q`, because it means debris is left.
 //!
 //! `--json`: `{owner, name, dir, default_branch}`.
 
@@ -282,16 +285,42 @@ fn clone_repo(
     // remove files that are open).
     let result =
         fetch(target, selected_host, out, &dest.path).and_then(|repo| settle_head(&repo, branch));
-    if result.is_err() {
-        if let Err(e) = dest.clean_up() {
-            let left = dest.created.as_ref().unwrap_or(&dest.path);
-            out.info(&format!(
-                "warning: could not remove {}: {e}",
-                strip_controls(&left.display().to_string())
-            ));
-        }
+    if let Err(err) = &result {
+        clean_up_after(err, dest, Destination::clean_up, |warning| {
+            out.warn(warning)
+        });
     }
     result
+}
+
+/// Whether what nsit made should be removed after a clone failed with `err`.
+///
+/// Not when libgit2 says the directory exists and is not empty: the checks before the
+/// clone found the place free, so somebody else (another process) filled it in since,
+/// and what is there is theirs. Removing it would delete their files.
+fn should_clean_up(err: &NsitError) -> bool {
+    !matches!(err, NsitError::Git(e) if e.code() == ErrorCode::Exists)
+}
+
+/// After a failed clone: remove what nsit made (`clean`), unless `should_clean_up` says
+/// it may not. A removal that fails leaves debris, which a person must hear about
+/// whatever they asked for, so it is a warning that `-q` does not silence (`warn`).
+fn clean_up_after(
+    err: &NsitError,
+    dest: &Destination,
+    clean: impl FnOnce(&Destination) -> io::Result<()>,
+    warn: impl FnOnce(&str),
+) {
+    if !should_clean_up(err) {
+        return;
+    }
+    if let Err(e) = clean(dest) {
+        let left = dest.created.as_ref().unwrap_or(&dest.path);
+        warn(&format!(
+            "warning: could not remove {}: {e}",
+            strip_controls(&left.display().to_string())
+        ));
+    }
 }
 
 fn describe(json: &CloneJson, tty: bool) -> String {
@@ -774,6 +803,114 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.exit_code(), 3, "{err}");
         assert!(!work.path().join("rocket").exists());
+        assert_eq!(
+            server.connections_after(std::time::Duration::from_millis(200)),
+            0
+        );
+    }
+
+    // ---- cleaning up after a failure -----------------------------------------------------
+
+    fn git_failure(code: ErrorCode) -> NsitError {
+        NsitError::Git(git2::Error::new(code, git2::ErrorClass::Invalid, "failed"))
+    }
+
+    #[test]
+    fn nothing_is_removed_when_libgit2_found_the_directory_filled_in() {
+        assert!(!should_clean_up(&git_failure(ErrorCode::Exists)));
+        for other in [
+            git_failure(ErrorCode::GenericError),
+            git_failure(ErrorCode::NotFound),
+            git_failure(ErrorCode::Auth),
+            NsitError::Auth("a".into()),
+            NsitError::Other("o".into()),
+            NsitError::Usage("u".into()),
+            NsitError::Io(io::Error::other("disk")),
+        ] {
+            assert!(should_clean_up(&other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_removal_runs_after_a_failure_except_when_the_directory_was_filled_in() {
+        let base = tempfile::tempdir().unwrap();
+        let dest = Destination::check(base.path().join("d")).unwrap();
+        let mut removals = 0;
+        clean_up_after(
+            &git_failure(ErrorCode::Exists),
+            &dest,
+            |_| {
+                removals += 1;
+                Ok(())
+            },
+            |_| panic!("nothing to warn about"),
+        );
+        assert_eq!(removals, 0);
+        clean_up_after(
+            &git_failure(ErrorCode::GenericError),
+            &dest,
+            |_| {
+                removals += 1;
+                Ok(())
+            },
+            |_| panic!("nothing to warn about"),
+        );
+        assert_eq!(removals, 1);
+    }
+
+    #[test]
+    fn a_removal_that_fails_is_a_warning_that_names_what_is_left() {
+        let base = tempfile::tempdir().unwrap();
+        let dest = Destination::check(base.path().join("a").join("b")).unwrap();
+        let mut said = Vec::new();
+        clean_up_after(
+            &git_failure(ErrorCode::GenericError),
+            &dest,
+            |_| Err(io::Error::other("in use")),
+            |warning| said.push(warning.to_string()),
+        );
+        assert_eq!(said.len(), 1, "{said:?}");
+        let left = base.path().join("a").display().to_string();
+        assert_eq!(said[0], format!("warning: could not remove {left}: in use"));
+        assert!(!said[0].contains('\n'));
+    }
+
+    #[test]
+    fn a_directory_filled_in_between_the_check_and_the_clone_is_left_exactly_as_it_is() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = isolated_env(home.path());
+        let server = StubServer::refusing();
+        sign_in_to(&server.host(), "grace", "ins_stored_token");
+        let target =
+            parse_repo_ref("ada/rocket", "", &Url::parse(&server.host()).unwrap()).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        // Free when it is checked, so nsit would call `a` its own...
+        let dest = Destination::check(work.path().join("a").join("b")).unwrap();
+        assert_eq!(dest.created, Some(work.path().join("a")));
+        // ...and then another process gets there first.
+        std::fs::create_dir_all(&dest.path).unwrap();
+        std::fs::write(dest.path.join("theirs.txt"), "theirs\n").unwrap();
+
+        let err = clone_repo(
+            &target,
+            &server.host(),
+            "main",
+            &out_with(false, true),
+            &dest,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, NsitError::Git(e) if e.code() == ErrorCode::Exists),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains("ins_stored_token"), "{err}");
+        // Their directory, their file: not removed, and `a` above it is still there.
+        assert_eq!(
+            std::fs::read_to_string(dest.path.join("theirs.txt")).unwrap(),
+            "theirs\n"
+        );
+        assert!(work.path().join("a").is_dir());
+        // The server was not even asked.
         assert_eq!(
             server.connections_after(std::time::Duration::from_millis(200)),
             0

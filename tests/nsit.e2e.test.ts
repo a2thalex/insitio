@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { repoDir } from "../src/git/storage.js";
 import { decideDevice, findPendingByUserCode } from "../src/services/devices.js";
-import { createRepo, getRepo } from "../src/services/repos.js";
+import { addCollaborator, createRepo, getRepo } from "../src/services/repos.js";
 import { createAccessToken, createUser, getUserByName, listAccessTokens, type User } from "../src/services/users.js";
 import vitestConfig from "../vitest.config.js";
 import { NSIT_TIMEOUT_MS, nsitBin, runNsit, startInsitio, startNsit, tmpDir, type Insitio, type NsitOptions, type NsitResult } from "./helpers.js";
@@ -82,6 +83,8 @@ async function tokenStatus(token: string): Promise<number> {
 
 const files = (dir: string) => readdirSync(dir);
 const oneLine = (text: string) => text.trimEnd().split("\n").length === 1;
+/** The bare repository on the server's disk: what the server really has, for real git to read. */
+const serverRepo = (owner: string, name: string) => repoDir(ins.deps.config.dataDir, owner, name);
 
 beforeAll(async () => {
   await nsitBin();
@@ -796,8 +799,8 @@ describe("nsit init <name> against a server", () => {
       created: true,
       branch: "main",
       readme: true,
-      // Until `nsit push` exists the commits stay local.
-      pushed: false,
+      // The first commit is pushed as part of init: the repository is not left half made.
+      pushed: true,
       remote: { owner: "ada", name: "demo", clone_url: `${ins.base}/ada/demo.git`, private: true, created: true },
     });
     expect(json.commit).toMatch(/^[0-9a-f]{40}$/);
@@ -815,6 +818,64 @@ describe("nsit init <name> against a server", () => {
     expect((await realGit(repoDir, "log", "--format=%s")).trim()).toBe("Initial commit");
     expect((await realGit(repoDir, "remote", "get-url", "origin")).trim()).toBe(`${ins.base}/ada/demo.git`);
     await realGit(repoDir, "fsck", "--strict");
+
+    // The server has the commit: real git, asked about the bare repository on the server's disk.
+    const bare = serverRepo("ada", "demo");
+    expect(await realGit(cwd, "ls-remote", bare)).toContain(`${json.commit}\trefs/heads/main`);
+    expect((await realGit(bare, "rev-parse", "refs/heads/main")).trim()).toBe(json.commit);
+    expect((await realGit(bare, "log", "--format=%s", "refs/heads/main")).trim()).toBe("Initial commit");
+    await realGit(bare, "fsck", "--strict");
+    // The branch tracks what was pushed, so status and later pushes need no setup.
+    expect((await realGit(repoDir, "rev-parse", "refs/remotes/origin/main")).trim()).toBe(json.commit);
+    expect((await realGit(repoDir, "config", "branch.main.remote")).trim()).toBe("origin");
+    expect((await realGit(repoDir, "config", "branch.main.merge")).trim()).toBe("refs/heads/main");
+    const status = await nsit(["-C", repoDir, "status", "--json"], { env });
+    expect(status.code, status.stderr).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({ branch: "main", upstream: "origin/main", ahead: 0, behind: 0 });
+    // Nothing of the token is anywhere in what the push wrote.
+    for (const file of filesUnder(join(repoDir, ".git"))) {
+      for (const secret of secrets) expect(readFileSync(file).includes(secret), `a token is in ${file}`).toBe(false);
+    }
+    expect(made.stderr, "no progress or notes off a terminal").toBe("");
+  });
+
+  it("without --readme there is no commit, so init says it pushed nothing and succeeds", async () => {
+    const cwd = tmpDir();
+    const result = await nsit(["init", "no-commits", "--json", "--host", ins.base], { cwd, configDir, env: homeWith(false) });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ commit: null, pushed: false });
+    expect(result.stderr).toMatch(/nothing was pushed/);
+    expect(await realGit(serverRepo("ada", "no-commits"), "for-each-ref")).toBe("");
+  });
+
+  it("when the first push fails the repository and its commit stay, and the error says how to go on", async () => {
+    // The server knows the repository, but by the time the push reaches its git endpoint the bare
+    // repository on disk is gone. The hook runs before the server's own handler for the same
+    // request, so this is deterministic: init creates the repository over the API, and only then
+    // does the push find nothing behind it.
+    const cwd = tmpDir();
+    const env = homeWith(false);
+    const bare = serverRepo("ada", "pushless");
+    const breakIt = (req: IncomingMessage) => {
+      if (req.url?.startsWith("/ada/pushless.git/info/refs")) rmSync(bare, { recursive: true, force: true });
+    };
+    ins.server.prependListener("request", breakIt);
+    let result: NsitResult;
+    try {
+      result = await nsit(["init", "pushless", "--readme", "--host", ins.base], { cwd, configDir, env });
+    } finally {
+      ins.server.off("request", breakIt);
+    }
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(oneLine(result.stderr), result.stderr).toBe(true);
+    expect(result.stderr).toMatch(/^nsit: .*run nsit push/);
+    // Nothing is lost: the repository exists on the server, origin is set, and the commit is here.
+    expect(getRepo(ins.deps.db, "ada", "pushless")).not.toBeNull();
+    const work = join(cwd, "pushless");
+    expect((await realGit(work, "log", "--format=%s")).trim()).toBe("Initial commit");
+    expect((await realGit(work, "remote", "get-url", "origin")).trim()).toBe(`${ins.base}/ada/pushless.git`);
+    expect(await realGit(work, "for-each-ref", "refs/remotes")).toBe("");
   });
 
   it("run again, it leaves the repository and origin alone and asks the server for nothing", async () => {
@@ -917,6 +978,10 @@ const same = (a: string, b: string) => realpathSync(a) === realpathSync(b);
 describe("nsit clone", () => {
   const SEED: Seed = { "README.md": "# tools\n", "src/main.txt": "hello\n", "docs/ünï côdé.txt": "accented\n" };
   const CLEAN = { branch: "main", upstream: "origin/main", ahead: 0, behind: 0, staged: [], unstaged: [], untracked: [], conflicted: [] };
+  // One text file with LF, one with CRLF, and a binary that has CR LF bytes in it. Seeded once, in
+  // `beforeAll`, because both the Review Focus 3 test and its autocrlf=false control clone it, and
+  // each of them must also pass when it is the only test that runs.
+  const CRLF_FILES: Seed = { "lf.txt": "alpha\nbeta\n", "crlf.txt": "one\r\ntwo\r\n", "bin/data.bin": Buffer.from([0x00, 0x0d, 0x0a, 0x01, 0x0a]) };
   let configDir: string;
 
   const clone = (...args: string[]) => ["clone", ...args, "--host", ins.base];
@@ -931,6 +996,7 @@ describe("nsit clone", () => {
     configDir = tmpDir();
     await signIn(configDir);
     await seedRepo("clone-tools", SEED);
+    await seedRepo("crlf-repo", CRLF_FILES);
   });
 
   it("clones a private repository with NSIT_TOKEN: the files are there, origin is the plain URL, and no token reaches .git", async () => {
@@ -1005,9 +1071,7 @@ describe("nsit clone", () => {
   });
 
   it("(Review Focus 3) with core.autocrlf=true a fresh clone is clean: nothing unstaged, and commit has nothing to commit", async () => {
-    // One text file with LF, one with CRLF, and a binary that has CR LF bytes in it.
-    const files: Seed = { "lf.txt": "alpha\nbeta\n", "crlf.txt": "one\r\ntwo\r\n", "bin/data.bin": Buffer.from([0x00, 0x0d, 0x0a, 0x01, 0x0a]) };
-    await seedRepo("crlf-repo", files);
+    const files = CRLF_FILES;
     // libgit2 does not read GIT_CONFIG_GLOBAL: its global git configuration is this home's .gitconfig.
     const home = homeWith(true, true);
     const env = { ...home, NSIT_TOKEN: newToken("agent") };
@@ -1215,5 +1279,457 @@ describe("nsit clone", () => {
     // ...and a directory that was there is still there, and empty.
     expect(readdirSync(join(cwd, "empty"))).toEqual([]);
     expect(readFileSync(join(cwd, "keep", "mine.txt"), "utf8")).toBe("mine\n");
+  });
+});
+
+// ---- nsit push ---------------------------------------------------------------------------------
+
+describe("nsit push", () => {
+  let adaDir: string;
+  let bob: User;
+  let bobDir: string;
+  let bobToken: string;
+
+  /** `nsit push` against this server, with `args` before the global --host. */
+  const push = (...args: string[]) => ["push", ...args, "--host", ins.base];
+
+  type Work = { dir: string; env: Record<string, string | undefined>; configDir: string };
+
+  /** A ref of the repository in `dir`, from real git; "" when it is not there. */
+  async function ref(dir: string, name: string): Promise<string> {
+    try {
+      return (await realGit(dir, "rev-parse", "--verify", "-q", name)).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  /** The server's own tip of a branch, read from the bare repository by real git; "" when it has none. */
+  async function serverTip(repo: string, branch = "main"): Promise<string> {
+    return (await realGit(serverRepo("ada", repo), "for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`)).trim();
+  }
+
+  /** Everything push must leave alone when it fails: all refs, HEAD and the repository's own config. */
+  async function snapshot(dir: string) {
+    return {
+      refs: await realGit(dir, "for-each-ref", "--format=%(refname) %(objectname)"),
+      head: (await realGit(dir, "rev-parse", "HEAD")).trim(),
+      config: readFileSync(join(dir, ".git", "config"), "utf8"),
+    };
+  }
+
+  async function configValue(dir: string, key: string): Promise<string | null> {
+    try {
+      return (await realGit(dir, "config", "--get", key)).trim();
+    } catch {
+      return null;
+    }
+  }
+
+  async function cloneOf(repo: string, configDir: string): Promise<Work> {
+    const cwd = tmpDir();
+    const env = homeWith(true);
+    const result = await nsit(["clone", repo, "work", "--host", ins.base], { cwd, configDir, env });
+    expect(result.code, result.stderr).toBe(0);
+    return { dir: join(cwd, "work"), env, configDir };
+  }
+
+  /** A repository ada owns on the server with one commit on main, and a fresh nsit clone of it. */
+  async function seededClone(name: string, isPrivate = true): Promise<Work> {
+    await seedRepo(name, { "README.md": "# x\n", "a.txt": "base\n" }, isPrivate);
+    return cloneOf(`ada/${name}`, adaDir);
+  }
+
+  async function commitIn(work: Work, file: string, content: string | Buffer, message: string): Promise<string> {
+    writeFileSync(join(work.dir, file), content);
+    const result = await nsit(["-C", work.dir, "commit", "-m", message], { configDir: work.configDir, env: work.env });
+    expect(result.code, result.stderr).toBe(0);
+    return ref(work.dir, "HEAD");
+  }
+
+  const pushFrom = (work: Work, ...args: string[]) => nsit(["-C", work.dir, ...push(...args)], { configDir: work.configDir, env: work.env });
+
+  /** Every POST the server's git endpoint receives while `during` runs: an upload, which a refused push must never start. */
+  async function uploadsDuring<T>(during: () => Promise<T>): Promise<{ result: T; uploads: string[] }> {
+    const uploads: string[] = [];
+    const record = (req: IncomingMessage) => {
+      if (req.method === "POST" && req.url?.endsWith("/git-receive-pack")) uploads.push(req.url);
+    };
+    ins.server.prependListener("request", record);
+    try {
+      return { result: await during(), uploads };
+    } finally {
+      ins.server.off("request", record);
+    }
+  }
+
+  beforeAll(async () => {
+    adaDir = tmpDir();
+    await signIn(adaDir);
+    bob = getUserByName(ins.deps.db, "bob") ?? createUser(ins.deps.db, { username: "bob", password: "longenough", email: "bob@example.com" });
+    bobToken = createAccessToken(ins.deps.db, bob.id, "e2e");
+    secrets.add(bobToken);
+    bobDir = tmpDir();
+    await signIn(bobDir, bobToken);
+  });
+
+  it("a second commit advances the server's branch; the output is one line, nothing else moves, and no token is written", async () => {
+    const work = await seededClone("advance");
+    const first = await serverTip("advance");
+    const head = await commitIn(work, "b.txt", "two\n", "Add b");
+    expect(head).not.toBe(first);
+
+    const result = await pushFrom(work);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toBe("Pushed main to ada/advance\n");
+    expect(result.stderr, "nothing but data off a terminal").toBe("");
+
+    // Real git, reading the server's repository: the branch is at the new commit, with its history.
+    expect(await serverTip("advance")).toBe(head);
+    expect(await realGit(serverRepo("ada", "advance"), "log", "--format=%s", "main")).toBe("Add b\nSeed\n");
+    await realGit(serverRepo("ada", "advance"), "fsck", "--strict");
+    // Locally, the tracking branch caught up and the branch itself is untouched.
+    expect(await ref(work.dir, "refs/remotes/origin/main")).toBe(head);
+    expect(await ref(work.dir, "refs/heads/main")).toBe(head);
+    const status = await nsit(["-C", work.dir, "status", "--json"], { env: work.env, configDir: work.configDir });
+    expect(JSON.parse(status.stdout)).toMatchObject({ branch: "main", upstream: "origin/main", ahead: 0, behind: 0 });
+    // The token went to the server as a password and nowhere else.
+    const config = readFileSync(join(work.dir, ".git", "config"), "utf8");
+    expect(config).not.toMatch(/ins_/);
+    expect(config).not.toMatch(/\/\/[^/\s]*@/);
+    for (const file of filesUnder(join(work.dir, ".git"))) {
+      for (const secret of secrets) expect(readFileSync(file).includes(secret), `a token is in ${file}`).toBe(false);
+    }
+  });
+
+  it("when the server already has everything it says so and sends nothing; --json says what changed", async () => {
+    const work = await seededClone("uptodate");
+    const base = await ref(work.dir, "HEAD");
+    const { result: again, uploads } = await uploadsDuring(() => pushFrom(work));
+    expect(again.code, again.stderr).toBe(0);
+    expect(again.stdout).toBe("Everything up to date\n");
+    expect(uploads, "nothing was uploaded").toEqual([]);
+
+    const same = await pushFrom(work, "--json");
+    expect(JSON.parse(same.stdout)).toEqual({ branch: "main", remote: "ada/uptodate", updated: false, old: base, new: base });
+
+    const head = await commitIn(work, "c.txt", "c\n", "Add c");
+    const sent = await pushFrom(work, "--json");
+    expect(sent.code, sent.stderr).toBe(0);
+    expect(JSON.parse(sent.stdout)).toEqual({ branch: "main", remote: "ada/uptodate", updated: true, old: base, new: head });
+    const jq = await pushFrom(work, "--jq", ".updated");
+    expect(jq.stdout).toBe("false\n");
+  });
+
+  it("[branch] pushes that branch, creating it on the server, and leaves the current branch alone", async () => {
+    const work = await seededClone("branches");
+    expect((await nsit(["-C", work.dir, "branch", "feature"], { configDir: work.configDir, env: work.env })).code).toBe(0);
+    const tip = await ref(work.dir, "refs/heads/feature");
+    expect(await serverTip("branches", "feature")).toBe("");
+
+    const result = await pushFrom(work, "feature", "--json");
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ branch: "feature", remote: "ada/branches", updated: true, old: null, new: tip });
+    expect(await serverTip("branches", "feature")).toBe(tip);
+    expect(await ref(work.dir, "refs/remotes/origin/feature")).toBe(tip);
+    expect(await configValue(work.dir, "branch.feature.remote")).toBe("origin");
+    expect(await configValue(work.dir, "branch.feature.merge")).toBe("refs/heads/feature");
+    expect((await realGit(work.dir, "branch", "--show-current")).trim(), "still on main").toBe("main");
+  });
+
+  it("sets the upstream by itself on the first push; an upstream that is set is left alone, and -u sets it again", async () => {
+    const dir = join(tmpDir(), "upstream-demo");
+    mkdirSync(dir);
+    const env = homeWith(true);
+    const run = (...args: string[]) => nsit(["-C", dir, ...args, "--host", ins.base], { configDir: adaDir, env });
+    expect((await run("init", "--remote")).code).toBe(0);
+    writeFileSync(join(dir, "one.txt"), "1\n");
+    expect((await run("commit", "-m", "one")).code).toBe(0);
+    expect(await configValue(dir, "branch.main.remote"), "no upstream yet").toBeNull();
+    expect(JSON.parse((await run("status", "--json")).stdout).upstream).toBeNull();
+
+    const first = await run("push");
+    expect(first.code, first.stderr).toBe(0);
+    expect(first.stdout).toBe("Pushed main to ada/upstream-demo\n");
+    expect(await configValue(dir, "branch.main.remote")).toBe("origin");
+    expect(await configValue(dir, "branch.main.merge")).toBe("refs/heads/main");
+    expect(JSON.parse((await run("status", "--json")).stdout)).toMatchObject({ upstream: "origin/main", ahead: 0, behind: 0 });
+    // The server really has it (the repository did not exist until init made it).
+    expect(await serverTip("upstream-demo")).toBe(await ref(dir, "HEAD"));
+
+    // A plain push does not rewrite an upstream somebody set; -u does, even when there is nothing to send.
+    await realGit(dir, "config", "branch.main.merge", "refs/heads/other");
+    writeFileSync(join(dir, "two.txt"), "2\n");
+    expect((await run("commit", "-m", "two")).code).toBe(0);
+    expect((await run("push")).code).toBe(0);
+    expect(await configValue(dir, "branch.main.merge")).toBe("refs/heads/other");
+    const again = await run("push", "-u");
+    expect(again.code, again.stderr).toBe(0);
+    expect(again.stdout).toBe("Everything up to date\n");
+    expect(await configValue(dir, "branch.main.merge")).toBe("refs/heads/main");
+  });
+
+  it("diverged history is refused by the client (exit 6, non-fast-forward): nothing is uploaded and nothing moves, locally or on the server", async () => {
+    // The server would accept this push (its repositories have receive.denyNonFastForwards off),
+    // so the refusal has to come from libgit2's own check on this side.
+    await seedRepo("diverge", { "a.txt": "base\n" });
+    const a = await cloneOf("ada/diverge", adaDir);
+    const b = await cloneOf("ada/diverge", adaDir);
+    const fromA = await commitIn(a, "a.txt", "from a\n", "A's change");
+    const pushedA = await pushFrom(a);
+    expect(pushedA.code, pushedA.stderr).toBe(0);
+    expect(await serverTip("diverge")).toBe(fromA);
+
+    await commitIn(b, "b.txt", "from b\n", "B's change");
+    const before = await snapshot(b.dir);
+    expect(await ref(b.dir, "refs/remotes/origin/main")).not.toBe(await ref(b.dir, "refs/heads/main"));
+
+    const { result, uploads } = await uploadsDuring(() => pushFrom(b));
+    expect(result.code, result.stderr).toBe(6);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("nsit: refs/heads/main: non-fast-forward; run nsit pull\n");
+    expect(uploads, "the refusal came before any upload").toEqual([]);
+    // B: every ref (so refs/heads/main and refs/remotes/origin/main), HEAD and the config are as they were.
+    expect(await snapshot(b.dir)).toEqual(before);
+    // The server: still A's commit.
+    expect(await serverTip("diverge")).toBe(fromA);
+    // Real git, asked to do the same, is refused for the same reason.
+    console.info(
+      [
+        "diverged push (B has not pulled A's commit):",
+        `  nsit push: exit ${result.code}, stderr ${JSON.stringify(result.stderr)}`,
+        `  B refs/heads/main ${await ref(b.dir, "refs/heads/main")}, refs/remotes/origin/main ${await ref(b.dir, "refs/remotes/origin/main")} (both as before the push)`,
+        `  server refs/heads/main ${await serverTip("diverge")} (A's commit, as before)`,
+      ].join("\n"),
+    );
+  });
+
+  it("a branch whose history was rewritten is refused unless --force-with-lease and the server's branch is where nsit last saw it", async () => {
+    const work = await seededClone("lease-ok");
+    const seen = await serverTip("lease-ok");
+    // Rewrite the commit the server has (real git, as an editor or an agent's tooling might).
+    await realGit(work.dir, "commit", "--amend", "-q", "-m", "Seed, reworded");
+    const rewritten = await ref(work.dir, "HEAD");
+    expect(rewritten).not.toBe(seen);
+
+    const plain = await pushFrom(work);
+    expect(plain.code, plain.stderr).toBe(6);
+    expect(plain.stderr).toBe("nsit: refs/heads/main: non-fast-forward; run nsit pull\n");
+    expect(await serverTip("lease-ok")).toBe(seen);
+
+    const forced = await pushFrom(work, "--force-with-lease", "--json");
+    expect(forced.code, forced.stderr).toBe(0);
+    expect(JSON.parse(forced.stdout)).toEqual({ branch: "main", remote: "ada/lease-ok", updated: true, old: seen, new: rewritten });
+    expect(await serverTip("lease-ok"), "the server took the rewritten branch").toBe(rewritten);
+    expect(await ref(work.dir, "refs/remotes/origin/main")).toBe(rewritten);
+    await realGit(serverRepo("ada", "lease-ok"), "fsck", "--strict");
+  });
+
+  it("--force-with-lease is refused with 'stale info' when somebody else pushed since nsit last looked: nothing is uploaded and nothing moves", async () => {
+    await seedRepo("lease-stale", { "a.txt": "base\n" });
+    const mine = await cloneOf("ada/lease-stale", adaDir);
+    const theirs = await cloneOf("ada/lease-stale", adaDir);
+    const their = await commitIn(theirs, "a.txt", "theirs\n", "Their commit");
+    expect((await pushFrom(theirs)).code).toBe(0);
+    await realGit(mine.dir, "commit", "--amend", "-q", "-m", "Mine, reworded");
+    const before = await snapshot(mine.dir);
+
+    const { result, uploads } = await uploadsDuring(() => pushFrom(mine, "--force-with-lease"));
+    expect(result.code, result.stderr).toBe(6);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/^nsit: refs\/heads\/main: stale info/);
+    expect(oneLine(result.stderr), result.stderr).toBe(true);
+    expect(uploads, "cancelled before the upload").toEqual([]);
+    expect(await snapshot(mine.dir)).toEqual(before);
+    expect(await serverTip("lease-stale"), "their commit is still the server's").toBe(their);
+  });
+
+  it("signed out, with stdin an open pipe: exit 3 within 5 s with a sign-in hint, and nothing moves (Review Focus 2)", async () => {
+    const work = await seededClone("signedout");
+    await commitIn(work, "late.txt", "late\n", "Late");
+    const before = await snapshot(work.dir);
+    for (const extra of [[], ["--json"]]) {
+      const started = performance.now();
+      // A fresh config directory, no NSIT_TOKEN, stdin open and silent: a read would hang.
+      const result = await nsit(["-C", work.dir, ...push(...extra)], { env: work.env, stdin: "open", timeoutMs: 5_000 });
+      expect(result.code, result.stderr).toBe(3);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(`nsit: not signed in to ${hostKey}; run nsit auth login\n`);
+      expect(performance.now() - started).toBeLessThan(5_000);
+    }
+    expect(await snapshot(work.dir)).toEqual(before);
+  });
+
+  it("says what is wrong when it cannot tell what to push (exit 2): no origin, no commits, detached HEAD, no such branch", async () => {
+    const env = homeWith(true);
+    const usage = async (result: Promise<NsitResult>, pattern: RegExp) => {
+      const done = await result;
+      expect(done.code, done.stderr).toBe(2);
+      expect(done.stdout).toBe("");
+      expect(done.stderr).toMatch(pattern);
+      expect(oneLine(done.stderr), done.stderr).toBe(true);
+    };
+
+    // A repository that was never given an origin.
+    const local = tmpDir();
+    expect((await nsit(["-C", local, "init"], { env })).code).toBe(0);
+    writeFileSync(join(local, "a.txt"), "a\n");
+    expect((await nsit(["-C", local, "commit", "-m", "one"], { env })).code).toBe(0);
+    await usage(nsit(["-C", local, ...push()], { configDir: adaDir, env }), /^nsit: .*origin/);
+
+    // An origin and no commit yet.
+    const empty = join(tmpDir(), "no-commits-yet");
+    mkdirSync(empty);
+    expect((await nsit(["-C", empty, "init", "--remote", "--host", ins.base], { configDir: adaDir, env })).code).toBe(0);
+    await usage(nsit(["-C", empty, ...push()], { configDir: adaDir, env }), /^nsit: .*no commits yet/);
+
+    // A detached HEAD wants the branch named; naming it works.
+    const work = await seededClone("usage");
+    await realGit(work.dir, "checkout", "--detach", "-q");
+    await usage(pushFrom(work), /^nsit: .*detached/);
+    const named = await pushFrom(work, "main");
+    expect(named.code, named.stderr).toBe(0);
+    expect(named.stdout).toBe("Everything up to date\n");
+
+    // A branch that is not there, and a name that cannot be one.
+    await usage(pushFrom(work, "nope"), /^nsit: .*no branch named nope/);
+    await usage(pushFrom(work, "a..b"), /^nsit: .*not a valid branch name/);
+  });
+
+  it("an origin on another server never gets NSIT_TOKEN (exit 3), and nothing moves", async () => {
+    const work = await seededClone("elsewhere");
+    await commitIn(work, "x.txt", "x\n", "X");
+    await realGit(work.dir, "remote", "set-url", "origin", "https://other.example/ada/elsewhere.git");
+    const before = await snapshot(work.dir);
+    const result = await nsit(["-C", work.dir, ...push()], { env: { ...work.env, NSIT_TOKEN: newToken("agent") }, timeoutMs: 5_000 });
+    expect(result.code, result.stderr).toBe(3);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("nsit: NSIT_TOKEN is sent only to the selected host, and other.example is not it\n");
+    expect(await snapshot(work.dir)).toEqual(before);
+  });
+
+  it("a read-only collaborator's push is refused by the server (403): exit 6 with 'permission', and nothing moves", async () => {
+    await seedRepo("readonly", { "a.txt": "base\n" }, true);
+    const row = getRepo(ins.deps.db, "ada", "readonly")!;
+    addCollaborator(ins.deps.db, row.id, bob.id, "read");
+    // Read access is enough to clone...
+    const work = await cloneOf("ada/readonly", bobDir);
+    const head = await commitIn(work, "bob.txt", "bob\n", "Bob's commit");
+    const before = await snapshot(work.dir);
+    const tip = await serverTip("readonly");
+    expect(tip).not.toBe(head);
+
+    // ...and not to push.
+    const result = await pushFrom(work);
+    expect(result.code, result.stderr).toBe(6);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/^nsit: permission denied: .*ada\/readonly/);
+    expect(oneLine(result.stderr), result.stderr).toBe(true);
+    expect(result.stderr).not.toMatch(/ins_/);
+    expect(await snapshot(work.dir)).toEqual(before);
+    expect(await serverTip("readonly")).toBe(tip);
+    console.info(`read-only collaborator's push: exit ${result.code}, stderr ${JSON.stringify(result.stderr)}`);
+
+    // It was the account's access that was refused, not nsit's request: with write access the same push goes through.
+    addCollaborator(ins.deps.db, row.id, bob.id, "write");
+    const allowed = await pushFrom(work);
+    expect(allowed.code, allowed.stderr).toBe(0);
+    expect(await serverTip("readonly")).toBe(head);
+  });
+
+  it("(Review Focus 4) a server that has stopped: exit 1, one line, no token anywhere, and no ref moves", async () => {
+    const gone = await startInsitio();
+    try {
+      const user = createUser(gone.deps.db, { username: "ada", password: "longenough", email: "ada@example.com" });
+      const token = createAccessToken(gone.deps.db, user.id, "e2e");
+      secrets.add(token);
+      const configDir = tmpDir();
+      const env = homeWith(true);
+      const login = await nsit(["auth", "login", "--with-token", "--host", gone.base], { configDir, input: token });
+      expect(login.code, login.stderr).toBe(0);
+      const cwd = tmpDir();
+      const init = await nsit(["init", "stopped", "--readme", "--host", gone.base], { cwd, configDir, env });
+      expect(init.code, init.stderr).toBe(0);
+      const dir = join(cwd, "stopped");
+      writeFileSync(join(dir, "later.txt"), "not pushed yet\n");
+      expect((await nsit(["-C", dir, "commit", "-m", "later"], { configDir, env })).code).toBe(0);
+      const before = await snapshot(dir);
+      expect(await ref(dir, "refs/heads/main")).not.toBe(await ref(dir, "refs/remotes/origin/main"));
+      const serverBefore = await realGit(repoDir(gone.deps.config.dataDir, "ada", "stopped"), "rev-parse", "refs/heads/main");
+
+      // The server goes away: the address is still in .git/config.
+      await gone.close();
+
+      const lines: string[] = [];
+      // Once with the token nsit saved, once with NSIT_TOKEN (which is asked about first, over the API).
+      for (const [how, opts] of [
+        ["saved token", { configDir, env }],
+        ["NSIT_TOKEN", { configDir: tmpDir(), env: { ...env, NSIT_TOKEN: token } }],
+      ] as const) {
+        const result = await nsit(["-C", dir, "push", "--host", gone.base], { ...opts, timeoutMs: 15_000 });
+        expect(result.code, `${how}: ${result.stderr}`).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toMatch(/^nsit: \S/);
+        expect(oneLine(result.stderr), `${how}: ${result.stderr}`).toBe(true);
+        expect(result.stderr).not.toMatch(/ins_/);
+        expect(result.stderr + result.stdout).not.toContain(token);
+        expect(await snapshot(dir), `${how}: nothing moved`).toEqual(before);
+        lines.push(`  ${how}: exit ${result.code}, stderr ${JSON.stringify(result.stderr)}`);
+      }
+      expect(readFileSync(join(dir, ".git", "config"), "utf8")).not.toMatch(/ins_/);
+      console.info(
+        [
+          "Review Focus 4 evidence: push to a server that was stopped (its address is still origin)",
+          ...lines,
+          `  refs before == after: ${JSON.stringify(before.refs)}`,
+          `  the server's last branch tip, from its repository on disk: ${serverBefore.trim()}`,
+        ].join("\n"),
+      );
+    } finally {
+      await gone.close();
+    }
+  });
+
+  it("(Review Focus 4) a connection that dies in the middle of the upload: exit 1, one line, no ref moves, and the server's branch stays", async () => {
+    const work = await seededClone("drop");
+    await commitIn(work, "payload.bin", randomBytes(256 * 1024), "Payload");
+    const before = await snapshot(work.dir);
+    const tip = await serverTip("drop");
+    // Cut the connection the moment the upload begins (before the server's own handler reads a byte of it).
+    const cut = (req: IncomingMessage) => {
+      if (req.method === "POST" && req.url?.endsWith("/git-receive-pack")) req.socket.destroy();
+    };
+    ins.server.prependListener("request", cut);
+    let result: NsitResult;
+    try {
+      result = await pushFrom(work);
+    } finally {
+      ins.server.off("request", cut);
+    }
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/^nsit: \S/);
+    expect(oneLine(result.stderr), result.stderr).toBe(true);
+    expect(result.stderr).not.toMatch(/ins_/);
+    expect(await snapshot(work.dir)).toEqual(before);
+    expect(await serverTip("drop")).toBe(tip);
+    console.info(`connection cut mid-upload: exit ${result.code}, stderr ${JSON.stringify(result.stderr)}`);
+
+    // Nothing was left in a state that blocks the next try.
+    const retry = await pushFrom(work);
+    expect(retry.code, retry.stderr).toBe(0);
+    expect(await serverTip("drop")).toBe(await ref(work.dir, "HEAD"));
+  });
+
+  it("a few megabytes of data that does not compress go through in one push, and real git agrees about the object", async () => {
+    const work = await seededClone("bulk");
+    const blob = randomBytes(6 * 1024 * 1024);
+    const head = await commitIn(work, "blob.bin", blob, "Add a blob");
+    const result = await pushFrom(work);
+    expect(result.code, result.stderr).toBe(0);
+    expect(await serverTip("bulk")).toBe(head);
+    const bare = serverRepo("ada", "bulk");
+    expect((await realGit(bare, "cat-file", "-s", "main:blob.bin")).trim()).toBe(String(blob.length));
+    await realGit(bare, "fsck", "--strict");
   });
 });

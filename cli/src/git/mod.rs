@@ -10,18 +10,19 @@
 //! path in the repository, and paths as raw bytes), `stage` (staging and the
 //! questions about the repository's state), `secrets` (the guard a commit
 //! applies), `commit` (making a commit: `nsit commit` and `nsit init`
-//! both call it), `readme` (the starter README) and `origin` (`origin` as
-//! a repository on the selected host). No command module is needed by another.
+//! both call it), `readme` (the starter README), `origin` (`origin` as
+//! a repository on the selected host) and `push` (sending a branch to `origin`
+//! and the upstream settings: `nsit push` and the first push of `nsit init`
+//! both call it). No command module is needed by another.
 //!
-//! `clone` calls `run_remote`. What `pull` and `push` will call is marked
-//! `allow(dead_code)` / `allow(unused_imports)`; the allows go away with the
-//! callers.
+//! `clone` and `push` are the commands that call `run_remote` so far.
 
 pub mod auth;
 pub mod commit;
 pub mod origin;
 pub mod paths;
 pub mod progress;
+pub mod push;
 pub mod readme;
 pub mod secrets;
 pub mod stage;
@@ -29,8 +30,7 @@ pub mod stage;
 // What the git commands import from `crate::git`. `run_remote` is the only
 // way onto the network: its credential step stays private to `auth`.
 pub use auth::run_remote;
-#[allow(unused_imports)] // Task 10 (push)
-pub use auth::{remote_error, RemoteAccess};
+pub use auth::RemoteAccess;
 
 use std::path::Path;
 

@@ -100,6 +100,18 @@ impl Out {
         }
     }
 
+    /// Print a warning to stderr, `-q` or not. For what a person has to know
+    /// whatever they asked for: something the command could not undo and left
+    /// behind. Everything else is an `info`.
+    pub fn warn(&self, msg: &str) {
+        self.warn_to(&mut io::stderr().lock(), msg);
+    }
+
+    fn warn_to(&self, w: &mut impl Write, msg: &str) {
+        // `-q` is not looked at on purpose. A closed stderr is still no error.
+        let _ = writeln!(w, "{msg}");
+    }
+
     /// Whether it is reasonable to ask the user a question.
     pub fn is_interactive(&self) -> bool {
         self.tty && io::stdin().is_terminal()
@@ -609,6 +621,22 @@ mod tests {
 
         let mut quiet = out(false, None, false);
         quiet.quiet = true;
+        let mut buf = Vec::new();
+        quiet.info_to(&mut buf, "uploading");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn a_warning_reaches_stderr_even_with_quiet() {
+        let mut quiet = out(false, None, false);
+        quiet.quiet = true;
+        let mut buf = Vec::new();
+        quiet.warn_to(&mut buf, "warning: could not remove /tmp/x");
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "warning: could not remove /tmp/x\n"
+        );
+        // While an info under the same -q is silent.
         let mut buf = Vec::new();
         quiet.info_to(&mut buf, "uploading");
         assert!(buf.is_empty());

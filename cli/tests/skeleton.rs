@@ -1,5 +1,5 @@
 //! Runs the real `nsit` binary: version string, usage errors, the network
-//! commands that are still stubs, signed-out behavior, and the rule that a bad
+//! command that is still a stub (`pull`), signed-out behavior, and the rule that a bad
 //! `--jq` fails before any command runs. The local commands are in `tests/local.rs`.
 
 use std::io::Read;
@@ -79,12 +79,13 @@ fn help_lists_every_v1_command_and_exits_zero() {
 
 #[test]
 fn every_command_not_built_yet_is_a_stub_that_exits_1_with_a_plain_message() {
-    // `auth`, `repo`, `clone` and the local commands are implemented (tests/nsit.e2e.test.ts
-    // and tests/local.rs); the two that still talk to a git server are stubs.
+    // `auth`, `repo`, `clone`, `push` and the local commands are implemented
+    // (tests/nsit.e2e.test.ts and tests/local.rs); `pull` is the one left. (This must never
+    // list a command that does something: these runs have the crate directory, which is inside
+    // this project's own repository, as their working directory.)
     let invocations: &[&[&str]] = &[
         &["pull"],
         &["pull", "--abort"],
-        &["push", "-u", "main", "--force-with-lease"],
         // Global flags after the subcommand.
         &[
             "pull",
@@ -208,6 +209,60 @@ fn clone_signed_out_exits_3_at_once_never_reads_stdin_and_makes_nothing() {
             std::fs::read_dir(work.path()).unwrap().count(),
             0,
             "{label} left something in the working directory"
+        );
+    }
+}
+
+/// A repository on `main` with one commit, whose `origin` is a server nothing listens on:
+/// where an agent that never signed in would be.
+fn repo_with_an_origin_nobody_answers(dir: &Path) -> git2::Repository {
+    let mut options = git2::RepositoryInitOptions::new();
+    options.initial_head("main");
+    let repo = git2::Repository::init_opts(dir, &options).unwrap();
+    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("a.txt")).unwrap();
+    index.write().unwrap();
+    {
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let who = git2::Signature::now("Test", "test@example.com").unwrap();
+        repo.commit(Some("HEAD"), &who, &who, "one", &tree, &[])
+            .unwrap();
+    }
+    repo.remote("origin", "http://127.0.0.1:9/ada/tools.git")
+        .unwrap();
+    repo
+}
+
+/// Review Focus 2 for `nsit push`: signed out, stdin an open pipe nobody writes to, and an
+/// origin that would not answer anyway. It exits 3 with the sign-in hint at once, without
+/// reading stdin or touching the network, and nothing in the repository changes.
+#[test]
+fn push_signed_out_exits_3_at_once_never_reads_stdin_and_moves_nothing() {
+    let invocations: &[&[&str]] = &[
+        &["push"],
+        &["push", "--json"],
+        &["push", "main"],
+        &["push", "-u", "main"],
+        &["push", "--force-with-lease"],
+    ];
+    for args in invocations {
+        let work = tempfile::tempdir().unwrap();
+        let repo = repo_with_an_origin_nobody_answers(work.path());
+        let config_before = std::fs::read_to_string(repo.path().join("config")).unwrap();
+        let (code, out, err) = run_signed_out(args, work.path());
+        let label = format!("nsit {}", args.join(" "));
+        assert_eq!(code, Some(3), "{label}: {err}");
+        assert_eq!(out, "", "{label}");
+        assert_eq!(err, SIGN_IN_HINT, "{label}");
+        assert!(
+            repo.find_reference("refs/remotes/origin/main").is_err(),
+            "{label} recorded a push that did not happen"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("config")).unwrap(),
+            config_before,
+            "{label} changed the repository's config (an upstream) without pushing"
         );
     }
 }

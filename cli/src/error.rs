@@ -25,8 +25,8 @@ pub enum NsitError {
     /// The secret guard blocked a commit (exit 5).
     #[error("{}", secret_summary(.0))]
     SecretGuard(Vec<SecretHit>),
-    /// The server rejected a push (exit 6). First built by `nsit push`.
-    #[allow(dead_code)]
+    /// A push was refused (exit 6): as not a fast-forward, by a stale lease, for want
+    /// of permission, or by the server's own say. Built by `nsit push`.
     #[error("{0}")]
     Rejected(String),
     /// libgit2 failed. Shown as its bare message, never the class/code dump.

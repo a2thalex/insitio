@@ -11,15 +11,21 @@
 //!   anything is created, so a mistake there leaves nothing behind.
 //! * `--readme` writes a starter README.md and commits just that file (not
 //!   whatever else the directory holds) as the first commit.
+//! * With a remote and at least one commit (`--readme` makes one) the current
+//!   branch is pushed, as `nsit push` would, so the repository is complete on
+//!   Insitio when init is done. With no commit yet there is nothing to push, and
+//!   init says so. If the push fails, the repository on Insitio, `origin` and
+//!   the commit stay, and the error says to run `nsit push` to try again.
 //!
 //! Running it again where the repository exists is safe: the local part is a
-//! no-op (and says so), and an `origin` that is set is left alone.
+//! no-op (and says so), an `origin` that is set is left alone, and what is
+//! already on the server is not sent again.
 //!
 //! `--json`: `{path, branch, created, remote, readme, commit, pushed}`, where
 //! `created` is whether this run made the local repository, `remote` is
 //! `{owner, name, clone_url, private, created}` or null, `readme` is whether
 //! this run wrote README.md, `commit` is the id of the commit it made or null,
-//! and `pushed` is whether the commits reached the server.
+//! and `pushed` is whether the branch is on the server (sent now, or already there).
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +40,7 @@ use crate::config::{base_url, resolve_host};
 use crate::error::NsitError;
 use crate::git::commit::{commit_changes, Outcome, Request, Staging};
 use crate::git::origin::origin_on;
+use crate::git::push::{push_branch, Mode};
 use crate::git::readme::{description_of, write_readme, Written, README};
 use crate::git::stage::{current_branch, head_commit, stage_paths};
 use crate::output::{for_display, Out};
@@ -86,11 +93,16 @@ struct Wired {
 pub enum FirstPush {
     /// There is no commit yet, so nothing was sent.
     NoCommits,
-    /// The branch is on the server.
+    /// The branch is on the server (sent now, or it already was).
     Pushed,
-    /// There are commits, and they are not on the server.
+    /// There are commits, and no branch to send them as: `HEAD` is detached.
     NotPushed,
 }
+
+/// Added to the error of a first push that failed. By then the repository exists on
+/// Insitio, `origin` is set and the commit is made, so `nsit push` is all that is left.
+const PUSH_AGAIN: &str =
+    "the repository exists on Insitio and the commits are saved here; run nsit push to try again";
 
 pub fn run(args: &InitArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Result<(), NsitError> {
     let host = resolve_host(global.host.as_deref());
@@ -137,14 +149,15 @@ pub fn run(args: &InitArgs, global: &GlobalArgs, out: &Out, base: &Path) -> Resu
 
     let pushed = match target {
         Some(target) => {
-            let first = push_first_commits(&repo, target, &host, out)?;
+            let first = push_first_commits(&repo, target, &host, out)
+                .map_err(|err| with_hint(err, PUSH_AGAIN))?;
             match first {
                 FirstPush::NoCommits => out.info(
                     "There is no commit yet, so nothing was pushed: make one with nsit commit.",
                 ),
-                FirstPush::NotPushed => {
-                    out.info("The commits are not on Insitio yet: run nsit push.");
-                }
+                FirstPush::NotPushed => out.info(
+                    "HEAD is detached, so nothing was pushed: switch to a branch, then run nsit push.",
+                ),
                 FirstPush::Pushed => {}
             }
             first == FirstPush::Pushed
@@ -364,20 +377,37 @@ fn first_readme_commit(
 
 /// Send the first commits of a repository that was just given a remote.
 ///
-/// This is the seam between `init` and `nsit push`: it runs once `origin` is
-/// set and the first commit, if there is one, has been made. Until `nsit push`
-/// exists a repository that has commits is reported as `NotPushed`, and
-/// `init` tells the user so.
+/// This is where `init` hands over to the push of `nsit push`: it runs once `origin`
+/// is set and the first commit, if there is one, has been made. With no commit there
+/// is nothing to send. Otherwise the current branch is pushed as `nsit push` does it
+/// (a fast-forward, and the branch's upstream set), so a repository that `init` has
+/// finished with is on Insitio, tracked, and shows nothing ahead.
+///
+/// Any error is the push's own (not signed in, a server that cannot be reached, a
+/// refusal); the caller adds how to go on.
 pub fn push_first_commits(
     repo: &Repository,
-    _target: &RepoRef,
-    _selected_host: &str,
-    _out: &Out,
+    target: &RepoRef,
+    selected_host: &str,
+    out: &Out,
 ) -> Result<FirstPush, NsitError> {
     if head_commit(repo)?.is_none() {
         return Ok(FirstPush::NoCommits);
     }
-    Ok(FirstPush::NotPushed)
+    // A detached `HEAD` has no branch to send the commits as.
+    let Some(branch) = current_branch(repo) else {
+        return Ok(FirstPush::NotPushed);
+    };
+    push_branch(
+        repo,
+        target,
+        selected_host,
+        out,
+        &branch,
+        Mode::FastForward,
+        false,
+    )?;
+    Ok(FirstPush::Pushed)
 }
 
 fn describe(json: &InitJson, readme_asked: bool, tty: bool) -> String {
@@ -421,6 +451,17 @@ fn describe(json: &InitJson, readme_asked: bool, tty: bool) -> String {
     if let Some(commit) = &json.commit {
         lines.push(format!("Committed {}.", &commit[..7]));
     }
+    let named = json
+        .remote
+        .as_ref()
+        .and_then(|r| Some((r.owner.as_ref()?, r.name.as_ref()?)));
+    if let (true, Some((owner, name))) = (json.pushed, named) {
+        lines.push(format!(
+            "Pushed {branch} to {}/{}.",
+            clean(owner),
+            clean(name)
+        ));
+    }
     lines.join("\n")
 }
 
@@ -428,7 +469,7 @@ fn describe(json: &InitJson, readme_asked: bool, tty: bool) -> String {
 mod tests {
     use super::*;
     use crate::cli::InitArgs;
-    use crate::test_support::{local_repo, StubServer};
+    use crate::test_support::{isolated_env, local_repo, out_with, StubServer};
 
     fn args(name: Option<&str>, remote: bool, readme: bool, public: bool) -> InitArgs {
         InitArgs {
@@ -846,7 +887,13 @@ mod tests {
     // ---- the push seam -------------------------------------------------------------
 
     #[test]
-    fn the_push_seam_reports_no_commits_and_not_pushed() {
+    fn the_push_seam_sends_nothing_without_a_commit_or_a_branch_and_otherwise_is_the_pushs_own_result(
+    ) {
+        // Nobody is signed in, so a push that is attempted ends at once in the login refusal,
+        // before anything touches the network. (The pushes themselves are in git::push and
+        // in the end-to-end tests.)
+        let home = tempfile::tempdir().unwrap();
+        let _env = isolated_env(home.path());
         let dir = tempfile::tempdir().unwrap();
         let repo = local_repo(dir.path());
         let target = parse_repo_ref(
@@ -855,16 +902,47 @@ mod tests {
             &base_url("git.iam.bot").unwrap(),
         )
         .unwrap();
-        let out = crate::test_support::out_with(false, true);
+        let out = out_with(false, true);
         assert_eq!(
             push_first_commits(&repo, &target, "git.iam.bot", &out).unwrap(),
             FirstPush::NoCommits
         );
+
         crate::test_support::commit_file(&repo, "a.txt", "a");
+        let tip = repo.head().unwrap().target().unwrap();
+        repo.set_head_detached(tip).unwrap();
         assert_eq!(
             push_first_commits(&repo, &target, "git.iam.bot", &out).unwrap(),
-            FirstPush::NotPushed
+            FirstPush::NotPushed,
+            "no branch to send the commits as"
         );
+
+        repo.set_head("refs/heads/main").unwrap();
+        let err = push_first_commits(&repo, &target, "git.iam.bot", &out).unwrap_err();
+        assert!(matches!(err, NsitError::Auth(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 3);
+        assert!(
+            repo.find_reference("refs/remotes/origin/main").is_err(),
+            "nothing was recorded as pushed"
+        );
+    }
+
+    #[test]
+    fn a_failed_first_push_keeps_its_exit_code_and_says_to_run_nsit_push() {
+        for (err, code) in [
+            (NsitError::Rejected("refs/heads/main: stale".into()), 6),
+            (
+                NsitError::Other("cannot reach git.iam.bot: refused".into()),
+                1,
+            ),
+            (NsitError::Auth("authentication failed".into()), 3),
+        ] {
+            let hinted = with_hint(err, PUSH_AGAIN);
+            assert_eq!(hinted.exit_code(), code, "{hinted}");
+            let text = hinted.to_string();
+            assert!(text.contains("run nsit push to try again"), "{text}");
+            assert!(!text.contains('\n'), "{text:?}");
+        }
     }
 
     // ---- what is printed -----------------------------------------------------------
@@ -897,6 +975,23 @@ mod tests {
              Wrote README.md.\n\
              Committed 0123456."
         );
+    }
+
+    #[test]
+    fn the_text_says_where_the_commits_were_pushed() {
+        let mut json = sample();
+        json.pushed = true;
+        let text = describe(&json, true, false);
+        assert!(
+            text.ends_with("Committed 0123456.\nPushed main to ada/demo."),
+            "{text}"
+        );
+        // Not pushed, or no repository on Insitio to name: no such line.
+        json.pushed = false;
+        assert!(!describe(&json, true, false).contains("Pushed"));
+        json.pushed = true;
+        json.remote = None;
+        assert!(!describe(&json, true, false).contains("Pushed"));
     }
 
     #[test]

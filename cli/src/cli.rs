@@ -199,7 +199,7 @@ pub struct PushArgs {
     /// Branch to push (default: the current branch)
     pub branch: Option<String>,
 
-    /// Remember it as the upstream of the branch
+    /// Set the branch's upstream even if it has one (the first push of a branch sets it by itself)
     #[arg(short = 'u', long)]
     pub set_upstream: bool,
 

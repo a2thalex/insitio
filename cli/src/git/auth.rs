@@ -25,8 +25,8 @@ use std::io::{self, IsTerminal};
 use std::rc::Rc;
 
 use git2::{
-    Cred, CredentialType, ErrorClass, ErrorCode, FetchOptions, PushOptions, RemoteCallbacks,
-    RemoteRedirect,
+    Cred, CredentialType, ErrorClass, ErrorCode, FetchOptions, PushOptions, PushUpdate,
+    RemoteCallbacks, RemoteRedirect,
 };
 use url::Url;
 
@@ -87,11 +87,26 @@ impl<'a> RemoteAccess<'a> {
 
     /// Options for `Remote::push`: these callbacks, and no redirect to
     /// another host.
-    #[allow(dead_code)] // Task 10 (push)
-    pub fn push_options(self) -> PushOptions<'a> {
+    ///
+    /// A push has two things to watch, and they are the only additions the
+    /// caller may make to the callbacks (it cannot replace the credentials or
+    /// the progress): `on_negotiation` runs once the server has advertised its
+    /// branches and before anything is uploaded, with the updates the push
+    /// would make (an error cancels the push); `on_status` runs for each
+    /// branch after the upload, with the server's reason when it refused the
+    /// update (an error stops libgit2 from updating remote-tracking refs).
+    pub fn push_options(
+        self,
+        on_negotiation: impl FnMut(&[PushUpdate<'_>]) -> Result<(), git2::Error> + 'a,
+        on_status: impl FnMut(&str, Option<&str>) -> Result<(), git2::Error> + 'a,
+    ) -> PushOptions<'a> {
+        let mut callbacks = self.callbacks;
+        callbacks
+            .push_negotiation(on_negotiation)
+            .push_update_reference(on_status);
         let mut options = PushOptions::new();
         options
-            .remote_callbacks(self.callbacks)
+            .remote_callbacks(callbacks)
             .follow_redirects(RemoteRedirect::None);
         options
     }
@@ -540,7 +555,7 @@ mod tests {
 
         let err = run_remote(&target, &server.host(), &out_with(false, false), |access| {
             let mut remote = repo.remote_anonymous(target.clone_url.as_str())?;
-            let mut options = access.push_options();
+            let mut options = access.push_options(|_| Ok(()), |_, _| Ok(()));
             remote.push(&["refs/heads/main:refs/heads/main"], Some(&mut options))
         })
         .unwrap_err();
