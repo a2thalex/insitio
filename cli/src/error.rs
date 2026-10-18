@@ -29,6 +29,12 @@ pub enum NsitError {
     /// of permission, or by the server's own say. Built by `nsit push`.
     #[error("{0}")]
     Rejected(String),
+    /// A push was refused (exit 6) because the server's branch has commits this repository
+    /// lacks (it is not a fast-forward, or the lease no longer holds): the way on is `nsit
+    /// pull`, and the message says so. A variant of its own so that nothing has to read the
+    /// message to know, e.g. not to add "run nsit push to try again" to it.
+    #[error("{0}")]
+    NeedsPull(String),
     /// libgit2 failed. Shown as its bare message, never the class/code dump.
     #[error("{}", .0.message())]
     Git(#[from] git2::Error),
@@ -60,7 +66,7 @@ impl NsitError {
             NsitError::Git(e) if e.code() == git2::ErrorCode::Auth => 3,
             NsitError::Conflict(_) => 4,
             NsitError::SecretGuard(_) => 5,
-            NsitError::Rejected(_) => 6,
+            NsitError::Rejected(_) | NsitError::NeedsPull(_) => 6,
             NsitError::Git(_) | NsitError::Api { .. } | NsitError::Io(_) | NsitError::Other(_) => 1,
         }
     }
@@ -130,7 +136,11 @@ mod tests {
                 }]),
                 5,
             ),
-            (NsitError::Rejected("non-fast-forward".into()), 6),
+            (NsitError::Rejected("permission denied".into()), 6),
+            (
+                NsitError::NeedsPull("non-fast-forward; run nsit pull".into()),
+                6,
+            ),
             (NsitError::Git(git2::Error::from_str("boom")), 1),
             (api(500), 1),
             (

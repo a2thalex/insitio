@@ -1983,12 +1983,16 @@ describe("nsit pull", () => {
       expect(conflict.code, conflict.stderr).toBe(4);
       expect(JSON.parse(conflict.stdout)).toEqual({ result: "conflict", head: mine, conflicts: ["a.txt"] });
       expect(existsSync(join(b.dir, "added.txt")), "the merge brought this file in").toBe(true);
-      // A person had started on the conflict, and changes their mind.
+      // A person had started on the conflict, touched a file the merge brought in, and changes their mind.
       writeFileSync(join(b.dir, "a.txt"), "half resolved\n");
+      writeFileSync(join(b.dir, "added.txt"), "edited by me\n");
 
       const abort = await pullIn(b, "--abort");
       expect(abort.code, abort.stderr).toBe(0);
-      expect(abort.stdout).toBe(`Merge aborted; main is back at ${mine.slice(0, 7)}\n`);
+      // It says plainly what it did to the work in the merge.
+      expect(abort.stdout).toBe(
+        `Merge aborted; main is back at ${mine.slice(0, 7)}, with the files as they were before the pull (changes made while resolving the conflicts were thrown away)\n`,
+      );
       expect(await ref(b.dir, "HEAD")).toBe(mine);
       expect(await realGit(b.dir, "ls-files", "--stage")).toBe(index);
       expect(workingFiles(b.dir)).toEqual(filesBefore);
@@ -2012,6 +2016,64 @@ describe("nsit pull", () => {
       expect(json.code, json.stderr).toBe(0);
       expect(JSON.parse(json.stdout)).toEqual({ result: "aborted", head: mine, conflicts: [] });
       expect(workingFiles(b.dir)).toEqual(filesBefore);
+    },
+    SLOW,
+  );
+
+  it(
+    "pull --abort refuses to discard edits to tracked files the merge did not touch (exit 2, they are named): the merge, those edits and the untracked files all stay",
+    async () => {
+      const { a, b } = await twoClones("pull-abort-refuse");
+      await publish(a, "a.txt", "from a\n", "A edits a.txt");
+      const mine = await commitIn(b, "a.txt", "from b\n", "B edits a.txt");
+      writeFileSync(join(b.dir, "scratch.txt"), "untracked\n");
+      const filesBefore = workingFiles(b.dir);
+      const conflict = await pullIn(b);
+      expect(conflict.code, conflict.stderr).toBe(4);
+      // While resolving, a person also edited keep.txt (which the merge never touched) and staged a new file.
+      writeFileSync(join(b.dir, "keep.txt"), "edited while resolving\n");
+      writeFileSync(join(b.dir, "extra.txt"), "a new file\n");
+      expect((await nsitIn(b, "add", "extra.txt")).code).toBe(0);
+      const mergeHead = join(b.dir, ".git", "MERGE_HEAD");
+      const before = {
+        head: await ref(b.dir, "HEAD"),
+        orig: await ref(b.dir, "ORIG_HEAD"),
+        index: await realGit(b.dir, "ls-files", "--stage"),
+        status: await realGit(b.dir, "status", "--porcelain"),
+        files: workingFiles(b.dir),
+        mergeHead: readFileSync(mergeHead, "utf8"),
+      };
+
+      const refused = await pullIn(b, "--abort");
+      expect(refused.code, refused.stderr).toBe(2);
+      expect(refused.stdout).toBe("");
+      expect(refused.stderr).toMatch(/^nsit: cannot abort the merge: changes to extra\.txt, keep\.txt were made after the pull stopped/);
+      expect(refused.stderr).toContain("commit or revert them first");
+      expect(refused.stderr).not.toContain("scratch.txt");
+      expect(oneLine(refused.stderr), refused.stderr).toBe(true);
+      // Nothing moved: the merge is still waiting, with its conflict, and so are the edits.
+      expect(existsSync(mergeHead)).toBe(true);
+      expect({
+        head: await ref(b.dir, "HEAD"),
+        orig: await ref(b.dir, "ORIG_HEAD"),
+        index: await realGit(b.dir, "ls-files", "--stage"),
+        status: await realGit(b.dir, "status", "--porcelain"),
+        files: workingFiles(b.dir),
+        mergeHead: readFileSync(mergeHead, "utf8"),
+      }).toEqual(before);
+      expect(await realGit(b.dir, "status")).toContain("You have unmerged paths");
+      expect(readFileSync(join(b.dir, "a.txt"), "utf8")).toContain("<<<<<<<");
+
+      // Take the two edits back (real git here: nsit has no revert), and the abort goes through.
+      await realGit(b.dir, "checkout", "--", "keep.txt");
+      await realGit(b.dir, "rm", "-q", "-f", "--cached", "extra.txt");
+      rmSync(join(b.dir, "extra.txt"));
+      const done = await pullIn(b, "--abort");
+      expect(done.code, done.stderr).toBe(0);
+      expect(await ref(b.dir, "HEAD")).toBe(mine);
+      expect(workingFiles(b.dir)).toEqual(filesBefore);
+      expect(existsSync(mergeHead)).toBe(false);
+      expect(readFileSync(join(b.dir, "scratch.txt"), "utf8")).toBe("untracked\n");
     },
     SLOW,
   );
@@ -2117,6 +2179,86 @@ describe("nsit pull", () => {
       expect(fine.code, fine.stderr).toBe(0);
       expect(readFileSync(join(mg.b.dir, "scratch.txt"), "utf8")).toBe("untracked\n");
       expect(readFileSync(join(mg.b.dir, "new.txt"), "utf8")).toBe("from a\n");
+    },
+    SLOW,
+  );
+
+  it(
+    "an ignored file where the pull would write one is never overwritten: refused by name (exit 1) for a fast-forward and for a merge, nothing moves",
+    async () => {
+      // The incoming commit adds new.txt, and build/out.txt below a directory that is ignored here.
+      const incoming = async (a: Work) => {
+        mkdirSync(join(a.dir, "build"));
+        writeFileSync(join(a.dir, "build", "out.txt"), "from a\n");
+        return publish(a, "new.txt", "from a\n", "A adds new.txt and build/out.txt");
+      };
+      const ignoreLocally = async (b: Work) => {
+        // .git/info/exclude: an ignore rule that is not a file of the working tree.
+        mkdirSync(join(b.dir, ".git", "info"), { recursive: true });
+        writeFileSync(join(b.dir, ".git", "info", "exclude"), "new.txt\nbuild/\n");
+        mkdirSync(join(b.dir, "build"), { recursive: true });
+        writeFileSync(join(b.dir, "new.txt"), "mine, ignored\n");
+        writeFileSync(join(b.dir, "build", "out.txt"), "mine, ignored too\n");
+        writeFileSync(join(b.dir, "build", "other.txt"), "ignored, not in the way\n");
+        expect(await realGit(b.dir, "status", "--porcelain"), "git agrees these are ignored").toBe("");
+      };
+
+      for (const kind of ["fast-forward", "merge"]) {
+        const { a, b } = await twoClones(`pull-ignored-${kind === "merge" ? "merge" : "ff"}`);
+        await incoming(a);
+        if (kind === "merge") await commitIn(b, "mine.txt", "mine\n", "B adds mine.txt");
+        await ignoreLocally(b);
+        const before = await snapshot(b.dir);
+        const filesBefore = workingFiles(b.dir);
+
+        const refused = await pullIn(b);
+        expect(refused.code, `${kind}: ${refused.stderr}`).toBe(1);
+        expect(refused.stdout).toBe("");
+        expect(refused.stderr).toContain("new.txt");
+        expect(refused.stderr).toContain("build/out.txt");
+        expect(refused.stderr).not.toContain("other.txt");
+        expect(oneLine(refused.stderr), refused.stderr).toBe(true);
+        expect(await snapshot(b.dir), `${kind}: no ref moved`).toEqual(before);
+        expect(workingFiles(b.dir), `${kind}: no file was touched`).toEqual(filesBefore);
+        expect(await ref(b.dir, "ORIG_HEAD")).toBe("");
+        expect(merging(b)).toBe(false);
+
+        // Out of the way, the pull goes through, and the ignored file that was never in the way is left alone.
+        rmSync(join(b.dir, "new.txt"));
+        rmSync(join(b.dir, "build", "out.txt"));
+        const done = await pullIn(b);
+        expect(done.code, `${kind}: ${done.stderr}`).toBe(0);
+        expect(readFileSync(join(b.dir, "new.txt"), "utf8")).toBe("from a\n");
+        expect(readFileSync(join(b.dir, "build", "out.txt"), "utf8")).toBe("from a\n");
+        expect(readFileSync(join(b.dir, "build", "other.txt"), "utf8")).toBe("ignored, not in the way\n");
+      }
+    },
+    SLOW,
+  );
+
+  it(
+    "a new file that is staged (here a .env) stops a pull that has to merge, and nothing is committed: pull's merge commit is not run through the secret guard, so nothing uncommitted may reach it",
+    async () => {
+      const { a, b } = await twoClones("pull-staged-env");
+      await publish(a, "a.txt", "from a\n", "A edits a.txt");
+      const mine = await commitIn(b, "keep.txt", "from b\n", "B edits keep.txt");
+      writeFileSync(join(b.dir, ".env"), "TOKEN=abc\n");
+      expect((await nsitIn(b, "add", ".env")).code).toBe(0);
+      const before = await snapshot(b.dir);
+      const index = await realGit(b.dir, "ls-files", "--stage");
+      expect(index).toContain(".env");
+
+      const refused = await pullIn(b);
+      expect(refused.code, refused.stderr).toBe(1);
+      expect(refused.stdout).toBe("");
+      expect(refused.stderr).toContain(".env");
+      expect(oneLine(refused.stderr), refused.stderr).toBe(true);
+      expect(await ref(b.dir, "HEAD")).toBe(mine);
+      expect(await realGit(b.dir, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain(".env");
+      expect(await snapshot(b.dir)).toEqual(before);
+      expect(await realGit(b.dir, "ls-files", "--stage")).toBe(index);
+      expect(merging(b)).toBe(false);
+      expect(await ref(b.dir, "ORIG_HEAD")).toBe("");
     },
     SLOW,
   );
@@ -2281,6 +2423,18 @@ describe("nsit pull", () => {
       expect(merged.code, merged.stderr).toBe(0);
       expect(merged.stdout).toBe("Merged origin/main\n");
       expect(readFileSync(join(b.dir, "lf.txt"))).toEqual(Buffer.from("alpha\r\nbeta\r\ngamma\r\ndelta\r\n"));
+      expect((await statusOf(b)).unstaged).toEqual([]);
+      expect(await gitSeeing(home, b.dir, "status", "--porcelain")).toBe("");
+
+      // And a conflict, then an abort: with line endings converted, nothing may look like an edit
+      // made after the pull stopped (that would refuse the abort for no reason).
+      await publish(a, "other.txt", "other, from a\n", "A edits other.txt");
+      const mineAgain = await commitIn(b, "other.txt", "other, from b\n", "B edits other.txt again");
+      const conflict = await pullIn(b);
+      expect(conflict.code, conflict.stderr).toBe(4);
+      const abort = await pullIn(b, "--abort");
+      expect(abort.code, abort.stderr).toBe(0);
+      expect(await ref(b.dir, "HEAD")).toBe(mineAgain);
       expect((await statusOf(b)).unstaged).toEqual([]);
       expect(await gitSeeing(home, b.dir, "status", "--porcelain")).toBe("");
     },

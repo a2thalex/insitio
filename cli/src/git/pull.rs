@@ -1,5 +1,6 @@
 //! Bringing a branch up to date with its upstream with libgit2: `nsit pull`, and what it does to
-//! the repository on every path.
+//! the repository on every path. (`orig_head` is the `ORIG_HEAD` it writes and restores; `abort`
+//! undoes a merge that stopped on conflicts.)
 //!
 //! The steps, in the order that makes a refusal leave nothing behind:
 //!
@@ -11,11 +12,8 @@
 //!    commit, or a merge that stopped on a conflict). A pull that is refused leaves every ref as
 //!    it was: the same rule `push` follows.
 //! 2. **Analyse** (`merge_analysis`): up to date, fast-forward, or a real merge.
-//! 3. **`ORIG_HEAD`** is written (the commit `HEAD` was at) before anything is moved, so that real
-//!    git and `--abort` find it. libgit2's own `git_merge` also writes it (it is `git_merge__setup`'s
-//!    first step), but a fast-forward does not, and when a merge is refused libgit2 has already
-//!    rewritten it; so nsit writes it itself and, when the pull fails, puts back exactly what was
-//!    there before.
+//! 3. **`ORIG_HEAD`** is written (the commit `HEAD` was at) before anything is moved, and put back
+//!    if the pull fails (see `orig_head` for why nsit does not leave this to libgit2).
 //! 4. **Fast-forward**: a *safe* checkout of their tree (an uncommitted change it would overwrite
 //!    stops it, with nothing written, and the files are named), then the branch moves. Edits to
 //!    files the pull does not touch are carried along, as git does.
@@ -28,10 +26,15 @@
 //! **A merge needs the tracked files committed.** A merge is the one pull that can be abandoned
 //! (`--abort`), and abandoning is `reset --hard`, which discards uncommitted changes to tracked
 //! files. So a pull that has to merge refuses to start while any tracked file has uncommitted
-//! changes (staged or not), naming them, and the abort can never destroy anything that was there
-//! before the pull. (Untracked files are fine: a hard reset leaves them alone, and one that is in
-//! the way of the merge is refused by name.) A fast-forward has no abort, so it only refuses to
-//! overwrite what it would really overwrite.
+//! changes (staged or not), naming them: whatever a tracked file differs in from where the merge
+//! started was therefore done after the pull stopped, which is what lets `abort` tell work it
+//! must not discard from the merge it is undoing. A fast-forward has no abort, so it only refuses
+//! to overwrite what it would really overwrite.
+//!
+//! **Untracked and ignored files that are in the way are never overwritten**, by either kind of
+//! pull: the checkouts are told not to overwrite ignored files (libgit2 would otherwise replace
+//! an ignored file that is in the way of an incoming one), a file that is in the way is refused by
+//! name before anything changes, and files that are not in the way are not touched.
 //!
 //! **The secret guard does not run on the merge commit `pull` makes.** That commit is made here,
 //! not through `commit::commit_changes`: everything in it comes from its two parents, which are
@@ -39,33 +42,28 @@
 //! it anyway (against `HEAD` or against the merged-in branch) would refuse a pull because of a
 //! file that was committed earlier, on either side. The guard still applies, with its
 //! `MERGE_HEAD` rule, to what the user adds while finishing a merge that stopped on a conflict
-//! (`nsit commit`).
-//!
-//! **Abort** is `reset --hard` to `ORIG_HEAD` (to `HEAD` when `ORIG_HEAD` is missing or is not a
-//! commit) and `cleanup_state`; untracked files stay.
+//! (`nsit commit`). Nor can a secret slip in unchecked through a *staged* file: a new `.env` that
+//! is staged is an uncommitted change, and a pull that has to merge refuses to start over it.
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 
 use git2::build::CheckoutBuilder;
 use git2::{
     AnnotatedCommit, AutotagOption, CheckoutNotificationType, Commit, ErrorCode, FetchOptions,
-    MergeAnalysis, MergeOptions, ObjectType, Oid, Repository, RepositoryState, ResetType,
-    Signature, StatusOptions,
+    MergeAnalysis, MergeOptions, ObjectType, Oid, Repository, Signature, StatusOptions,
 };
 
 use super::auth::run_remote;
-use super::paths::{display, slash};
+use super::orig_head::OrigHead;
+use super::paths::{display, listed, slash};
 use super::push::{http_status, plain_failure};
 use super::stage::{conflicted_paths, head_commit};
 use super::upstream::Upstream;
 use crate::error::{one_line, NsitError};
-use crate::output::{strip_controls, Out};
+use crate::output::Out;
 use crate::repo_ref::RepoRef;
-
-/// The longest list of file names that goes into an error line.
-const MAX_LISTED: usize = 10;
 
 /// The commit being pulled in, and how to describe it.
 pub struct Theirs<'a> {
@@ -129,12 +127,14 @@ pub fn pull_branch(
             .map_err(|err| fetch_error(err, target))
         },
         who,
+        |warning| out.warn(warning),
     )
 }
 
 /// Everything about a pull except how the bytes travel: `fetch` brings the remote's branch (given
 /// as its name on the remote) and returns the commit it is at, `None` when the server has no such
-/// branch. The tracking ref is written last, and only if the pull went through.
+/// branch. The tracking ref is written last, and only if the pull went through; if even that
+/// cannot be written the pull has taken effect all the same, so it is a `warn`ing, not an error.
 fn pull_via(
     repo: &Repository,
     branch: &str,
@@ -142,6 +142,7 @@ fn pull_via(
     url: &str,
     fetch: impl FnOnce(&str) -> Result<Option<Oid>, NsitError>,
     who: impl FnOnce() -> Result<Signature<'static>, NsitError>,
+    warn: impl FnOnce(&str),
 ) -> Result<Pulled, NsitError> {
     let remote_branch = up.branch().ok_or_else(|| {
         NsitError::Usage(format!(
@@ -167,8 +168,18 @@ fn pull_via(
         url,
     };
     let pulled = integrate(repo, branch, &theirs, who)?;
-    // Only a pull that went through records what it fetched.
-    repo.reference(&tracking, id, true, "nsit pull")?;
+    // Only a pull that went through records what it fetched. The pull has taken effect by now (the
+    // files, the branch, a merge in progress), so a failure here must not be reported as one of
+    // the pull: it only means `nsit status` may count ahead and behind from an older fetch until
+    // the next pull.
+    if let Err(e) = repo.reference(&tracking, id, true, "nsit pull") {
+        warn(&format!(
+            "warning: the pull went through, but {} could not be updated ({}); nsit status may \
+             show out-of-date counts until the next pull",
+            one_line(label, 100),
+            one_line(e.message(), 100)
+        ));
+    }
     Ok(pulled)
 }
 
@@ -281,7 +292,18 @@ fn fast_forward(
         .map(|commit| OrigHead::set(repo, commit.id()))
         .transpose()?;
     // The files first (the branch's own commit is the baseline, so what was edited since stays
-    // unless the pull changes it too), then the branch.
+    // unless the pull changes it too), then the branch. The order cannot be the other way round:
+    // once the branch has moved, the checkout would take the new commit as its baseline and see
+    // nothing to do.
+    //
+    // **This is not transactional, in one corner.** The checkout writes the files and then
+    // refuses nothing; if updating the branch ref fails after that (a leftover
+    // `refs/heads/<b>.lock`, say), the working files and the index are at their commit while
+    // `HEAD` is still at ours, and the error says why. Nothing is lost, and running the pull
+    // again once the cause is gone completes it: the checkout finds files that already match
+    // and the branch then moves. Undoing the checkout instead would need a forced checkout of
+    // our commit, which would also throw away the unrelated uncommitted edits a fast-forward
+    // carries, so it is not done. (A merge has no such corner: it rolls itself back.)
     let moved = checkout_safely(repo, their_commit, branch).and_then(|()| {
         repo.reference(
             &format!("refs/heads/{branch}"),
@@ -304,14 +326,16 @@ fn fast_forward(
     })
 }
 
-/// A safe checkout of `target` (no uncommitted change is replaced). When one is in the way,
-/// nothing has been written and the error names the files.
+/// A safe checkout of `target` (no uncommitted change is replaced, and no ignored file either:
+/// libgit2 would otherwise overwrite an ignored file that is in the way of an incoming one). When
+/// one is in the way, nothing has been written and the error names the files.
 fn checkout_safely(repo: &Repository, target: &Commit<'_>, branch: &str) -> Result<(), NsitError> {
     let in_the_way = Rc::new(RefCell::new(Vec::<String>::new()));
     let sink = Rc::clone(&in_the_way);
     let mut options = CheckoutBuilder::new();
     options
         .safe()
+        .overwrite_ignored(false)
         .notify_on(CheckoutNotificationType::CONFLICT)
         .notify(move |_, path, _, _, _| {
             if let Some(path) = path {
@@ -339,22 +363,9 @@ fn overwrite_error(branch: &str, files: &[String]) -> NsitError {
         format!(
             "cannot pull into {branch}: it would overwrite local changes in {}; commit or move \
              them first",
-            list(files)
+            listed(files)
         )
     })
-}
-
-/// File names for an error line: at most `MAX_LISTED`, control characters removed.
-fn list(files: &[String]) -> String {
-    let mut shown: Vec<String> = files
-        .iter()
-        .take(MAX_LISTED)
-        .map(|file| strip_controls(file))
-        .collect();
-    if files.len() > MAX_LISTED {
-        shown.push(format!("and {} more", files.len() - MAX_LISTED));
-    }
-    shown.join(", ")
 }
 
 /// Merge `their_commit` into `head`: see the module documentation.
@@ -384,10 +395,10 @@ fn merge(
     let uncommitted = tracked_changes(repo)?;
     if !uncommitted.is_empty() {
         return Err(NsitError::Other(format!(
-            "cannot merge {}: uncommitted changes in {}; commit them first (a merge may have to \
-             be undone with nsit pull --abort, which discards uncommitted changes)",
+            "cannot merge {}: uncommitted changes in {}; commit them first, so that nothing of \
+             yours is at risk if the merge has to be undone with nsit pull --abort",
             one_line(theirs.label, 100),
-            list(&uncommitted)
+            listed(&uncommitted)
         )));
     }
 
@@ -397,9 +408,12 @@ fn merge(
     // copy is in the way (libgit2's checkout.c skips it and carries on, instead of failing with
     // nothing written). Merge conflicts and their markers need no such permission, as the
     // conflict test shows, so a file in the way fails the whole merge before anything is written.
+    // An ignored file in the way is not overwritten either (`overwrite_ignored(false)`; libgit2's
+    // own pre-check of the merge looks at untracked files but not at ignored ones).
     let mut checkout = CheckoutBuilder::new();
     checkout
         .safe()
+        .overwrite_ignored(false)
         .conflict_style_merge(true)
         .their_label(theirs.label);
     let mut options = MergeOptions::new();
@@ -457,8 +471,8 @@ fn merge(
     })
 }
 
-/// Why libgit2 would not start the merge. The one expected reason is a local change in the way
-/// (tracked changes are refused before this, so it is an untracked file).
+/// Why libgit2 would not start the merge. The one expected reason is a local file in the way
+/// (tracked changes are refused before this, so it is an untracked or an ignored file).
 fn merge_refusal(
     repo: &Repository,
     their_commit: &Commit<'_>,
@@ -472,8 +486,11 @@ fn merge_refusal(
     overwrite_error(branch, &files)
 }
 
-/// The untracked files that `their_commit` has a file at, or has a file where the untracked file
-/// has a directory: what a merge of it would have to overwrite.
+/// The untracked **and ignored** files that `their_commit` has a file at, or has a file where
+/// the local file has a directory: what a merge of it would have to overwrite. Ignored
+/// directories are looked into file by file (`recurse_ignored_dirs`), or a file in an ignored
+/// directory would be reported as the directory and never match. (This runs only once a merge has
+/// been refused, so listing a large ignored directory costs nothing on the way that works.)
 fn untracked_in_the_way(
     repo: &Repository,
     their_commit: &Commit<'_>,
@@ -483,12 +500,16 @@ fn untracked_in_the_way(
     options
         .include_untracked(true)
         .recurse_untracked_dirs(true)
-        .include_ignored(false)
+        .include_ignored(true)
+        .recurse_ignored_dirs(true)
         .exclude_submodules(true);
     let statuses = repo.statuses(Some(&mut options))?;
     let mut found = Vec::new();
     for entry in statuses.iter() {
-        if !entry.status().contains(git2::Status::WT_NEW) {
+        if !entry
+            .status()
+            .intersects(git2::Status::WT_NEW | git2::Status::IGNORED)
+        {
             continue;
         }
         let path = display(entry.path_bytes());
@@ -507,8 +528,9 @@ fn untracked_in_the_way(
     Ok(found)
 }
 
-/// The tracked files with uncommitted changes (staged, edited or deleted), sorted. Untracked and
-/// ignored files are not listed: nothing here would overwrite them, and a hard reset spares them.
+/// The tracked files with uncommitted changes (staged, new in the index, edited or deleted),
+/// sorted. Untracked and ignored files are not listed: a hard reset spares them, and one that is
+/// in the way of the merge is refused separately (`untracked_in_the_way`).
 fn tracked_changes(repo: &Repository) -> Result<Vec<String>, NsitError> {
     let mut options = StatusOptions::new();
     options
@@ -540,271 +562,23 @@ fn roll_back(repo: &Repository, head: &Commit<'_>) -> Result<(), git2::Error> {
     repo.cleanup_state()
 }
 
-// ---- abort ---------------------------------------------------------------------------------------
-
-/// Abandon the merge in progress: `reset --hard` to where the merge started (`ORIG_HEAD`, or
-/// `HEAD` when that is missing or is not a commit) and clear the merge state. Untracked files are
-/// not touched. Returns the commit `HEAD` is back at. Without a merge in progress it is a usage
-/// error and **nothing is touched** (a hard reset there would discard work).
-pub fn abort(repo: &Repository) -> Result<Oid, NsitError> {
-    match repo.state() {
-        RepositoryState::Merge => {}
-        RepositoryState::Clean => {
-            return Err(NsitError::Usage(
-                "there is no merge in progress, so there is nothing to abort".into(),
-            ));
-        }
-        other => {
-            return Err(NsitError::Usage(format!(
-                "there is no merge in progress to abort (the repository is in the middle of {}, \
-                 which nsit cannot abort)",
-                operation_name(other)
-            )));
-        }
-    }
-    let target = restore_point(repo)?;
-    repo.reset(
-        target.as_object(),
-        ResetType::Hard,
-        Some(CheckoutBuilder::new().force()),
-    )?;
-    repo.cleanup_state()?;
-    Ok(target.id())
-}
-
-/// What an operation other than a merge is called in a sentence ("a rebase").
-pub fn operation_name(state: RepositoryState) -> &'static str {
-    match state {
-        RepositoryState::Revert | RepositoryState::RevertSequence => "a revert",
-        RepositoryState::CherryPick | RepositoryState::CherryPickSequence => "a cherry-pick",
-        RepositoryState::Bisect => "a bisect",
-        RepositoryState::Rebase
-        | RepositoryState::RebaseInteractive
-        | RepositoryState::RebaseMerge => "a rebase",
-        RepositoryState::ApplyMailbox | RepositoryState::ApplyMailboxOrRebase => "applying patches",
-        RepositoryState::Merge | RepositoryState::Clean => "something",
-    }
-}
-
-/// Where an abort goes back to: `ORIG_HEAD` if it names a commit, else `HEAD`.
-fn restore_point(repo: &Repository) -> Result<Commit<'_>, NsitError> {
-    let orig = std::fs::read_to_string(repo.path().join("ORIG_HEAD"))
-        .ok()
-        .and_then(|text| Oid::from_str(text.trim()).ok())
-        .and_then(|id| repo.find_commit(id).ok());
-    if let Some(commit) = orig {
-        return Ok(commit);
-    }
-    head_commit(repo)?.ok_or_else(|| {
-        NsitError::Other(
-            "cannot tell where the merge started: there is no ORIG_HEAD and no HEAD".into(),
-        )
-    })
-}
-
-// ---- ORIG_HEAD -------------------------------------------------------------------------------------
-
-/// `ORIG_HEAD`, written by this pull, and what it held before.
-struct OrigHead {
-    file: PathBuf,
-    /// The bytes it had; `None` when there was no such file.
-    previous: Option<Vec<u8>>,
-}
-
-impl OrigHead {
-    /// Write `ORIG_HEAD` as git does (`<id>\n`), remembering what was there.
-    fn set(repo: &Repository, id: Oid) -> Result<OrigHead, NsitError> {
-        let file = repo.path().join("ORIG_HEAD");
-        let previous = match std::fs::read(&file) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        std::fs::write(&file, format!("{id}\n"))?;
-        Ok(OrigHead { file, previous })
-    }
-
-    /// The pull failed: put back what was there. A failure to do even that is not reported: the
-    /// pull's own error is what matters, and `ORIG_HEAD` is only a pointer to the commit the
-    /// branch was at, which the next pull or merge writes again.
-    fn restore(self) {
-        let _ = match self.previous {
-            Some(bytes) => std::fs::write(&self.file, bytes),
-            None => std::fs::remove_file(&self.file),
-        };
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    use git2::build::CheckoutBuilder;
-    use git2::{ErrorCode, FetchOptions, RepositoryState, StatusOptions};
+    use git2::{ErrorCode, FetchOptions, RepositoryState};
 
     use super::*;
     use crate::config::Config;
     use crate::credentials::{host_key_for, store_token};
     use crate::repo_ref::parse_repo_ref;
     use crate::test_support::{
-        commit_file, host_entry_for, isolated_env, local_repo, out_with, write_file, StubServer,
+        all_refs, commit_file, diverged_with_conflict, diverged_without_conflict, fetch_main,
+        files, head, host_entry_for, index_on_disk, isolated_env, local_repo, me, merge_state,
+        no_changes, nobody, orig_head_text as orig_head, out_with, push_main, server_at, theirs,
+        two_clones, work_repo, write_file, StubServer, REMOTE_URL as URL,
     };
-
-    const URL: &str = "https://git.iam.bot/ada/demo.git";
-
-    // ---- fixtures: a bare repository for the server, and clones that talk to it by path ------------
-
-    fn server_at(dir: &Path) -> PathBuf {
-        let path = dir.join("server.git");
-        Repository::init_bare(&path).unwrap();
-        path
-    }
-
-    /// A repository on `main` with no commits, whose `origin` is the server.
-    fn work_repo(dir: &Path, name: &str, server: &Path) -> Repository {
-        let path = dir.join(name);
-        std::fs::create_dir(&path).unwrap();
-        let repo = local_repo(&path);
-        repo.remote("origin", server.to_str().unwrap()).unwrap();
-        repo
-    }
-
-    fn push_main(repo: &Repository, server: &Path) {
-        repo.remote_anonymous(server.to_str().unwrap())
-            .unwrap()
-            .push(&["+refs/heads/main:refs/heads/main"], None)
-            .unwrap();
-    }
-
-    /// What `pull` fetches: the server's `main`, named by FETCH_HEAD.
-    fn fetch_main(repo: &Repository, server: &Path) -> Oid {
-        fetch_head_of(repo, server.to_str().unwrap(), "main", FetchOptions::new())
-            .unwrap()
-            .expect("the server has a main")
-    }
-
-    /// A copy of the server's `main`, checked out.
-    fn clone_main(dir: &Path, name: &str, server: &Path) -> Repository {
-        let repo = work_repo(dir, name, server);
-        let tip = fetch_main(&repo, server);
-        repo.reference("refs/heads/main", tip, true, "clone")
-            .unwrap();
-        repo.checkout_head(Some(CheckoutBuilder::new().force()))
-            .unwrap();
-        repo
-    }
-
-    /// A server whose `main` has `a.txt` = "base" and `keep.txt` = "keep", and two clones of it.
-    fn two_clones(dir: &Path) -> (PathBuf, Repository, Repository) {
-        let server = server_at(dir);
-        let one = work_repo(dir, "one", &server);
-        commit_file(&one, "a.txt", "base\n");
-        commit_file(&one, "keep.txt", "keep\n");
-        push_main(&one, &server);
-        let two = clone_main(dir, "two", &server);
-        (server, one, two)
-    }
-
-    fn theirs(id: Oid) -> Theirs<'static> {
-        Theirs {
-            id,
-            branch: "main",
-            label: "origin/main",
-            url: URL,
-        }
-    }
-
-    fn me() -> Result<Signature<'static>, NsitError> {
-        Ok(Signature::now("Puller", "puller@example.com").unwrap())
-    }
-
-    fn nobody() -> Result<Signature<'static>, NsitError> {
-        panic!("nothing is committed, so nobody needs to say who is committing")
-    }
-
-    fn head(repo: &Repository) -> Oid {
-        repo.head().unwrap().target().unwrap()
-    }
-
-    // ---- what a test compares before and after -------------------------------------------------
-
-    fn all_refs(repo: &Repository) -> Vec<(String, String)> {
-        let mut refs: Vec<(String, String)> = repo
-            .references()
-            .unwrap()
-            .map(|r| {
-                let r = r.unwrap();
-                let target = r
-                    .target()
-                    .map(|id| id.to_string())
-                    .or_else(|| r.symbolic_target().ok().flatten().map(str::to_string))
-                    .unwrap_or_default();
-                (r.name().unwrap().to_string(), target)
-            })
-            .collect();
-        refs.sort();
-        refs
-    }
-
-    /// Every file of the working directory (`.git` left out) with its text.
-    fn files(repo: &Repository) -> BTreeMap<String, String> {
-        fn walk(root: &Path, dir: &Path, found: &mut BTreeMap<String, String>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.file_name().unwrap() == ".git" {
-                    continue;
-                }
-                if path.is_dir() {
-                    walk(root, &path, found);
-                } else {
-                    let name = path.strip_prefix(root).unwrap().to_string_lossy();
-                    found.insert(
-                        name.replace('\\', "/"),
-                        std::fs::read_to_string(&path).unwrap(),
-                    );
-                }
-            }
-        }
-        let root = repo.workdir().unwrap();
-        let mut found = BTreeMap::new();
-        walk(root, root, &mut found);
-        found
-    }
-
-    fn merge_state(repo: &Repository) -> Vec<&'static str> {
-        ["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"]
-            .into_iter()
-            .filter(|name| repo.path().join(name).exists())
-            .collect()
-    }
-
-    fn orig_head(repo: &Repository) -> Option<String> {
-        std::fs::read_to_string(repo.path().join("ORIG_HEAD")).ok()
-    }
-
-    /// The index file as libgit2 reads it from disk: every entry with its stage and blob.
-    fn index_on_disk(repo: &Repository) -> Vec<(String, u16, Oid)> {
-        let mut index = repo.index().unwrap();
-        index.read(true).unwrap();
-        index
-            .iter()
-            .map(|e| {
-                (
-                    String::from_utf8_lossy(&e.path).into_owned(),
-                    e.flags & 0x3000,
-                    e.id,
-                )
-            })
-            .collect()
-    }
-
-    fn no_changes(repo: &Repository) -> bool {
-        let mut options = StatusOptions::new();
-        options.include_untracked(false);
-        repo.statuses(Some(&mut options)).unwrap().is_empty()
-    }
 
     // ---- fetching ---------------------------------------------------------------------------------
 
@@ -969,25 +743,6 @@ mod tests {
 
     // ---- merge ------------------------------------------------------------------------------------
 
-    /// `one` changed a.txt and pushed; `two` committed keep.txt: histories diverged, no conflict.
-    fn diverged_without_conflict(dir: &Path) -> (PathBuf, Repository, Repository) {
-        let (server, one, two) = two_clones(dir);
-        commit_file(
-            &one,
-            "a.txt",
-            "from one
-",
-        );
-        push_main(&one, &server);
-        commit_file(
-            &two,
-            "keep.txt",
-            "from two
-",
-        );
-        (server, one, two)
-    }
-
     #[test]
     fn a_merge_of_changes_to_different_files_makes_a_commit_with_two_parents() {
         let dir = tempfile::tempdir().unwrap();
@@ -1047,16 +802,6 @@ mod tests {
             two.find_commit(head(&two)).unwrap().message().unwrap(),
             "Merge branch 'release/1.0' of https://git.iam.bot/ada/demo.git\n"
         );
-    }
-
-    /// `one` and `two` both edited a.txt, and `one` also added added.txt.
-    fn diverged_with_conflict(dir: &Path) -> (PathBuf, Repository, Repository) {
-        let (server, one, two) = two_clones(dir);
-        commit_file(&one, "a.txt", "theirs\n");
-        commit_file(&one, "added.txt", "added by them\n");
-        push_main(&one, &server);
-        commit_file(&two, "a.txt", "ours\n");
-        (server, one, two)
     }
 
     #[test]
@@ -1197,6 +942,120 @@ mod tests {
         assert_eq!(orig_head(&two), None, "and ORIG_HEAD is as it was");
     }
 
+    /// An ignored local file at the path of an incoming tracked one: libgit2 would overwrite it
+    /// (its checkout does unless told not to, and its pre-check of a merge does not look at ignored
+    /// files). Nothing of the user's is overwritten, ignored or not: refused by name, nothing moved.
+    #[test]
+    fn an_ignored_file_where_the_pull_writes_one_is_refused_and_named_for_both_kinds_of_pull() {
+        // Fast-forward: the ignored file is a top-level one, and one inside an ignored directory.
+        let dir = tempfile::tempdir().unwrap();
+        let (server, one, two) = two_clones(dir.path());
+        commit_file(&one, "new.txt", "from one\n");
+        write_file(&one, "build/out.txt", "from one\n"); // makes the directory
+        commit_file(&one, "build/out.txt", "from one\n");
+        push_main(&one, &server);
+        let tip = fetch_main(&two, &server);
+        write_file(&two, ".gitignore", "new.txt\nbuild/\n");
+        write_file(&two, "new.txt", "mine, ignored\n");
+        write_file(&two, "build/out.txt", "mine, ignored too\n");
+        write_file(&two, "build/unrelated.txt", "ignored and not in the way\n");
+        std::fs::write(two.path().join("ORIG_HEAD"), "an earlier value\n").unwrap();
+        let (refs, files, index) = (all_refs(&two), files(&two), index_on_disk(&two));
+
+        let err = integrate(&two, "main", &theirs(tip), nobody).unwrap_err();
+        assert!(matches!(err, NsitError::Other(_)), "fast-forward: {err:?}");
+        assert_eq!(err.exit_code(), 1);
+        let text = err.to_string();
+        assert!(text.contains("new.txt"), "fast-forward: {text}");
+        assert!(text.contains("build/out.txt"), "fast-forward: {text}");
+        assert!(!text.contains("unrelated.txt"), "fast-forward: {text}");
+        assert!(!text.contains('\n'), "{text:?}");
+        assert_eq!(all_refs(&two), refs);
+        assert_eq!(self::files(&two), files, "no ignored file was touched");
+        assert_eq!(index_on_disk(&two), index);
+        assert_eq!(orig_head(&two), Some("an earlier value\n".to_string()));
+
+        // Merge: the same two files, with the histories diverged.
+        let dir = tempfile::tempdir().unwrap();
+        let (server, one, two) = two_clones(dir.path());
+        commit_file(&one, "new.txt", "from one\n");
+        write_file(&one, "build/out.txt", "from one\n"); // makes the directory
+        commit_file(&one, "build/out.txt", "from one\n");
+        push_main(&one, &server);
+        commit_file(&two, "keep.txt", "from two\n");
+        let tip = fetch_main(&two, &server);
+        write_file(&two, ".gitignore", "new.txt\nbuild/\n");
+        write_file(&two, "new.txt", "mine, ignored\n");
+        write_file(&two, "build/out.txt", "mine, ignored too\n");
+        let (refs, files, index) = (all_refs(&two), self::files(&two), index_on_disk(&two));
+
+        let err = integrate(&two, "main", &theirs(tip), me).unwrap_err();
+        assert!(matches!(err, NsitError::Other(_)), "merge: {err:?}");
+        let text = err.to_string();
+        assert!(text.contains("new.txt"), "merge: {text}");
+        assert!(text.contains("build/out.txt"), "merge: {text}");
+        assert!(!text.contains('\n'), "{text:?}");
+        assert_eq!(all_refs(&two), refs);
+        assert_eq!(self::files(&two), files, "no ignored file was touched");
+        assert_eq!(index_on_disk(&two), index);
+        assert!(merge_state(&two).is_empty());
+        assert_eq!(orig_head(&two), None);
+
+        // Out of the way, the same pull goes through, and the ignored file that was never in the
+        // way is still there.
+        std::fs::remove_file(two.workdir().unwrap().join("new.txt")).unwrap();
+        std::fs::remove_file(two.workdir().unwrap().join("build/out.txt")).unwrap();
+        write_file(&two, "build/unrelated.txt", "ignored and not in the way\n");
+        let pulled = integrate(&two, "main", &theirs(tip), me).unwrap();
+        assert!(matches!(pulled, Pulled::Merged { .. }), "{pulled:?}");
+        assert_eq!(self::files(&two)["new.txt"], "from one\n");
+        assert_eq!(
+            self::files(&two)["build/unrelated.txt"],
+            "ignored and not in the way\n"
+        );
+    }
+
+    /// The merge commit `pull` makes is not run through the secret guard, because it adds nothing
+    /// that is not in its parents. That holds only while nothing uncommitted can end up in it: a
+    /// new, staged `.env` is an uncommitted change, so the merge is refused before anything is
+    /// committed.
+    #[test]
+    fn a_staged_new_file_stops_a_merge_before_anything_is_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, _one, two) = diverged_without_conflict(dir.path());
+        let tip = fetch_main(&two, &server);
+        write_file(&two, ".env", "TOKEN=abc\n");
+        let mut index = two.index().unwrap();
+        index.add_path(Path::new(".env")).unwrap();
+        index.write().unwrap();
+        let ours = head(&two);
+        let (refs, files, index) = (all_refs(&two), files(&two), index_on_disk(&two));
+        assert!(
+            index.iter().any(|(path, _, _)| path == ".env"),
+            "it is staged"
+        );
+
+        let err = integrate(&two, "main", &theirs(tip), me).unwrap_err();
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 1);
+        assert!(err.to_string().contains(".env"), "{err}");
+        assert_eq!(head(&two), ours, "nothing was committed");
+        assert!(
+            two.head()
+                .unwrap()
+                .peel_to_tree()
+                .unwrap()
+                .get_name(".env")
+                .is_none(),
+            "the secret is in no commit"
+        );
+        assert_eq!(all_refs(&two), refs);
+        assert_eq!(self::files(&two), files);
+        assert_eq!(index_on_disk(&two), index, "and still staged, as it was");
+        assert!(merge_state(&two).is_empty());
+        assert_eq!(orig_head(&two), None);
+    }
+
     #[test]
     fn a_merge_commit_that_cannot_be_made_is_rolled_back_completely() {
         let dir = tempfile::tempdir().unwrap();
@@ -1245,161 +1104,6 @@ mod tests {
         assert_eq!(index_on_disk(&two), index);
         assert!(merge_state(&two).is_empty());
         assert_eq!(orig_head(&two), None);
-    }
-
-    // ---- abort ------------------------------------------------------------------------------------
-
-    #[test]
-    fn abort_puts_head_the_files_and_the_index_back_and_leaves_untracked_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let (server, _one, two) = diverged_with_conflict(dir.path());
-        write_file(&two, "scratch.txt", "untracked\n");
-        let ours = head(&two);
-        let (files_before, index_before) = (files(&two), index_on_disk(&two));
-        let tip = fetch_main(&two, &server);
-        let pulled = integrate(&two, "main", &theirs(tip), me).unwrap();
-        assert!(matches!(pulled, Pulled::Conflict { .. }));
-        assert!(
-            files(&two).contains_key("added.txt"),
-            "the merge brought it in"
-        );
-        // A person had begun on the conflict.
-        write_file(&two, "a.txt", "half resolved\n");
-
-        let back = abort(&two).unwrap();
-        assert_eq!(back, ours);
-        assert_eq!(head(&two), ours);
-        assert_eq!(
-            files(&two),
-            files_before,
-            "added.txt is gone, scratch.txt is not"
-        );
-        assert_eq!(index_on_disk(&two), index_before);
-        assert!(merge_state(&two).is_empty());
-        assert_eq!(two.state(), RepositoryState::Clean);
-        assert!(!two.index().unwrap().has_conflicts());
-        assert_eq!(files(&two)["scratch.txt"], "untracked\n");
-    }
-
-    #[test]
-    fn abort_also_undoes_a_resolution_that_was_staged() {
-        let dir = tempfile::tempdir().unwrap();
-        let (server, _one, two) = diverged_with_conflict(dir.path());
-        let ours = head(&two);
-        let tip = fetch_main(&two, &server);
-        integrate(&two, "main", &theirs(tip), me).unwrap();
-        write_file(&two, "a.txt", "resolved\n");
-        let mut index = two.index().unwrap();
-        index.add_path(Path::new("a.txt")).unwrap();
-        index.write().unwrap();
-
-        abort(&two).unwrap();
-        assert_eq!(files(&two)["a.txt"], "ours\n");
-        assert!(!files(&two).contains_key("added.txt"));
-        assert_eq!(head(&two), ours);
-        assert!(no_changes(&two));
-    }
-
-    #[test]
-    fn abort_goes_back_to_head_when_orig_head_is_missing_or_is_not_a_commit() {
-        for damage in ["missing", "garbage", "not a commit"] {
-            let dir = tempfile::tempdir().unwrap();
-            let (server, _one, two) = diverged_with_conflict(dir.path());
-            let ours = head(&two);
-            let tip = fetch_main(&two, &server);
-            integrate(&two, "main", &theirs(tip), me).unwrap();
-            let orig = two.path().join("ORIG_HEAD");
-            match damage {
-                "missing" => std::fs::remove_file(&orig).unwrap(),
-                "garbage" => std::fs::write(&orig, "this is not an object id\n").unwrap(),
-                _ => std::fs::write(&orig, "0123456789abcdef0123456789abcdef01234567\n").unwrap(),
-            }
-            let back = abort(&two).unwrap();
-            assert_eq!(back, ours, "{damage}");
-            assert_eq!(head(&two), ours, "{damage}");
-            assert_eq!(files(&two)["a.txt"], "ours\n", "{damage}");
-            assert!(merge_state(&two).is_empty(), "{damage}");
-        }
-    }
-
-    #[test]
-    fn abort_without_a_merge_is_a_usage_error_and_touches_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_server, _one, two) = two_clones(dir.path());
-        // Work that a hard reset would destroy.
-        write_file(&two, "a.txt", "my work\n");
-        let (refs, files, index) = (all_refs(&two), files(&two), index_on_disk(&two));
-
-        let err = abort(&two).unwrap_err();
-        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
-        assert_eq!(err.exit_code(), 2);
-        assert!(err.to_string().contains("no merge in progress"), "{err}");
-        assert!(!err.to_string().contains('\n'));
-        assert_eq!(all_refs(&two), refs);
-        assert_eq!(self::files(&two), files);
-        assert_eq!(index_on_disk(&two), index);
-
-        // Another operation's state is not a merge either.
-        std::fs::write(
-            two.path().join("CHERRY_PICK_HEAD"),
-            format!("{}\n", head(&two)),
-        )
-        .unwrap();
-        let err = abort(&two).unwrap_err();
-        assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
-        assert!(err.to_string().contains("no merge in progress"), "{err}");
-        assert_eq!(self::files(&two), files);
-    }
-
-    // ---- ORIG_HEAD --------------------------------------------------------------------------------
-
-    #[test]
-    fn orig_head_is_written_as_git_writes_it_and_can_be_put_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = local_repo(dir.path());
-        commit_file(&repo, "a.txt", "a\n");
-        let id = head(&repo);
-
-        // Nothing there before: restoring removes it again.
-        let set = OrigHead::set(&repo, id).unwrap();
-        assert_eq!(orig_head(&repo), Some(format!("{id}\n")));
-        assert_eq!(repo.revparse_single("ORIG_HEAD").unwrap().id(), id);
-        set.restore();
-        assert_eq!(orig_head(&repo), None);
-
-        // Something there before, even if it is not an object id: its bytes come back.
-        std::fs::write(repo.path().join("ORIG_HEAD"), b"older\xff value").unwrap();
-        let set = OrigHead::set(&repo, id).unwrap();
-        assert_eq!(orig_head(&repo), Some(format!("{id}\n")));
-        set.restore();
-        assert_eq!(
-            std::fs::read(repo.path().join("ORIG_HEAD")).unwrap(),
-            b"older\xff value"
-        );
-    }
-
-    /// Why nsit writes `ORIG_HEAD` itself and puts it back when a pull fails: libgit2's merge
-    /// writes it first thing (so it is written for a merge, though not for a fast-forward, which
-    /// is not a `git_merge` at all), and removes the rest of its merge state when it then
-    /// refuses to go on, but leaves `ORIG_HEAD` rewritten.
-    #[test]
-    fn libgit2_rewrites_orig_head_even_for_a_merge_it_refuses() {
-        let dir = tempfile::tempdir().unwrap();
-        let (server, _one, two) = diverged_without_conflict(dir.path());
-        let tip = fetch_main(&two, &server);
-        write_file(&two, "a.txt", "dirty, and in the way\n");
-        let annotated = two
-            .annotated_commit_from_fetchhead("refs/heads/main", URL, &tip)
-            .unwrap();
-
-        let mut checkout = CheckoutBuilder::new();
-        checkout.safe();
-        let err = two
-            .merge(&[&annotated], None, Some(&mut checkout))
-            .unwrap_err();
-        assert_eq!(err.code(), ErrorCode::Conflict, "{err}");
-        assert_eq!(orig_head(&two), Some(format!("{}\n", head(&two))));
-        assert!(merge_state(&two).is_empty(), "the rest was cleaned up");
     }
 
     // ---- tracked changes --------------------------------------------------------------------------
@@ -1490,10 +1194,22 @@ mod tests {
         repo.refname_to_id("refs/remotes/origin/main").ok()
     }
 
+    /// A pull from the server at `server`; any warning is a failure of the test.
     fn pull_local(
         repo: &Repository,
         server: &Path,
         who: impl FnOnce() -> Result<Signature<'static>, NsitError>,
+    ) -> Result<Pulled, NsitError> {
+        pull_local_warning(repo, server, who, |warning| {
+            panic!("unexpected warning: {warning}")
+        })
+    }
+
+    fn pull_local_warning(
+        repo: &Repository,
+        server: &Path,
+        who: impl FnOnce() -> Result<Signature<'static>, NsitError>,
+        warn: impl FnOnce(&str),
     ) -> Result<Pulled, NsitError> {
         pull_via(
             repo,
@@ -1505,7 +1221,40 @@ mod tests {
                     .map_err(NsitError::Git)
             },
             who,
+            warn,
         )
+    }
+
+    #[test]
+    fn a_tracking_ref_that_cannot_be_written_is_a_warning_because_the_pull_took_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, one, two) = two_clones(dir.path());
+        commit_file(&one, "new.txt", "n\n");
+        push_main(&one, &server);
+        let before = head(&two);
+        // A leftover lock on the tracking ref: the files and the branch move, the record cannot.
+        let lock_dir = two.path().join("refs").join("remotes").join("origin");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        std::fs::write(lock_dir.join("main.lock"), "").unwrap();
+
+        let warnings = std::cell::RefCell::new(Vec::<String>::new());
+        let pulled = pull_local_warning(&two, &server, nobody, |warning| {
+            warnings.borrow_mut().push(warning.to_string())
+        })
+        .unwrap();
+        assert!(matches!(pulled, Pulled::FastForward { .. }), "{pulled:?}");
+        assert_ne!(head(&two), before, "the pull took effect");
+        assert_eq!(head(&two), head(&one));
+        assert_eq!(files(&two)["new.txt"], "n\n");
+        assert_eq!(tracking(&two), None, "and the record was not made");
+        let warnings = warnings.into_inner();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("warning: the pull went through"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("origin/main"), "{warnings:?}");
+        assert!(!warnings[0].contains('\n'), "{warnings:?}");
     }
 
     #[test]
@@ -1572,6 +1321,7 @@ mod tests {
                     .map_err(NsitError::Git)
             },
             nobody,
+            |warning| panic!("unexpected warning: {warning}"),
         )
         .unwrap_err();
         assert!(matches!(err, NsitError::Other(_)), "{err:?}");
@@ -1596,6 +1346,7 @@ mod tests {
             URL,
             |_| panic!("nothing may be fetched for an upstream that is not a branch"),
             nobody,
+            |warning| panic!("unexpected warning: {warning}"),
         )
         .unwrap_err();
         assert!(matches!(err, NsitError::Usage(_)), "{err:?}");
@@ -1649,19 +1400,6 @@ mod tests {
         // A refused login (and anything that is not libgit2's) passes through.
         let auth = fetch_error(NsitError::Auth("authentication failed".into()), &target);
         assert_eq!(auth.exit_code(), 3);
-    }
-
-    #[test]
-    fn a_list_of_files_is_cut_and_has_no_control_characters() {
-        let names: Vec<String> = (0..12).map(|n| format!("f{n}.txt")).collect();
-        let text = list(&names);
-        assert!(text.starts_with("f0.txt, f1.txt"), "{text}");
-        assert!(
-            text.contains("f9.txt") && !text.contains("f10.txt"),
-            "{text}"
-        );
-        assert!(text.ends_with("and 2 more"), "{text}");
-        assert_eq!(list(&["a\u{1b}[31m\nb.txt".to_string()]), "a[31mb.txt");
     }
 
     // ---- the network step -----------------------------------------------------------------------------

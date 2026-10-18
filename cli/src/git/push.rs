@@ -10,7 +10,7 @@
 //!   server's branch with ours and fails with `GIT_ENONFASTFORWARD` ("cannot push
 //!   non-fastforwardable reference", or "... contains commits that are not present
 //!   locally" when the server has commits this repository never fetched). That is
-//!   `Rejected` (exit 6) with `non-fast-forward; run nsit pull`.
+//!   `NeedsPull` (exit 6) with `non-fast-forward; run nsit pull`.
 //! * **`--force-with-lease` is checked inside the push**, in libgit2's `push_negotiation`
 //!   callback: it runs after the server has advertised its refs and before anything is
 //!   uploaded, and its `src` is the server's current value of the branch. The server's
@@ -301,17 +301,31 @@ fn outcome(
     target: &RepoRef,
 ) -> Result<Outcome, NsitError> {
     if report.stale {
-        return Err(NsitError::Rejected(format!(
+        return Err(NsitError::NeedsPull(format!(
             "{refname}: stale info; the branch on the server is not where nsit last fetched it \
              (run nsit pull)"
         )));
     }
     if let Some((name, reason)) = report.rejected.first() {
-        return Err(NsitError::Rejected(format!(
+        // The server's own refusal of a non-fast-forward is the one refusal that reads (and is
+        // typed) like ours: the way on is a pull. Its words are classified here, once, so that
+        // nothing downstream has to read the message to know.
+        let text = one_line(reason, MAX_REASON);
+        let behind = text.to_ascii_lowercase().contains("non-fast-forward");
+        let line = format!(
             "{}: {}",
             one_line(name, MAX_REASON),
-            server_reason(reason)
-        )));
+            if behind {
+                "non-fast-forward; run nsit pull"
+            } else {
+                &text
+            }
+        );
+        return Err(if behind {
+            NsitError::NeedsPull(line)
+        } else {
+            NsitError::Rejected(line)
+        });
     }
     if report.up_to_date {
         return Ok(Outcome::UpToDate);
@@ -322,21 +336,10 @@ fn outcome(
     }
 }
 
-/// The server's reason for refusing a ref, as one line; its own refusal of a
-/// non-fast-forward reads like ours.
-fn server_reason(reason: &str) -> String {
-    let text = one_line(reason, MAX_REASON);
-    if text.to_ascii_lowercase().contains("non-fast-forward") {
-        "non-fast-forward; run nsit pull".to_string()
-    } else {
-        text
-    }
-}
-
 /// What a failed push should say. A refused login is already exit 3 (`run_remote`); the
 /// rest of libgit2's errors become one of:
 ///
-/// * `GIT_ENONFASTFORWARD`: `Rejected` (exit 6), `non-fast-forward; run nsit pull`;
+/// * `GIT_ENONFASTFORWARD`: `NeedsPull` (exit 6), `non-fast-forward; run nsit pull`;
 /// * HTTP 403, which Insitio answers to a signed-in account without write access:
 ///   `Rejected` (exit 6), `permission denied`. libgit2 does not hand on the server's text,
 ///   only the status, so the repository is named from what nsit pushed to;
@@ -347,7 +350,7 @@ fn push_error(err: NsitError, target: &RepoRef, refname: &str) -> NsitError {
         return err;
     };
     if git.code() == ErrorCode::NotFastForward {
-        return NsitError::Rejected(format!("{refname}: non-fast-forward; run nsit pull"));
+        return NsitError::NeedsPull(format!("{refname}: non-fast-forward; run nsit pull"));
     }
     match http_status(&git) {
         Some(403) => NsitError::Rejected(format!(
@@ -681,7 +684,7 @@ mod tests {
         let before = all_refs(&two);
 
         let err = push_local(&two, &server_path, "main", Mode::FastForward).unwrap_err();
-        assert!(matches!(err, NsitError::Rejected(_)), "{err:?}");
+        assert!(matches!(err, NsitError::NeedsPull(_)), "{err:?}");
         assert_eq!(err.exit_code(), 6);
         assert_eq!(
             err.to_string(),
@@ -777,7 +780,7 @@ mod tests {
         let before = all_refs(&two);
 
         let err = push_local(&two, &server_path, "main", Mode::ForceWithLease).unwrap_err();
-        assert!(matches!(err, NsitError::Rejected(_)), "{err:?}");
+        assert!(matches!(err, NsitError::NeedsPull(_)), "{err:?}");
         assert_eq!(err.exit_code(), 6);
         assert!(
             err.to_string().starts_with("refs/heads/main: stale info"),
@@ -886,6 +889,7 @@ mod tests {
             ..Report::default()
         };
         let err = outcome(&report, Ok(()), "refs/heads/main", &target()).unwrap_err();
+        assert!(matches!(err, NsitError::NeedsPull(_)), "{err:?}");
         assert_eq!(
             err.to_string(),
             "refs/heads/main: non-fast-forward; run nsit pull"
@@ -923,7 +927,7 @@ mod tests {
             ..Report::default()
         };
         let err = outcome(&stale, stopped(), "refs/heads/main", &target()).unwrap_err();
-        assert!(matches!(err, NsitError::Rejected(_)), "{err:?}");
+        assert!(matches!(err, NsitError::NeedsPull(_)), "{err:?}");
         assert!(err.to_string().contains("stale info"), "{err}");
 
         let up_to_date = Report {
@@ -976,7 +980,7 @@ mod tests {
                 &target(),
                 "refs/heads/main",
             );
-            assert!(matches!(err, NsitError::Rejected(_)), "{err:?}");
+            assert!(matches!(err, NsitError::NeedsPull(_)), "{err:?}");
             assert_eq!(
                 err.to_string(),
                 "refs/heads/main: non-fast-forward; run nsit pull"

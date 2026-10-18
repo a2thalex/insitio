@@ -189,7 +189,7 @@ pub struct SwitchArgs {
 
 #[derive(Debug, Args)]
 pub struct PullArgs {
-    /// Abandon a merge that stopped on conflicts
+    /// Abandon a merge that stopped on conflicts: throws away your conflict resolutions and restores the files as they were before the pull (untracked files stay)
     #[arg(long)]
     pub abort: bool,
 }

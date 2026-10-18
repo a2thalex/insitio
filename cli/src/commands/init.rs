@@ -193,12 +193,12 @@ fn rerun_hint(dir: &Path, args: &InitArgs) -> String {
 /// What a failed first push says: `err` and how to go on.
 ///
 /// Not "run nsit push to try again" when the push was refused because the server has commits
-/// this repository lacks: the error already says what to do (`run nsit pull`), and pushing
-/// again would only be refused the same way.
+/// this repository lacks (`NsitError::NeedsPull`): the error already says what to do, and
+/// pushing again would only be refused the same way.
 fn after_failed_first_push(err: NsitError) -> NsitError {
-    match &err {
-        NsitError::Rejected(message) if message.contains("run nsit pull") => err,
-        _ => with_hint(err, PUSH_AGAIN),
+    match err {
+        NsitError::NeedsPull(_) => err,
+        other => with_hint(other, PUSH_AGAIN),
     }
 }
 
@@ -972,11 +972,24 @@ mod tests {
             "refs/heads/main: non-fast-forward; run nsit pull",
             "refs/heads/main: stale info; the branch on the server is not where nsit last fetched it (run nsit pull)",
         ] {
-            let kept = after_failed_first_push(NsitError::Rejected(message.into()));
-            assert!(matches!(&kept, NsitError::Rejected(m) if m == message), "{kept:?}");
+            let kept = after_failed_first_push(NsitError::NeedsPull(message.into()));
+            assert!(matches!(&kept, NsitError::NeedsPull(m) if m == message), "{kept:?}");
             assert_eq!(kept.exit_code(), 6);
             assert!(!kept.to_string().contains("nsit push"), "{kept}");
         }
+    }
+
+    /// The signal is the error's type, not its wording: a refusal that is not the "behind"
+    /// kind still gets the hint, whatever its message happens to say.
+    #[test]
+    fn the_choice_is_made_by_the_type_of_the_error_and_not_by_reading_it() {
+        let wordy = NsitError::Rejected("denied by a hook: please run nsit pull first".into());
+        let hinted = after_failed_first_push(wordy);
+        assert!(
+            hinted.to_string().ends_with("run nsit push to try again"),
+            "{hinted}"
+        );
+        assert_eq!(hinted.exit_code(), 6);
     }
 
     // ---- what is printed -----------------------------------------------------------

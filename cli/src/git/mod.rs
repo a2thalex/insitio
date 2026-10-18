@@ -15,13 +15,17 @@
 //! `upstream` (the two settings that tie a branch to a remote branch: `push` and
 //! `clone` write them, `pull` reads them), `push` (sending a branch to `origin`:
 //! `nsit push` and the first push of `nsit init` both call it) and `pull`
-//! (fetching the upstream branch and bringing it in, and undoing a merge). No
-//! command module is needed by another.
+//! (fetching the upstream branch and bringing it in), with `orig_head` (the
+//! `ORIG_HEAD` a pull writes and restores) and `abort` (undoing a merge that
+//! stopped on conflicts, and what it refuses to throw away). No command module
+//! is needed by another.
 //!
 //! `clone`, `push` and `pull` are the commands that call `run_remote`.
 
+pub mod abort;
 pub mod auth;
 pub mod commit;
+pub mod orig_head;
 pub mod origin;
 pub mod paths;
 pub mod progress;

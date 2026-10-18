@@ -217,7 +217,8 @@ fn collect_changed(
         }
         let Some(path) = path else {
             return Err(NsitError::Other(
-                "cannot tell which file a change is about, so it cannot be checked for secrets                  (this is a bug in nsit)"
+                "cannot tell which file a change is about, so it cannot be checked for secrets \
+                 (this is a bug in nsit)"
                     .into(),
             ));
         };
@@ -559,6 +560,7 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, NsitError::Other(_)), "{status:?}: {err:?}");
             assert!(err.to_string().contains("bug in nsit"), "{err}");
+            assert!(!err.to_string().contains("  "), "stray spaces: {err}");
             assert_eq!(err.exit_code(), 1);
         }
     }

@@ -229,8 +229,7 @@ fn run_signed_out(args: &[&str], work: &Path) -> (Option<i32>, String, String) {
     (status.code(), out, err)
 }
 
-const SIGN_IN_HINT: &str = "nsit: not signed in to 127.0.0.1:9; run nsit auth login
-";
+const SIGN_IN_HINT: &str = "nsit: not signed in to 127.0.0.1:9; run nsit auth login\n";
 
 /// Review Focus 2: nobody is signed in and stdin is an open pipe that nobody
 /// writes to or closes (an agent's). Each `nsit repo` command must exit 3 with

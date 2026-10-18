@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use git2::Repository;
 
 use crate::error::NsitError;
+use crate::output::strip_controls;
 
 /// A path as the repository stores it: forward slashes, whatever the OS uses.
 /// Names that are not valid Unicode are shown with replacement characters.
@@ -33,6 +34,24 @@ pub type RawPath = Vec<u8>;
 /// only; two different raw paths can look the same here.
 pub fn display(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
+}
+
+/// The most file names an error line lists.
+const MAX_LISTED: usize = 10;
+
+/// File names for a one-line message: at most `MAX_LISTED` of them, comma separated, without
+/// control characters (a name comes from the working directory and may carry terminal escapes),
+/// and how many more there were.
+pub fn listed(files: &[String]) -> String {
+    let mut shown: Vec<String> = files
+        .iter()
+        .take(MAX_LISTED)
+        .map(|file| strip_controls(file))
+        .collect();
+    if files.len() > MAX_LISTED {
+        shown.push(format!("and {} more", files.len() - MAX_LISTED));
+    }
+    shown.join(", ")
 }
 
 /// The working directory of `repo`, or a usage error for a bare repository.
@@ -126,6 +145,22 @@ mod tests {
 
     fn repo_in(dir: &Path) -> Repository {
         Repository::init(dir).unwrap()
+    }
+
+    #[test]
+    fn a_list_of_files_is_cut_and_has_no_control_characters() {
+        let names: Vec<String> = (0..12).map(|n| format!("f{n}.txt")).collect();
+        let text = listed(&names);
+        assert!(text.starts_with("f0.txt, f1.txt"), "{text}");
+        assert!(
+            text.contains("f9.txt") && !text.contains("f10.txt"),
+            "{text}"
+        );
+        assert!(text.ends_with("and 2 more"), "{text}");
+        assert_eq!(listed(&["a\u{1b}[31m\nb.txt".to_string()]), "a[31mb.txt");
+        assert_eq!(listed(&[]), "");
+        let ten: Vec<String> = (0..10).map(|n| n.to_string()).collect();
+        assert!(!listed(&ten).contains("more"));
     }
 
     #[test]

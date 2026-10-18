@@ -15,9 +15,12 @@
 //!   finish, or run `nsit pull --abort` to undo it. See `git::pull` for what each outcome leaves
 //!   behind, why a pull that has to merge needs the tracked files committed, and why the secret
 //!   guard does not run on the merge commit a pull makes.
-//! * `--abort` is `reset --hard` to where the merge started (`ORIG_HEAD`), then the merge state
-//!   is cleared; untracked files are not touched. Without a merge in progress it is exit 2 and
-//!   changes nothing.
+//! * `--abort` **throws away your conflict resolutions and restores the files as they were before
+//!   the pull** (`reset --hard` to where the merge started, `ORIG_HEAD`, and the merge state is
+//!   cleared); untracked files are not touched. It says so in its help, in the hint a conflict
+//!   prints, and in its own output. It refuses (exit 2, naming the files, nothing changed) when a
+//!   tracked file the merge did not touch was changed after the pull stopped, and without a merge
+//!   in progress it is exit 2 and changes nothing: see `git::abort`.
 //! * A merge commit is made by the person pulling: `user.name` and `user.email` from the git
 //!   configuration, then the name and email nsit saved at sign-in (as for `nsit commit`).
 //! * Progress goes to stderr, and only on a terminal.
@@ -28,7 +31,7 @@
 //! that stopped a merge and is empty otherwise. A conflict prints this to stdout and *also* exits
 //! 4 with the usual error line on stderr. The text is `Already up to date`, `Fast-forwarded
 //! <branch> to <short id>`, `Merged <remote>/<branch>`, the list of conflicted files, or `Merge
-//! aborted; <branch> is back at <short id>`.
+//! aborted; <branch> is back at <short id>, with the files as they were before the pull (...)`.
 
 use std::path::Path;
 
@@ -39,10 +42,11 @@ use super::commit_signature;
 use crate::cli::{GlobalArgs, PullArgs};
 use crate::config::{base_url, resolve_host};
 use crate::error::NsitError;
+use crate::git::abort::{abort, operation_name};
 use crate::git::open_repo;
 use crate::git::origin::repo_ref_from_url;
 use crate::git::paths::workdir;
-use crate::git::pull::{abort, operation_name, pull_branch, Pulled};
+use crate::git::pull::{pull_branch, Pulled};
 use crate::git::stage::current_branch;
 use crate::git::upstream::{upstream, Upstream};
 use crate::output::{for_display, strip_controls, Out};
@@ -50,7 +54,9 @@ use crate::repo_ref::RepoRef;
 
 /// Said (unless `-q`) when a merge stopped on conflicts.
 const CONFLICT_HINT: &str = "Fix the conflicts, then run nsit commit to finish the merge (or \
-                             nsit commit -m \"message\"), or run nsit pull --abort to undo it.";
+                             nsit commit -m \"message\"). Or run nsit pull --abort to undo it: \
+                             that throws away your conflict resolutions and restores the files \
+                             as they were before the pull.";
 
 /// `--json` for `nsit pull`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -234,7 +240,8 @@ fn describe(report: &Report, json: &PullJson, tty: bool) -> String {
             lines.join("\n")
         }
         Summary::Aborted { branch } => format!(
-            "Merge aborted; {} is back at {short}",
+            "Merge aborted; {} is back at {short}, with the files as they were before the pull \
+             (changes made while resolving the conflicts were thrown away)",
             clean(branch.as_deref().unwrap_or("HEAD"))
         ),
     }
@@ -317,16 +324,43 @@ mod tests {
         };
         assert_eq!(
             describe(&report, &report.json, false),
-            "Merge aborted; main is back at cdcdcdc"
+            "Merge aborted; main is back at cdcdcdc, with the files as they were before the pull \
+             (changes made while resolving the conflicts were thrown away)"
         );
         let detached = Report {
             summary: Summary::Aborted { branch: None },
             ..report
         };
-        assert_eq!(
-            describe(&detached, &detached.json, false),
-            "Merge aborted; HEAD is back at cdcdcdc"
+        assert!(
+            describe(&detached, &detached.json, false)
+                .starts_with("Merge aborted; HEAD is back at cdcdcdc, with the files"),
+            "{}",
+            describe(&detached, &detached.json, false)
         );
+    }
+
+    /// What `--abort` does is said where a person decides to use it: in its help, in the hint a
+    /// conflict prints, and in its output.
+    #[test]
+    fn what_abort_throws_away_is_said_in_the_help_the_hint_and_the_output() {
+        use clap::CommandFactory;
+        let plain = "throws away your conflict resolutions and restores the files as they were \
+                     before the pull";
+        assert!(CONFLICT_HINT.contains(plain), "{CONFLICT_HINT}");
+        assert!(
+            CONFLICT_HINT.contains("nsit pull --abort"),
+            "{CONFLICT_HINT}"
+        );
+        let pull = crate::cli::Cli::command()
+            .find_subcommand("pull")
+            .unwrap()
+            .clone();
+        let abort = pull
+            .get_arguments()
+            .find(|arg| arg.get_id() == "abort")
+            .unwrap();
+        let help = abort.get_help().unwrap().to_string();
+        assert!(help.contains(plain), "{help}");
     }
 
     #[test]
