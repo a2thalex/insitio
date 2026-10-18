@@ -18,6 +18,7 @@ import { pullRoutes } from "./web/routes/pulls.js";
 import { repoSettingsRoutes } from "./web/routes/repoSettings.js";
 import { userRoutes } from "./web/routes/users.js";
 import { deviceRoutes } from "./web/routes/device.js";
+import { downloadRoutes } from "./web/routes/downloads.js";
 
 const MAX_FORM_BYTES = 2 * 1024 * 1024;
 
@@ -48,6 +49,8 @@ export function buildApp(deps: Deps): Hono<Env> {
   settingsRoutes(deps, app);
   adminRoutes(deps, app);
   homeRoutes(deps, app);
+  // /download, /install.ps1 and /install.sh are single-segment paths like /:owner, so they come before userRoutes.
+  downloadRoutes(deps, app);
   newRepoRoutes(deps, app);
   codeRoutes(deps, app);
   issueRoutes(deps, app);

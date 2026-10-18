@@ -68,6 +68,7 @@ A new empty repository shows these push instructions on its page. If the first p
 | `BASE_URL` | `http://localhost:$PORT` | Public URL, used in clone URLs and invite links. An `https://` value turns on secure cookies. |
 | `DATA_DIR` | `./data` | Database (`gitfkd.db`) and bare repositories (`repos/<owner>/<name>.git`) |
 | `ALLOW_USER_INVITES` | unset | `1` lets non-admins create invite links |
+| `NSIT_RELEASE_REPO` | `a2thalex/gitfkd` | GitHub `owner/repo` whose Releases hold the `nsit` binaries that `/download`, `/install.ps1` and `/install.sh` point at |
 
 | `TRUST_PROXY` | unset | `1` trusts a proxy on loopback (or a comma list of proxy IPs) for client addresses, and binds the app to 127.0.0.1 |
 | `HOST` | all interfaces (127.0.0.1 with `TRUST_PROXY`) | Interface to listen on |

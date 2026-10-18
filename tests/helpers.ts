@@ -21,7 +21,16 @@ export function testDeps(overrides: Partial<Config> = {}): Deps {
   mkdirSync(join(dataDir, "repos"));
   return {
     db,
-    config: { dataDir, port: 0, host: undefined, baseUrl: "http://localhost:3000", allowUserInvites: false, trustedProxies: [], ...overrides },
+    config: {
+      dataDir,
+      port: 0,
+      host: undefined,
+      baseUrl: "http://localhost:3000",
+      allowUserInvites: false,
+      trustedProxies: [],
+      releaseRepo: "a2thalex/gitfkd",
+      ...overrides,
+    },
   };
 }
 

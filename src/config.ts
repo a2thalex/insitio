@@ -9,7 +9,13 @@ export type Config = {
   allowUserInvites: boolean;
   /** Proxy addresses whose X-Forwarded-For header is believed. Empty trusts none. */
   trustedProxies: string[];
+  /** GitHub "owner/repo" whose Releases host the nsit binaries that /download and the install scripts point at. */
+  releaseRepo: string;
 };
+
+const DEFAULT_RELEASE_REPO = "a2thalex/gitfkd";
+// The value is written into generated shell scripts, so only plain owner/repo names are accepted.
+const RELEASE_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 const LOOPBACK = ["127.0.0.1", "::1"];
 
@@ -17,6 +23,13 @@ function parseTrustProxy(v: string | undefined): string[] {
   if (!v || v === "0" || v === "false") return [];
   if (v === "1" || v === "true" || v === "loopback") return LOOPBACK;
   return v.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function parseReleaseRepo(v: string | undefined): string {
+  const repo = v?.trim();
+  if (!repo) return DEFAULT_RELEASE_REPO;
+  if (!RELEASE_REPO_RE.test(repo)) throw new Error(`NSIT_RELEASE_REPO must look like "owner/repo", got "${repo}"`);
+  return repo;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -30,5 +43,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     baseUrl: (env.BASE_URL ?? `http://localhost:${port}`).replace(/\/+$/, ""),
     allowUserInvites: env.ALLOW_USER_INVITES === "1",
     trustedProxies,
+    releaseRepo: parseReleaseRepo(env.NSIT_RELEASE_REPO),
   };
 }
