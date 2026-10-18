@@ -17,6 +17,7 @@ import { issueRoutes } from "./web/routes/issues.js";
 import { pullRoutes } from "./web/routes/pulls.js";
 import { repoSettingsRoutes } from "./web/routes/repoSettings.js";
 import { userRoutes } from "./web/routes/users.js";
+import { deviceRoutes } from "./web/routes/device.js";
 
 const MAX_FORM_BYTES = 2 * 1024 * 1024;
 
@@ -42,6 +43,8 @@ export function buildApp(deps: Deps): Hono<Env> {
   });
 
   authRoutes(deps, app);
+  // /login/device is two segments deep, so it must come before the /:owner/:repo routes below.
+  deviceRoutes(deps, app);
   settingsRoutes(deps, app);
   adminRoutes(deps, app);
   homeRoutes(deps, app);

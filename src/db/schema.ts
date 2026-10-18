@@ -116,6 +116,20 @@ const MIGRATIONS = [
   );
   create index issue_events_issue on issue_events (issue_id);
   `,
+  `
+  create table device_codes (
+    id integer primary key,
+    device_code_hash text not null unique,
+    user_code_hash text not null unique,
+    client_name text not null,
+    status text not null default 'pending' check (status in ('pending', 'approved', 'denied', 'consumed')),
+    user_id integer references users(id) on delete cascade,
+    interval integer not null default 5,
+    last_poll_at integer,
+    expires_at integer not null,
+    created_at integer not null
+  );
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

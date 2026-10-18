@@ -1,8 +1,7 @@
 import type { Context, Hono } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
-import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Deps } from "../../deps.js";
-import { clientAddress } from "../../clientAddress.js";
+import { requestAddress } from "../../clientAddress.js";
 import { ValidationError } from "../../services/errors.js";
 import { authenticate, createSession, deleteSession, inviteStatus, redeemInvite } from "../../services/users.js";
 import type { Env } from "../env.js";
@@ -15,16 +14,6 @@ const failures = new Map<string, { count: number; until: number }>();
 const MAX_FAILURES = 10;
 const WINDOW_MS = 15 * 60 * 1000;
 
-function requestAddress(c: Context<Env>, deps: Deps): string {
-  let peer: string | undefined;
-  try {
-    peer = getConnInfo(c).remote.address;
-  } catch {
-    // in-process requests (tests) have no socket
-  }
-  return clientAddress(peer, c.req.header("x-forwarded-for"), deps.config.trustedProxies);
-}
-
 function throttled(key: string): boolean {
   const f = failures.get(key);
   return !!f && f.count >= MAX_FAILURES && f.until > Date.now();
@@ -36,7 +25,7 @@ function recordFailure(key: string) {
   else f.count++;
 }
 
-function AuthBox({ title, children }: { title: string; children: any }) {
+export function AuthBox({ title, children }: { title: string; children: any }) {
   return (
     <div class="constellation">
       <div class="container-sm px-3 py-6" style="max-width:360px">
@@ -115,7 +104,7 @@ export function authRoutes(deps: Deps, app: Hono<Env>) {
     const f = await form(c);
     const username = field(f, "username").trim();
     const next = safeNext(c.req.query("next"));
-    const key = `${username.toLowerCase()}|${requestAddress(c, deps)}`;
+    const key = `${username.toLowerCase()}|${requestAddress(c, deps.config.trustedProxies)}`;
     if (throttled(key)) {
       return render(c, "Sign in", <LoginPage csrf={c.get("csrf")} next={next} username={username} error="Too many failed attempts. Try again in a few minutes." />, 429);
     }

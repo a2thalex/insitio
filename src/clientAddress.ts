@@ -1,3 +1,6 @@
+import type { Context } from "hono";
+import { getConnInfo } from "@hono/node-server/conninfo";
+
 function normalize(address: string): string {
   return address.trim().replace(/^::ffff:/, "");
 }
@@ -16,4 +19,15 @@ export function clientAddress(peer: string | undefined, forwardedFor: string | u
     if (!trusted.includes(hops[i])) return hops[i];
   }
   return direct;
+}
+
+/** The client address of an incoming request; "unknown" when there is no socket (in-process test requests). */
+export function requestAddress(c: Context, trustedProxies: string[]): string {
+  let peer: string | undefined;
+  try {
+    peer = getConnInfo(c).remote.address;
+  } catch {
+    // in-process requests (tests) have no socket
+  }
+  return clientAddress(peer, c.req.header("x-forwarded-for"), trustedProxies);
 }
