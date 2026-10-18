@@ -27,9 +27,30 @@ name: nsit release
 #   APPLE_API_KEY_ID          that key's Key ID
 #   APPLE_API_ISSUER_ID       the Issuer ID shown on the App Store Connect keys page
 #
-# Trust boundaries: the cargo builds (which run every dependency's build script) never see a secret, and
-# the Apple secrets are only handed to the few macOS steps that use them, after the build. Only the last
-# job can write to the repository.
+# Jobs
+#   prepare --+--> build-windows ------------------------+
+#             +--> build-linux --------------------------+--> release   (real releases only)
+#             +--> build-macos --> sign-macos -----------+
+#   build-macos makes the unsigned Mac binaries (artifacts unsigned-nsit-macos-*); sign-macos signs and
+#   notarizes them and uploads the result as nsit-macos-arm64 / nsit-macos-x64; release reads nsit-*.
+#
+# Trust boundaries
+#   * The cargo builds (which run every dependency's build script and every third-party action) never
+#     see a secret: no job that builds references one.
+#   * The Apple secrets are used in exactly two places. prepare reads them only to check that all six
+#     exist (it runs no build and no third-party action), and sign-macos hands each to the one step that
+#     needs it. sign-macos checks out no code, installs no toolchain and runs no cargo; while the signing
+#     identity exists it only runs Apple's tools (security, codesign, notarytool, spctl) and GitHub's own
+#     artifact actions, and it runs the binary only after the keychain and key files are deleted. So
+#     nothing that ran during a build can reach the signing identity.
+#   * Only the last job (release) can write to the repository.
+#
+# Supply chain
+#   Every `uses:` below names a tag or branch, which its owner can move. The one third-party action,
+#   dtolnay/rust-toolchain, is used the same way in all three build jobs (`@stable`, with `targets:`) and
+#   should be pinned to a full commit SHA. That is not done here because a SHA cannot be verified without
+#   reaching GitHub. When it is pinned, also pass `toolchain: stable`: today the ref name `@stable` is
+#   what selects the toolchain.
 on:
   push:
     tags: ["nsit-v*"]
@@ -167,6 +188,7 @@ jobs:
         with:
           persist-credentials: false
 
+      # TODO: pin to a commit SHA (see "Supply chain" at the top).
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -248,6 +270,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
+      # TODO: pin to a commit SHA (see "Supply chain" at the top).
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
@@ -311,8 +334,9 @@ jobs:
           retention-days: 7
 
   # One leg per Mac architecture, on the same (Apple silicon) runner; the Intel binary is cross-built.
-  # Order inside a leg: build with no secrets, then, only when all six secrets exist, sign, notarize
-  # and check; the temporary keychain and key file are removed whatever happens.
+  # This job only builds. It references no secret. The unsigned binary goes to sign-macos as an artifact
+  # named unsigned-<asset>, which the release job's `nsit-*` pattern does not match, so an unsigned
+  # binary can never be published by mistake.
   build-macos:
     name: build ${{ matrix.asset }}
     needs: prepare
@@ -337,6 +361,7 @@ jobs:
         with:
           persist-credentials: false
 
+      # TODO: pin to a commit SHA (see "Supply chain" at the top).
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -348,6 +373,63 @@ jobs:
         run: |
           mkdir dist
           cp "cli/target/$BUILD_TARGET/release/nsit" "dist/$ASSET"
+
+      # Not run here: the smoke test is in sign-macos, on the file that is actually shipped.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # Signs and notarizes what build-macos made, and uploads it as nsit-macos-arm64 / nsit-macos-x64. This is
+  # the only job that is handed the Apple secrets (prepare only checks they exist), each to just the step
+  # that needs it. It checks out no code, installs no toolchain and runs no cargo: only Apple's tools
+  # (lipo, security, codesign, ditto, notarytool, spctl) and GitHub's own artifact actions run while the
+  # signing identity exists. The binary itself is run once, in the step before the upload, after the
+  # keychain and key files have been deleted. So nothing that ran during the build can reach the signing
+  # identity.
+  #
+  # On a dry run without the secrets (sign is not "true") the binary is passed through unsigned, with a
+  # warning, so a dry run still ends with the same four artifacts. A real release cannot get here without
+  # the secrets, and the release job refuses unsigned Mac binaries as well.
+  sign-macos:
+    name: sign ${{ matrix.asset }}
+    needs: [prepare, build-macos]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: nsit-macos-arm64
+            arch: arm64
+          - asset: nsit-macos-x64
+            arch: x86_64
+    env:
+      ASSET: ${{ matrix.asset }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-${{ matrix.asset }}
+          path: dist
+
+      # lipo only reads the file. It catches a mix-up of the two artifacts before anything is signed.
+      - name: Check what was downloaded
+        run: |
+          set -euo pipefail
+          if [ ! -s "dist/$ASSET" ]; then
+            echo "::error::dist/$ASSET is missing or empty."
+            exit 1
+          fi
+          archs=$(lipo -archs "dist/$ASSET")
+          if [ "$archs" != "$EXPECTED_ARCH" ]; then
+            echo "::error::$ASSET is built for '$archs', not '$EXPECTED_ARCH'."
+            exit 1
+          fi
+          chmod +x "dist/$ASSET"
+          echo "$ASSET is a $archs binary."
 
       - name: Say that the binary will be unsigned
         if: needs.prepare.outputs.sign != 'true'
@@ -399,8 +481,9 @@ jobs:
       # --options runtime turns on the hardened runtime and --timestamp asks Apple's timestamp server for
       # a secure timestamp; notarization refuses a binary that lacks either. The identifier is fixed so
       # the signature (and with it the keychain access nsit is granted to its stored token) is the same
-      # for every release and both Mac architectures.
-      - name: Sign
+      # for every release and both Mac architectures. `codesign --verify --strict` is the real gate on
+      # the result: it fails the job if the signature is not valid.
+      - name: Sign and verify
         if: needs.prepare.outputs.sign == 'true'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -460,19 +543,32 @@ jobs:
 
       # A bare command-line binary cannot carry a stapled ticket (stapling is for apps, disk images and
       # installer packages), so Gatekeeper looks the notarization up online the first time the file is
-      # opened after a download with a browser. These two checks show what Gatekeeper and codesign make
-      # of the file. They are for the log and never fail the job, because spctl does not assess a bare
-      # executable the way it assesses an app. Expected on success:
-      #   spctl:    "<file>: accepted", "source=Notarized Developer ID", "origin=Developer ID Application: ..."
-      #   codesign: no output and exit status 0 (the file satisfies the "notarized" requirement)
-      - name: Check what Gatekeeper makes of it (informational)
+      # opened after a download with a browser.
+      #   * codesign --verify --strict (again, after notarization) is the gate: a bad signature fails the job.
+      #   * spctl --assess --type execute is what Gatekeeper itself says about an executable. It is for the
+      #     log and never fails the job, because spctl does not always assess a bare Mach-O the way it does
+      #     an app. Expected on success: "<file>: accepted", "source=Notarized Developer ID" and
+      #     "origin=Developer ID Application: ...".
+      #   * The notarized requirement is the same lookup done by codesign; it needs network and a recent
+      #     macOS, so it is also informational.
+      - name: Verify the signature and see what Gatekeeper makes of it
         if: needs.prepare.outputs.sign == 'true'
         run: |
+          set -euo pipefail
           bin="dist/$ASSET"
-          spctl --assess --type install --verbose=4 "$bin" || echo "::notice::spctl did not accept $ASSET as an installer-type object. For a bare executable that is not by itself a failure; the notarization status above is what counts."
-          codesign --verify --strict --verbose=2 --test-requirement="=notarized" "$bin" \
-            && echo "codesign confirms $ASSET is notarized." \
-            || echo "::notice::codesign could not confirm the notarization of $ASSET (the check looks it up online and needs a recent macOS)."
+          codesign --verify --strict --verbose=2 "$bin"
+          echo "codesign: the signature of $ASSET is valid."
+
+          if spctl -a -vvv -t execute "$bin"; then
+            echo "spctl: Gatekeeper accepts $ASSET."
+          else
+            echo "::notice::spctl did not accept $ASSET as an executable. For a bare command-line binary that is not by itself a failure, since spctl does not assess one the way it assesses an app; the valid signature and Apple's notarization verdict above are what count."
+          fi
+          if codesign --verify --strict --verbose=2 --test-requirement="=notarized" "$bin"; then
+            echo "codesign confirms $ASSET is notarized."
+          else
+            echo "::notice::codesign could not confirm the notarization of $ASSET (the check looks it up online and needs a recent macOS)."
+          fi
 
       # Runs even when an earlier step failed or the run was cancelled. Deleting the keychain also takes
       # it out of the search list.
@@ -485,20 +581,29 @@ jobs:
           fi
           rm -f "$RUNNER_TEMP/nsit-cert.p12" "$RUNNER_TEMP/nsit-notary-key.p8" "$RUNNER_TEMP/$ASSET.zip"
 
-      # The Intel binary runs under Rosetta on this Apple silicon runner. If Rosetta is not installed
-      # that is a warning, not a failure, because the arm64 leg and the checks above already passed.
+      # The one place the binary is run, on the exact file that is uploaded (signed, or unsigned on a dry
+      # run without secrets). It comes after the cleanup above: no keychain, certificate or key file is on
+      # the machine any more, and no secret is in this step's environment.
+      #
+      # The Intel binary runs under Rosetta 2 on this Apple silicon runner. Rosetta is checked first with
+      # a binary of the system's own: if even that cannot run as x86_64, Rosetta is not installed and the
+      # check is skipped with a warning (the arm64 leg has run the same sources). If Rosetta does work, an
+      # x86_64 binary that will not run is a real failure.
       - name: Smoke test
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          chmod +x "dist/$ASSET"
           expected="nsit $VERSION (${GITHUB_SHA:0:7})"
-          if [ "$BUILD_TARGET" = "x86_64-apple-darwin" ]; then
-            actual=$(arch -x86_64 "./dist/$ASSET" --version) || {
-              echo "::warning::Could not run $ASSET under Rosetta here, so it was not smoke tested."
+          if [ "$EXPECTED_ARCH" = "x86_64" ]; then
+            if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+              echo "::warning::Rosetta 2 is not installed on this runner, so $ASSET was not smoke tested."
               exit 0
-            }
+            fi
+            if ! actual=$(arch -x86_64 "./dist/$ASSET" --version); then
+              echo "::error::Rosetta 2 works on this runner, but $ASSET failed to run under it."
+              exit 1
+            fi
           else
             actual=$("./dist/$ASSET" --version)
           fi
@@ -515,10 +620,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The only job that can write to the repository, and it only runs for a real release.
+  # The only job that can write to the repository, and it only runs for a real release. It takes the
+  # Mac binaries from sign-macos (the nsit-macos-* artifacts), never the unsigned-* ones from build-macos.
   release:
     name: publish the release
-    needs: [prepare, build-windows, build-linux, build-macos]
+    needs: [prepare, build-windows, build-linux, sign-macos]
     if: needs.prepare.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
