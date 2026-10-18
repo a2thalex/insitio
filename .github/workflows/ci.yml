@@ -5,14 +5,20 @@ name: CI
 # desktop systems. So every leg runs everything: formatting, lints and unit tests for nsit, the
 # TypeScript type check, and the full vitest suite (which includes the 2,000-commit, 20 MB push and
 # clone check).
+#
+# Triggers: every pull request, every push to main, and "Run workflow" by hand (workflow_dispatch). A
+# branch that has no pull request yet is only built when someone runs it by hand from the Actions tab.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
-# A newer push to the same branch or pull request makes an older run pointless.
+# A newer push to the same branch or pull request makes an older run pointless, but a run on main is
+# a record of that commit and is never cancelled.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -62,16 +68,42 @@ jobs:
       - name: Format (nsit)
         run: cargo fmt --manifest-path cli/Cargo.toml --check
 
+      # --locked: build with exactly the versions in Cargo.lock, and fail if the lock file is out of date.
       - name: Lint (nsit)
-        run: cargo clippy --manifest-path cli/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path cli/Cargo.toml --all-targets -- -D warnings
 
       - name: Test (nsit)
-        run: cargo test --manifest-path cli/Cargo.toml
+        run: cargo test --locked --manifest-path cli/Cargo.toml
 
       - name: Type check (server and tests)
         run: npm run typecheck
 
-      # Builds the debug nsit binary (the dependencies are already compiled by the steps above) and
-      # runs it against a real server in every end-to-end test.
+      # Builds the debug nsit binary (also with --locked: tests/helpers.ts adds it when CI is set; the
+      # dependencies are already compiled by the steps above) and runs it against a real server in
+      # every end-to-end test.
       - name: Test (server, and nsit against it)
         run: npm test
+
+  # cli/Cargo.toml declares rust-version 1.89. Nothing else builds with that compiler, so without this
+  # job the number would be a claim; with it, a dependency or a piece of code that needs something newer
+  # fails here, and not for the first person who tries an older toolchain.
+  rust-version:
+    name: rust-version 1.89 (cargo check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain is a `with:` input on @master, the form dtolnay's own crates use for a fixed
+      # version in their CI.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+          cache-on-failure: true
+
+      - name: Check with the declared rust-version
+        run: cargo check --locked --manifest-path cli/Cargo.toml --all-targets

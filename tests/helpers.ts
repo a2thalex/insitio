@@ -7,7 +7,13 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { openDb } from "../src/db/db.js";
 import { migrate } from "../src/db/schema.js";
-import type { Config } from "../src/config.js";
+import {
+  DEFAULT_GIT_DRAIN_IDLE_MS,
+  DEFAULT_GIT_DRAIN_MAX_BYTES,
+  DEFAULT_HEADERS_TIMEOUT_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  type Config,
+} from "../src/config.js";
 import type { Deps } from "../src/deps.js";
 import { buildApp } from "../src/app.js";
 import { createInsitioServer } from "../src/server.js";
@@ -33,6 +39,10 @@ export function testDeps(overrides: Partial<Config> = {}): Deps {
       allowUserInvites: false,
       trustedProxies: [],
       releaseRepo: "a2thalex/gitfkd",
+      requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+      headersTimeoutMs: DEFAULT_HEADERS_TIMEOUT_MS,
+      gitDrainMaxBytes: DEFAULT_GIT_DRAIN_MAX_BYTES,
+      gitDrainIdleMs: DEFAULT_GIT_DRAIN_IDLE_MS,
       ...overrides,
     },
   };
@@ -167,9 +177,12 @@ function buildNsit(): Promise<string> {
     const env: NodeJS.ProcessEnv = { ...process.env };
     const pathKey = Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "PATH";
     env[pathKey] = [join(homedir(), ".cargo", "bin"), env[pathKey] ?? ""].join(delimiter);
+    // In CI the build must use exactly the versions in Cargo.lock (the other cargo steps there say --locked
+    // too); on a developer's machine a lock file that needs updating is just updated.
+    const locked = process.env.CI ? ["--locked"] : [];
     const child = spawn(
       process.env.CARGO || "cargo",
-      ["build", "--manifest-path", join(repoRoot, "cli", "Cargo.toml"), "--message-format=json-render-diagnostics"],
+      ["build", ...locked, "--manifest-path", join(repoRoot, "cli", "Cargo.toml"), "--message-format=json-render-diagnostics"],
       { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
     );
     let stdout = "";

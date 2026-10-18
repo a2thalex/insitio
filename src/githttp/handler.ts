@@ -64,6 +64,37 @@ async function fixHead(deps: Deps, repo: RepoRow) {
   setDefaultBranch(deps.db, repo.id, pick);
 }
 
+/**
+ * Read the rest of `req` and throw it away, so that a client that is still uploading is not reset before it
+ * has read the answer. This is for requests nobody is reading any more, so it is bounded: past `maxBytes`
+ * more of body, or `idleMs` with no data, the connection is closed. (The client that goes on sending after an
+ * answer has been given is a client that was not going to be told anything new.)
+ */
+export function drainRequest(req: IncomingMessage, maxBytes: number, idleMs: number): void {
+  if (req.readableEnded || req.destroyed) return;
+  let drained = 0;
+  let idle: NodeJS.Timeout | undefined;
+  const stop = () => clearTimeout(idle);
+  const giveUp = () => {
+    stop();
+    req.socket.destroy();
+  };
+  const wait = () => {
+    clearTimeout(idle);
+    idle = setTimeout(giveUp, idleMs);
+  };
+  req.on("data", (chunk: Buffer) => {
+    drained += chunk.length;
+    if (drained > maxBytes) giveUp();
+    else wait();
+  });
+  req.once("end", stop);
+  req.once("close", stop);
+  req.once("error", stop);
+  wait();
+  req.resume();
+}
+
 export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: Deps, route: GitRoute): void {
   const repo = getRepo(deps.db, route.owner, route.repo);
   const { user, invalid } = authenticate(deps, req);
@@ -128,17 +159,24 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
     child.stdout.pipe(res, { end: false });
   };
   child.stdout.on("data", onHead);
+  // git can stop reading before the upload is over (a pack above receive.maxInputSize, a fatal error), and
+  // git may never start. The client is still sending then, and a connection that nobody reads from gets
+  // reset under it, so it reports a broken upload instead of git's answer (for a push: "unpacker error").
+  // So what is left of the request is read and dropped, within limits (see `drainRequest`).
+  let draining = false;
+  const drain = () => {
+    if (draining) return;
+    draining = true;
+    req.unpipe(child.stdin);
+    drainRequest(req, deps.config.gitDrainMaxBytes, deps.config.gitDrainIdleMs);
+  };
   child.on("error", (err) => {
     console.error("git http-backend failed to start", err);
     send(res, 500, "Git backend unavailable.");
+    drain();
   });
   child.on("close", async (code) => {
-    // git can stop reading before the upload is over: a pack above receive.maxInputSize, a fatal error.
-    // The client is still sending then, and a connection that nobody reads from gets reset under it,
-    // so it reports a broken upload instead of git's answer (for a push: "unpacker error"). Read what
-    // is left of the request and drop it, so that the answer reaches the client.
-    req.unpipe(child.stdin);
-    req.resume();
+    drain();
     if (!headersSent) {
       send(res, 500, `Git backend exited with code ${code}.`);
       return;

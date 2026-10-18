@@ -2505,12 +2505,17 @@ const SCALE_BLOB_BYTES = 20 * 1024 * 1024;
 /** The push and the clone together must finish within this. */
 const SCALE_BUDGET_MS = 120_000;
 /**
- * The most a test of its own may take: generating the repository, the budget above (with room to
- * report how far over it was instead of being killed first), and the checks. The two `nsit`
- * processes get less than this each, so a hung one is killed with its output before vitest gives up.
+ * Each `nsit` process (the push, then the clone) may run this long before it is killed and reported with
+ * its own output. That is the budget above, so a run that is over budget but not hung still finishes and
+ * says how far over it was (the push + clone assertion), and one that hangs fails here.
  */
-const SCALE_TEST_TIMEOUT = 300_000;
-const SCALE_PROCESS_TIMEOUT = 150_000;
+const SCALE_PROCESS_TIMEOUT = SCALE_BUDGET_MS;
+/**
+ * The most the test itself may take. It has to hold the generation, the two processes at their longest
+ * (so twice `SCALE_PROCESS_TIMEOUT`, which is what makes a hung `nsit` fail with its output and not by
+ * vitest giving up on the test), and the checks afterwards, with 2 minutes to spare for those.
+ */
+const SCALE_TEST_TIMEOUT = 2 * SCALE_PROCESS_TIMEOUT + 120_000;
 
 /** Runs real git with `input` on its stdin; rejects with git's own words when it fails. */
 function realGitWith(cwd: string, input: Buffer, ...args: string[]): Promise<void> {

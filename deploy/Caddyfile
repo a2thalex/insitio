@@ -1,5 +1,17 @@
 # GitFkd behind Caddy. setup.sh replaces {DOMAIN} and installs this as /etc/caddy/Caddyfile.
 # Caddy obtains and renews the HTTPS certificate automatically once DNS points here.
+
+# Global options (this block must come first). A client has 30 s to send the request line and headers;
+# nothing is set for the body, because a git push of up to 2 GB may take hours over a slow line. The app
+# bounds that itself (REQUEST_TIMEOUT_MS, 2 hours by default).
+{
+	servers {
+		timeouts {
+			read_header 30s
+		}
+	}
+}
+
 {DOMAIN} {
 	encode zstd gzip
 

@@ -69,9 +69,14 @@ A new empty repository shows these push instructions on its page. If the first p
 | `DATA_DIR` | `./data` | Database (`gitfkd.db`) and bare repositories (`repos/<owner>/<name>.git`) |
 | `ALLOW_USER_INVITES` | unset | `1` lets non-admins create invite links |
 | `NSIT_RELEASE_REPO` | `a2thalex/gitfkd` | GitHub `owner/repo` whose Releases hold the `nsit` binaries that `/download`, `/install.ps1` and `/install.sh` point at |
-
 | `TRUST_PROXY` | unset | `1` trusts a proxy on loopback (or a comma list of proxy IPs) for client addresses, and binds the app to 127.0.0.1 |
 | `HOST` | all interfaces (127.0.0.1 with `TRUST_PROXY`) | Interface to listen on |
+| `REQUEST_TIMEOUT_MS` | `7200000` (2 hours) | The longest a client may take to send one whole request. Large git pushes (up to 2 GB) are sent in one request, so this is long; it is a bound and cannot be 0. Node's own default is 5 minutes, which would cut off a slow push. |
+| `HEADERS_TIMEOUT_MS` | `60000` | The longest a client may take to send the request line and headers. Must not be more than `REQUEST_TIMEOUT_MS`. |
+| `GIT_DRAIN_MAX_BYTES` | `268435456` (256 MiB) | When git stops reading a push early (a pack over `receive.maxInputSize`, a fatal error), the rest of the upload is read and dropped so the client sees git's answer. Past this many bytes the connection is closed instead. |
+| `GIT_DRAIN_IDLE_MS` | `60000` | The same drain also gives up when the client sends nothing for this long. |
+
+The four numbers above must be whole numbers of at least 1; a bad value stops the server at start-up with a message that names it.
 
 For anything beyond your own machine, put Insitio behind an HTTPS reverse proxy (Caddy, nginx) and set `BASE_URL` to the public `https://` address. Tokens and session cookies must not travel over plain HTTP. Back up `DATA_DIR` to back up everything.
 
@@ -81,7 +86,7 @@ For anything beyond your own machine, put Insitio behind an HTTPS reverse proxy 
 
 - `setup.sh` installs Node 24, git and Caddy, creates a `gitfkd` service user, installs the app to `/opt/gitfkd` with data in `/var/lib/gitfkd`, and starts the `gitfkd` systemd service. It is safe to re-run for updates.
 - `gitfkd.service` is a hardened systemd unit that can only write its data directory.
-- `Caddyfile` proxies your domain to the app on 127.0.0.1:3000 and allows git pushes up to 2 GB.
+- `Caddyfile` proxies your domain to the app on 127.0.0.1:3000, allows git pushes up to 2 GB, and gives clients 30 s to send their request headers (the app bounds the rest, see `REQUEST_TIMEOUT_MS`).
 - `deploy.sh` packs the committed code and runs `setup.sh` on a Google Cloud VM over IAP SSH.
 
 ```bash

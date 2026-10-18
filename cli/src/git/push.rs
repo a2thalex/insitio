@@ -416,12 +416,14 @@ pub(super) fn plain_failure(git: &git2::Error, target: &RepoRef) -> NsitError {
 ///   sent instead of what was asked; "report-status: Error reported: <text>" (line 1004) and
 ///   "report-status: protocol error" (lines 897, 1081, 1096), the server's reply to a push.
 fn reported_by_server(git: &git2::Error) -> bool {
+    // libgit2 sets each of these as the whole message, or as its start (the server's text follows),
+    // so they are matched at the start: the words may not turn up inside some other message.
     const MARKERS: [&str; 3] = [
         "unpacking the sent packfile failed on the remote",
         "remote error:",
         "report-status:",
     ];
-    git.class() == ErrorClass::Net && MARKERS.iter().any(|m| git.message().contains(m))
+    git.class() == ErrorClass::Net && MARKERS.iter().any(|m| git.message().starts_with(m))
 }
 
 /// The HTTP status libgit2 names in an error, when it refused to go on because of one:
@@ -1197,30 +1199,37 @@ mod tests {
         format!("{:04x}{text}", text.len() + 4)
     }
 
-    /// A server with no branches that takes any pack and answers the push with `report`, the
-    /// report-status as pkt-lines. It does not offer side-band, so the report is not wrapped. It
-    /// asks for no sign-in: the first request goes through.
-    fn server_answering_a_push_with(report: String) -> StubServer {
+    /// What a server with no branches says first when asked to receive a push. It offers no
+    /// side-band, so the report that follows the pack is not wrapped.
+    fn advertisement_of_an_empty_repository() -> String {
+        let capabilities = "report-status delete-refs ofs-delta agent=stub";
+        let head = format!("{} capabilities^{{}}\0{capabilities}\n", "0".repeat(40));
+        format!(
+            "{}0000{}0000",
+            pkt("# service=git-receive-pack\n"),
+            pkt(&head)
+        )
+    }
+
+    /// A server that says `advertisement` to the first request, takes any pack, and answers the
+    /// push with `report`, the report-status as pkt-lines. It asks for no sign-in: the first
+    /// request goes through.
+    fn push_server(advertisement: String, report: String) -> StubServer {
         StubServer::start(move |seen| {
             let (kind, body) = if seen.request_line.starts_with("POST ") {
                 ("result", report.clone())
             } else {
-                let capabilities = "report-status delete-refs ofs-delta agent=stub";
-                let head = format!("{} capabilities^{{}}\0{capabilities}\n", "0".repeat(40));
-                (
-                    "advertisement",
-                    format!(
-                        "{}0000{}0000",
-                        pkt("# service=git-receive-pack\n"),
-                        pkt(&head)
-                    ),
-                )
+                ("advertisement", advertisement.clone())
             };
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-receive-pack-{kind}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             )
         })
+    }
+
+    fn server_answering_a_push_with(report: String) -> StubServer {
+        push_server(advertisement_of_an_empty_repository(), report)
     }
 
     /// A push of `main` (one commit) to `server`, through the real `push_branch` and libgit2's
@@ -1306,6 +1315,76 @@ mod tests {
         assert!(matches!(err, NsitError::Rejected(_)), "{err:?}");
         assert_eq!(err.exit_code(), 6);
         assert_eq!(err.to_string(), "refs/heads/main: unpacker error");
+    }
+
+    /// The `ERR` packet a git server sends in place of what was asked (here, in place of the list
+    /// of branches). libgit2 turns it into "remote error: <text>"; this is that wording, from a real
+    /// libgit2 push, so a libgit2 update that changes it shows up here.
+    #[test]
+    fn an_err_packet_from_the_server_is_its_failure_with_its_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = isolated_env(dir.path());
+        let advertisement = format!(
+            "{}0000{}",
+            pkt("# service=git-receive-pack\n"),
+            pkt("ERR access denied or repository not exported\n")
+        );
+        let server = push_server(advertisement, String::new());
+
+        let err = push_to(&server, dir.path()).unwrap_err();
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "{} reported a problem: remote error: access denied or repository not exported",
+                server.host_key()
+            )
+        );
+    }
+
+    /// The same packet in place of the report that follows the pack: "report-status: Error
+    /// reported: <text>".
+    #[test]
+    fn an_err_packet_in_place_of_the_report_is_its_failure_with_its_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = isolated_env(dir.path());
+        let server = server_answering_a_push_with(pkt("ERR out of space on the server\n"));
+
+        let err = push_to(&server, dir.path()).unwrap_err();
+        assert!(matches!(err, NsitError::Other(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "{} reported a problem: report-status: Error reported: out of space on the server",
+                server.host_key()
+            )
+        );
+    }
+
+    #[test]
+    fn the_markers_are_read_at_the_start_of_the_message() {
+        // The same words inside another message are not the server's report.
+        for message in [
+            "could not parse a remote error: x",
+            "the unpacking the sent packfile failed on the remote",
+            "not a report-status: line",
+        ] {
+            let err = push_error(
+                NsitError::Git(git2::Error::new(
+                    ErrorCode::GenericError,
+                    ErrorClass::Net,
+                    message,
+                )),
+                &target(),
+                "refs/heads/main",
+            );
+            assert_eq!(
+                err.to_string(),
+                format!("cannot reach git.iam.bot: {message}")
+            );
+        }
     }
 
     #[test]
