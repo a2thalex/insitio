@@ -51,11 +51,11 @@ repository tabs, repository settings, user settings and Insights navigation.
 | GitHub section | Insitio |
 |---|---|
 | General: description, visibility, default branch, delete | ✓ |
-| General: rename, transfer, archive, feature toggles, merge-button options | ✗ |
+| General: rename, transfer, archive, feature toggles, merge-button options | ✓ |
 | Collaborators | ✓ (read/write/admin) |
-| Branches / rulesets (protection) | ✗ |
-| Webhooks | ✗ |
-| Deploy keys | ✗ |
+| Branches / rulesets (protection) | ◐ (exact branch, require a pull request, approving reviews) |
+| Webhooks | ✓ |
+| Deploy keys | ✓ (repo-scoped git HTTP tokens, not SSH) |
 | Environments, Pages, Codespaces, Actions/Agents settings, GitHub Apps | ✗ |
 
 ## Account (user settings)

@@ -17,6 +17,12 @@ export type RepoRow = {
   website: string;
   isPrivate: boolean;
   defaultBranch: string;
+  archived: boolean;
+  issuesEnabled: boolean;
+  pullsEnabled: boolean;
+  allowMerge: boolean;
+  allowSquash: boolean;
+  allowRebase: boolean;
   createdAt: number;
   stars: number;
   forkedFromId: number | null;
@@ -40,6 +46,12 @@ function toRepo(r: Row): RepoRow {
     website: r.website ?? "",
     isPrivate: !!r.is_private,
     defaultBranch: r.default_branch,
+    archived: !!r.archived,
+    issuesEnabled: r.issues_enabled !== 0,
+    pullsEnabled: r.pulls_enabled !== 0,
+    allowMerge: r.allow_merge !== 0,
+    allowSquash: r.allow_squash !== 0,
+    allowRebase: r.allow_rebase !== 0,
     createdAt: r.created_at,
     stars: r.star_count,
     forkedFromId: r.forked_from_id ?? null,

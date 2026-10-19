@@ -317,6 +317,46 @@ const MIGRATIONS = [
     primary key (repo_id, context)
   );
   `,
+  // Repository settings: archive, toggles, merge methods, protection, webhooks, deploy keys.
+  `
+  alter table repos add column archived integer not null default 0;
+  alter table repos add column issues_enabled integer not null default 1;
+  alter table repos add column pulls_enabled integer not null default 1;
+  alter table repos add column allow_merge integer not null default 1;
+  alter table repos add column allow_squash integer not null default 1;
+  alter table repos add column allow_rebase integer not null default 1;
+  create table branch_rules (
+    repo_id integer not null references repos(id) on delete cascade,
+    branch text not null,
+    require_pr integer not null default 0,
+    approvals integer not null default 0,
+    primary key (repo_id, branch)
+  );
+  create table webhooks (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    url text not null,
+    secret text not null default '',
+    events text not null,
+    active integer not null default 1,
+    created_at integer not null
+  );
+  create table webhook_deliveries (
+    id integer primary key,
+    webhook_id integer not null references webhooks(id) on delete cascade,
+    event text not null,
+    response_status integer,
+    created_at integer not null
+  );
+  create table deploy_keys (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    title text not null,
+    token_hash text not null unique,
+    can_write integer not null default 0,
+    created_at integer not null
+  );
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Deps } from "../deps.js";
 import { clientAddress } from "../clientAddress.js";
+import { installPushHook } from "../git/hooks.js";
 import { Repo } from "../git/repo.js";
 import { GIT_ENV } from "../git/run.js";
 import { repoDir, reposRoot } from "../git/storage.js";
 import { scanPushedCommits } from "../services/issueExtras.js";
-import { accessLevel, can } from "../services/permissions.js";
+import { accessLevel, can, type Access } from "../services/permissions.js";
+import { deployKeyAccess, deliverWebhooks, protectedRefList } from "../services/repoAdmin.js";
 import { getRepo, setDefaultBranch, type RepoRow } from "../services/repos.js";
 import { userForAccessToken, type User } from "../services/users.js";
 
@@ -44,14 +46,15 @@ function send(res: ServerResponse, status: number, message: string, headers: Rec
 }
 
 /** Basic auth where the password is a personal access token, as with GitHub. */
-function authenticate(deps: Deps, req: IncomingMessage): { user: User | null; invalid: boolean } {
+function authenticate(deps: Deps, req: IncomingMessage): { user: User | null; invalid: boolean; password: string } {
   const header = req.headers.authorization;
-  if (!header?.startsWith("Basic ")) return { user: null, invalid: false };
+  if (!header?.startsWith("Basic ")) return { user: null, invalid: false, password: "" };
   const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
   const i = decoded.indexOf(":");
-  if (i === -1) return { user: null, invalid: true };
-  const user = userForAccessToken(deps.db, decoded.slice(0, i), decoded.slice(i + 1));
-  return { user, invalid: !user };
+  if (i === -1) return { user: null, invalid: true, password: "" };
+  const password = decoded.slice(i + 1);
+  const user = userForAccessToken(deps.db, decoded.slice(0, i), password);
+  return { user, invalid: !user, password };
 }
 
 /** After a push into an empty repo, point HEAD at a branch that exists (main, master or the first). */
@@ -96,13 +99,20 @@ export function drainRequest(req: IncomingMessage, maxBytes: number, idleMs: num
   req.resume();
 }
 
-export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: Deps, route: GitRoute): void {
+export async function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: Deps, route: GitRoute): Promise<void> {
   const repo = getRepo(deps.db, route.owner, route.repo);
-  const { user, invalid } = authenticate(deps, req);
+  const { user, invalid, password } = authenticate(deps, req);
   const challenge = { "www-authenticate": 'Basic realm="Insitio"' };
-  if (invalid) return send(res, 401, "Invalid username or token. Use a personal access token as the password.", challenge);
-  const access = repo ? accessLevel(deps.db, user, repo) : "none";
+  if (invalid && !(repo && deployKeyAccess(deps.db, password, repo.id))) {
+    return send(res, 401, "Invalid username or token. Use a personal access token as the password.", challenge);
+  }
+  const keyAccess = repo && !user ? deployKeyAccess(deps.db, password, repo.id) : null;
+  const access: Access = keyAccess ?? (repo ? accessLevel(deps.db, user, repo) : "none");
   const need = route.service === "git-receive-pack" ? "write" : "read";
+  if (repo?.archived && route.service === "git-receive-pack") {
+    if (!user && !keyAccess) return send(res, 401, "Authentication required.", challenge);
+    return send(res, 403, "This repository is archived.");
+  }
   if (!repo || access === "none") {
     // Ask anonymous clients for credentials first, so private repos never reveal whether they exist.
     if (!user) return send(res, 401, "Authentication required.", challenge);
@@ -113,9 +123,10 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
     return send(res, 403, `Permission to ${repo.owner}/${repo.name} denied to ${user.username}.`);
   }
 
-  const beforeDefault = route.service === "git-receive-pack" && route.rest === "git-receive-pack"
-    ? new Repo(repoDir(deps.config.dataDir, repo.owner, repo.name)).resolve(repo.defaultBranch)
-    : Promise.resolve(null);
+  const receiving = route.service === "git-receive-pack" && route.rest === "git-receive-pack";
+  const repoDirectory = repoDir(deps.config.dataDir, repo.owner, repo.name);
+  if (receiving) await installPushHook(repoDirectory);
+  const beforeDefault = receiving ? new Repo(repoDirectory).resolve(repo.defaultBranch) : Promise.resolve(null);
   const url = new URL(req.url ?? "/", "http://localhost");
   const env: Record<string, string> = {
     ...GIT_ENV,
@@ -126,6 +137,8 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
     QUERY_STRING: url.search.replace(/^\?/, ""),
     CONTENT_TYPE: req.headers["content-type"] ?? "",
     REMOTE_USER: user?.username ?? "",
+    INSITIO_PUSH_ADMIN: access === "admin" ? "1" : "0",
+    INSITIO_PROTECTED_REFS: protectedRefList(deps.db, repo.id),
     REMOTE_ADDR: clientAddress(req.socket.remoteAddress, req.headers["x-forwarded-for"] as string | undefined, deps.config.trustedProxies),
   };
   if (req.headers["content-length"]) env.CONTENT_LENGTH = String(req.headers["content-length"]);
@@ -191,6 +204,7 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
         await fixHead(deps, repo);
         const fresh = getRepo(deps.db, repo.owner, repo.name) ?? repo;
         if (user) await scanPushedCommits(deps, fresh, user, new Repo(repoDir(deps.config.dataDir, fresh.owner, fresh.name)), before);
+        await deliverWebhooks(deps, fresh, "push", { ref: `refs/heads/${fresh.defaultBranch}`, pusher: user?.username ?? "deploy-key" });
       } catch (err) {
         console.error("Could not update HEAD after push", err);
       }

@@ -12,6 +12,7 @@ import { applyClosingReferences, assertCanTalk, recordMentions } from "../../ser
 import {
   currentReviews, listLineComments, listPullTemplates, listReviews, listReviewers, listStatuses, unmetChecks,
 } from "../../services/pullExtras.js";
+import { deliverWebhooks, listBranchRules } from "../../services/repoAdmin.js";
 import { authorFor } from "../../services/repos.js";
 import type { Env } from "../env.js";
 import { raw } from "hono/html";
@@ -134,9 +135,9 @@ function MergeBox({ ctx, pull, status, canMerge, csrf, signedIn, blocked }: { ct
           <form method="post" action={`${base}/merge`}>
             <CsrfField csrf={csrf} />
             <select class="form-select mb-2" name="method" aria-label="Merge method">
-              <option value="merge">Create a merge commit</option>
-              <option value="squash">Squash and merge</option>
-              <option value="rebase">Rebase and merge</option>
+              {ctx.repo.allowMerge && <option value="merge">Create a merge commit</option>}
+              {ctx.repo.allowSquash && <option value="squash">Squash and merge</option>}
+              {ctx.repo.allowRebase && <option value="rebase">Rebase and merge</option>}
             </select>
             {pull.headRef !== ctx.repo.defaultBranch && (
               <label class="d-block mb-2"><input type="checkbox" name="delete_branch" value="1" class="mr-1" />Delete branch</label>
@@ -322,6 +323,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
         throw new ValidationError(`${base} is already up to date with ${head}`);
       }
       const pull = createPull(deps.db, ctx.repo.id, user.id, { ...values, baseRef: base, headRef: head, draft: field(f, "draft") === "1" });
+      await deliverWebhooks(deps, ctx.repo, "pull_request", { action: "opened", number: pull.number, title: pull.title });
       return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "pull", String(pull.number)));
     } catch (err) {
       if (!(err instanceof ValidationError)) throw err;
@@ -587,6 +589,15 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
     if (unmet.length) return renderError(c, 409, `Required checks have not passed: ${unmet.join(", ")}`);
     const f = await form(c);
     const method = field(f, "method");
+    const chosen = method === "squash" || method === "rebase" ? method : "merge";
+    if (chosen === "merge" && !ctx.repo.allowMerge) return renderError(c, 409, "Merge commits are turned off for this repository.");
+    if (chosen === "squash" && !ctx.repo.allowSquash) return renderError(c, 409, "Squash merges are turned off for this repository.");
+    if (chosen === "rebase" && !ctx.repo.allowRebase) return renderError(c, 409, "Rebase merges are turned off for this repository.");
+    const rule = listBranchRules(deps.db, ctx.repo.id).find((item) => item.branch === pull.baseRef);
+    if (rule && rule.approvals > 0) {
+      const approvals = currentReviews(listReviews(deps.db, pull.id)).filter((review) => review.state === "approve" && review.userId !== pull.authorId).length;
+      if (approvals < rule.approvals) return renderError(c, 409, `This branch requires ${rule.approvals} approving reviews.`);
+    }
     const mergeMessage = `Merge pull request #${pull.number} from ${ctx.repo.owner}/${pull.headRef}\n\n${pull.title}`;
     const squashMessage = pull.body.trim() ? `${pull.title}\n\n${pull.body.trim()}` : pull.title;
     const pinned = { base: baseBefore, head: headBefore };
@@ -597,6 +608,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
           ? await ctx.git.rebase(pull.baseRef, pull.headRef, authorFor(user), pinned)
           : await ctx.git.merge(pull.baseRef, pull.headRef, mergeMessage, authorFor(user), pinned);
       markMerged(deps.db, pull.id, user.id, sha, baseBefore);
+      await deliverWebhooks(deps, ctx.repo, "pull_request", { action: "closed", number: pull.number, merged: true });
       const text = `${pull.title}\n${pull.body}\n${method === "squash" ? squashMessage : mergeMessage}`;
       applyClosingReferences(deps.db, user, ctx.repo, text, `pull request #${pull.number}`);
       recordMentions(deps.db, user, ctx.repo, text, { kind: "pull", number: pull.number });

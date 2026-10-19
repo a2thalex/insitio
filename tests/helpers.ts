@@ -43,6 +43,7 @@ export function testDeps(overrides: Partial<Config> = {}): Deps {
       headersTimeoutMs: DEFAULT_HEADERS_TIMEOUT_MS,
       gitDrainMaxBytes: DEFAULT_GIT_DRAIN_MAX_BYTES,
       gitDrainIdleMs: DEFAULT_GIT_DRAIN_IDLE_MS,
+      webhookAllowLoopback: false,
       ...overrides,
     },
   };

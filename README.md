@@ -12,6 +12,7 @@ The page layouts, URL scheme and data-loading approach come from evidence gather
 - **Issues**: Markdown comments, `#123` and `@user` links, labels, assignees, milestones, reactions, templates, close reasons, lock and pin, search, and "Fixes #n" auto-close.
 - **Pull requests**: compare branches, open a PR (including drafts), then use the Conversation, Commits and Files changed tabs. Reviewers can approve or request changes, and comments can sit on a diff line. Merge with a merge commit, squash, or rebase, and require status checks before merging.
 - **People**: invite-only sign-up, profiles, stars, collaborators with read, write or admin roles, and a site-admin page.
+- **Repository settings**: rename, transfer, archive, turn issues or pull requests off, choose merge buttons, protect a branch, webhooks, and deploy keys.
 - **Code search**: case-insensitive search across the default branch (`git grep`).
 - **Command line**: `nsit`, a single-file client for people and AI agents that does everyday git work without git installed and signs in, creates repositories and pushes from the terminal. See [The nsit command line](#the-nsit-command-line).
 - Light and dark themes that follow the system setting, built on Primer CSS and Octicons (both MIT).
