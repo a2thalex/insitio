@@ -7,6 +7,8 @@ import type { Deps } from "../deps.js";
 import { createRateLimiter } from "../rateLimit.js";
 import { DeviceCapacityError, pollDevice, startDevice } from "../services/devices.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../services/errors.js";
+import { getMilestone, getMilestoneById, recordMentions, resolveAssignees, setAssignees, setMilestone } from "../services/issueExtras.js";
+import { createIssue, getIssue, setIssueState, updateIssue, type Issue } from "../services/issues.js";
 import { accessLevel, can, type Access } from "../services/permissions.js";
 import { createRepo, getRepo, listAllVisible, listReposForOwner, validateRepoName, type RepoRow } from "../services/repos.js";
 import {
@@ -51,6 +53,23 @@ export type RepoJson = {
 /** Every API failure has this shape: {"error": {"code", "message"}}. */
 export function apiError(c: Context, status: ContentfulStatusCode, code: string, message: string) {
   return c.json({ error: { code, message } }, status);
+}
+
+function stringList(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new ValidationError(`${label} must be an array of strings`);
+  }
+  return value;
+}
+
+function milestoneIdFrom(deps: Deps, repo: RepoRow, value: unknown): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new ValidationError("milestone must be a number or null");
+  }
+  const milestone = getMilestone(deps.db, repo.id, value);
+  if (!milestone) throw new ValidationError("That milestone doesn't exist.");
+  return milestone.id;
 }
 
 function repoJson(deps: Deps, r: RepoRow): RepoJson {
@@ -306,6 +325,84 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
       },
       201,
     );
+  });
+
+  function issueJson(repo: RepoRow, issue: Issue) {
+    const milestone = issue.milestoneId ? getMilestoneById(deps.db, issue.milestoneId) : null;
+    return {
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      state: issue.state,
+      state_reason: issue.closeReason,
+      locked: issue.locked,
+      assignees: issue.assignees.map((assignee) => assignee.username),
+      milestone: milestone?.number ?? null,
+      user: { login: issue.author },
+      html_url: `${deps.config.baseUrl}/${repo.owner}/${repo.name}/issues/${issue.number}`,
+      created_at: new Date(issue.createdAt * 1000).toISOString(),
+      updated_at: new Date(issue.updatedAt * 1000).toISOString(),
+    };
+  }
+
+  app.get("/repos/:owner/:name/issues/:number", auth, (c) => {
+    const repo = repoFor(c, "read");
+    if (repo instanceof Response) return repo;
+    const number = Number(c.req.param("number"));
+    const issue = Number.isInteger(number) && number > 0 ? getIssue(deps.db, repo.id, number) : null;
+    if (!issue || issue.isPull) return apiError(c, 404, "not_found", "Issue not found");
+    return c.json(issueJson(repo, issue));
+  });
+
+  app.post("/repos/:owner/:name/issues", auth, async (c) => {
+    const body = await jsonObject(c);
+    if (!body) return apiError(c, 400, "bad_request", "The request body must be a JSON object.");
+    const assigns = body.assignees !== undefined || body.milestone !== undefined;
+    const repo = repoFor(c, assigns ? "write" : "read");
+    if (repo instanceof Response) return repo;
+    if (typeof body.title !== "string") throw new ValidationError("title is required and must be a string");
+    if (body.body !== undefined && typeof body.body !== "string") throw new ValidationError("body must be a string");
+    const assignees = body.assignees === undefined ? undefined : stringList(body.assignees, "assignees");
+    const milestoneId = body.milestone === undefined ? undefined : milestoneIdFrom(deps, repo, body.milestone);
+    if (assignees) resolveAssignees(deps.db, repo, assignees);
+    const user = c.get("apiUser");
+    const created = createIssue(deps.db, repo.id, user.id, { title: body.title, body: typeof body.body === "string" ? body.body : "" });
+    recordMentions(deps.db, user, repo, `${created.title}\n${created.body}`, { kind: "issue", number: created.number });
+    if (assignees) setAssignees(deps.db, repo, created.id, assignees, user.id);
+    if (milestoneId !== undefined) setMilestone(deps.db, created.id, milestoneId, user.id);
+    return c.json(issueJson(repo, getIssue(deps.db, repo.id, created.number)!), 201);
+  });
+
+  app.patch("/repos/:owner/:name/issues/:number", auth, async (c) => {
+    const repo = repoFor(c, "write");
+    if (repo instanceof Response) return repo;
+    const number = Number(c.req.param("number"));
+    const issue = Number.isInteger(number) && number > 0 ? getIssue(deps.db, repo.id, number) : null;
+    if (!issue || issue.isPull) return apiError(c, 404, "not_found", "Issue not found");
+    const body = await jsonObject(c);
+    if (!body) return apiError(c, 400, "bad_request", "The request body must be a JSON object.");
+    const user = c.get("apiUser");
+    if (body.title !== undefined && typeof body.title !== "string") throw new ValidationError("title must be a string");
+    if (body.body !== undefined && typeof body.body !== "string") throw new ValidationError("body must be a string");
+    const assignees = body.assignees === undefined ? undefined : stringList(body.assignees, "assignees");
+    const milestoneId = body.milestone === undefined ? undefined : milestoneIdFrom(deps, repo, body.milestone);
+    if (body.state !== undefined && body.state !== "open" && body.state !== "closed") throw new ValidationError("state must be open or closed");
+    const reason = body.state_reason;
+    if (reason !== undefined && reason !== "completed" && reason !== "not_planned") {
+      throw new ValidationError("state_reason must be completed or not_planned");
+    }
+    if (typeof body.title === "string" || typeof body.body === "string") {
+      const title = typeof body.title === "string" ? body.title : issue.title;
+      const text = typeof body.body === "string" ? body.body : issue.body;
+      updateIssue(deps.db, issue.id, { title, body: text });
+      recordMentions(deps.db, user, repo, `${title}\n${text}`, { kind: "issue", number: issue.number });
+    }
+    if (assignees) setAssignees(deps.db, repo, issue.id, assignees, user.id);
+    if (milestoneId !== undefined) setMilestone(deps.db, issue.id, milestoneId, user.id);
+    if (body.state === "closed" || body.state === "open") {
+      setIssueState(deps.db, issue.id, body.state, user.id, body.state === "closed" ? (reason === "not_planned" ? "not_planned" : "completed") : undefined);
+    }
+    return c.json(issueJson(repo, getIssue(deps.db, repo.id, issue.number)!));
   });
 
   // Logout: revokes the token that made this request, and nothing else.

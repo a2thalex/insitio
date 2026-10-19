@@ -4,6 +4,9 @@ import { ValidationError } from "./errors.js";
 
 export type Label = { id: number; repoId: number; name: string; color: string };
 
+export type Assignee = { id: number; username: string };
+export type CloseReason = "completed" | "not_planned";
+
 export type Issue = {
   id: number;
   repoId: number;
@@ -17,12 +20,23 @@ export type Issue = {
   createdAt: number;
   updatedAt: number;
   closedAt: number | null;
+  closeReason: CloseReason | null;
+  locked: boolean;
+  pinnedAt: number | null;
+  milestoneId: number | null;
   commentCount: number;
   labels: Label[];
+  assignees: Assignee[];
 };
 
 export type Comment = { id: number; authorId: number; author: string; body: string; createdAt: number };
-export type IssueEvent = { id: number; actor: string | null; kind: "closed" | "reopened" | "merged" | "head_deleted"; detail: string; createdAt: number };
+export type IssueEvent = {
+  id: number;
+  actor: string | null;
+  kind: "closed" | "reopened" | "merged" | "head_deleted" | "locked" | "unlocked" | "pinned" | "unpinned" | "assigned" | "unassigned" | "milestoned" | "demilestoned" | "mentioned";
+  detail: string;
+  createdAt: number;
+};
 
 type Row = Record<string, any>;
 
@@ -61,8 +75,27 @@ function labelsFor(db: DatabaseSync, issueIds: number[]): Map<number, Label[]> {
   return map;
 }
 
+function assigneesFor(db: DatabaseSync, issueIds: number[]): Map<number, Assignee[]> {
+  const map = new Map<number, Assignee[]>();
+  if (!issueIds.length) return map;
+  const rows = db
+    .prepare(
+      `select a.issue_id, u.id as id, u.username as username from issue_assignees a
+       join users u on u.id = a.user_id where a.issue_id in (${issueIds.map(() => "?").join(",")}) order by u.username`,
+    )
+    .all(...issueIds) as Row[];
+  for (const row of rows) {
+    const list = map.get(row.issue_id) ?? [];
+    list.push({ id: row.id, username: row.username });
+    map.set(row.issue_id, list);
+  }
+  return map;
+}
+
 export function toIssues(db: DatabaseSync, rows: Row[]): Issue[] {
-  const labels = labelsFor(db, rows.map((r) => r.id));
+  const ids = rows.map((r) => r.id);
+  const labels = labelsFor(db, ids);
+  const assignees = assigneesFor(db, ids);
   return rows.map((r) => ({
     id: r.id,
     repoId: r.repo_id,
@@ -76,8 +109,13 @@ export function toIssues(db: DatabaseSync, rows: Row[]): Issue[] {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     closedAt: r.closed_at,
+    closeReason: r.close_reason === "completed" || r.close_reason === "not_planned" ? r.close_reason : null,
+    locked: !!r.locked,
+    pinnedAt: r.pinned_at ?? null,
+    milestoneId: r.milestone_id ?? null,
     commentCount: r.comment_count,
     labels: labels.get(r.id) ?? [],
+    assignees: assignees.get(r.id) ?? [],
   }));
 }
 
@@ -120,6 +158,9 @@ export type IssueFilter = {
   labelId?: number;
   q?: string;
   page: number;
+  assigneeId?: number | "none";
+  milestoneId?: number | "none";
+  reason?: CloseReason;
 };
 
 export function listIssues(db: DatabaseSync, repoId: number, f: IssueFilter): { items: Issue[]; total: number } {
@@ -137,6 +178,20 @@ export function listIssues(db: DatabaseSync, repoId: number, f: IssueFilter): { 
     where.push("(i.title like ? escape '\\' or i.body like ? escape '\\')");
     const like = `%${f.q.trim().replace(/[%_\\]/g, (m) => "\\" + m)}%`;
     args.push(like, like);
+  }
+  if (f.assigneeId === "none") where.push("not exists (select 1 from issue_assignees a where a.issue_id = i.id)");
+  else if (f.assigneeId) {
+    where.push("exists (select 1 from issue_assignees a where a.issue_id = i.id and a.user_id = ?)");
+    args.push(f.assigneeId);
+  }
+  if (f.milestoneId === "none") where.push("i.milestone_id is null");
+  else if (f.milestoneId) {
+    where.push("i.milestone_id = ?");
+    args.push(f.milestoneId);
+  }
+  if (f.reason) {
+    where.push("i.close_reason = ?");
+    args.push(f.reason);
   }
   const clause = where.join(" and ");
   const total = (db.prepare(`select count(*) as n from issues i where ${clause}`).get(...args) as Row).n;
@@ -160,17 +215,17 @@ export function updateIssue(db: DatabaseSync, issueId: number, p: { title: strin
   db.prepare("update issues set title = ?, body = ?, updated_at = ? where id = ?").run(validateTitle(p.title), p.body.slice(0, 65536), now(), issueId);
 }
 
+const LEGACY_EVENTS = new Set<IssueEvent["kind"]>(["closed", "reopened", "merged", "head_deleted"]);
+
 export function addEvent(db: DatabaseSync, issueId: number, actorId: number, kind: IssueEvent["kind"], detail = ""): void {
-  db.prepare("insert into issue_events (issue_id, actor_id, kind, detail, created_at) values (?, ?, ?, ?, ?)").run(
-    issueId,
-    actorId,
-    kind,
-    detail,
-    now(),
-  );
+  if (LEGACY_EVENTS.has(kind)) {
+    db.prepare("insert into issue_events (issue_id, actor_id, kind, detail, created_at) values (?, ?, ?, ?, ?)").run(issueId, actorId, kind, detail, now());
+    return;
+  }
+  db.prepare("insert into activities (issue_id, actor_id, kind, detail, created_at) values (?, ?, ?, ?, ?)").run(issueId, actorId, kind, detail, now());
 }
 
-export function setIssueState(db: DatabaseSync, issueId: number, state: "open" | "closed", actorId: number): void {
+export function setIssueState(db: DatabaseSync, issueId: number, state: "open" | "closed", actorId: number, reason?: CloseReason): void {
   tx(db, () => {
     const cur = db
       .prepare("select i.state, p.merged_at from issues i left join pulls p on p.issue_id = i.id where i.id = ?")
@@ -178,8 +233,12 @@ export function setIssueState(db: DatabaseSync, issueId: number, state: "open" |
     // A merged pull request stays closed for good.
     if (!cur || cur.state === state || cur.merged_at) return;
     const t = now();
-    db.prepare("update issues set state = ?, closed_at = ?, updated_at = ? where id = ?").run(state, state === "closed" ? t : null, t, issueId);
-    addEvent(db, issueId, actorId, state === "closed" ? "closed" : "reopened");
+    if (state === "closed") {
+      db.prepare("update issues set state = ?, closed_at = ?, updated_at = ?, close_reason = ? where id = ?").run(state, t, t, reason ?? "completed", issueId);
+    } else {
+      db.prepare("update issues set state = ?, closed_at = null, updated_at = ?, close_reason = null where id = ?").run(state, t, issueId);
+    }
+    addEvent(db, issueId, actorId, state === "closed" ? "closed" : "reopened", state === "closed" ? (reason ?? "completed") : "");
   });
 }
 
@@ -201,11 +260,44 @@ export function listComments(db: DatabaseSync, issueId: number): Comment[] {
 }
 
 export function listEvents(db: DatabaseSync, issueId: number): IssueEvent[] {
-  return (
+  const legacy = (
     db
-      .prepare("select e.*, u.username as actor from issue_events e left join users u on u.id = e.actor_id where e.issue_id = ? order by e.created_at, e.id")
+      .prepare("select e.*, u.username as actor from issue_events e left join users u on u.id = e.actor_id where e.issue_id = ?")
       .all(issueId) as Row[]
-  ).map((r) => ({ id: r.id, actor: r.actor, kind: r.kind, detail: r.detail, createdAt: r.created_at }));
+  ).map(toEvent);
+  const extra = (
+    db.prepare("select a.*, u.username as actor from activities a left join users u on u.id = a.actor_id where a.issue_id = ?").all(issueId) as Row[]
+  ).map(toEvent);
+  return [...legacy, ...extra].sort((a, b) => a.createdAt - b.createdAt || a.id - b.id);
+}
+
+function toEvent(row: Row): IssueEvent {
+  return { id: row.id, actor: row.actor, kind: row.kind, detail: row.detail, createdAt: row.created_at };
+}
+
+export function updateComment(db: DatabaseSync, commentId: number, body: string): void {
+  const text = body.trim();
+  if (!text) throw new ValidationError("Comment can't be blank");
+  const row = db.prepare("select issue_id from comments where id = ?").get(commentId) as Row | undefined;
+  if (!row) return;
+  const t = now();
+  db.prepare("update comments set body = ? where id = ?").run(text.slice(0, 65536), commentId);
+  db.prepare("update issues set updated_at = ? where id = ?").run(t, row.issue_id);
+}
+
+export function deleteComment(db: DatabaseSync, commentId: number): void {
+  const row = db.prepare("select issue_id from comments where id = ?").get(commentId) as Row | undefined;
+  if (!row) return;
+  db.prepare("delete from reactions where target_kind = 'comment' and target_id = ?").run(commentId);
+  db.prepare("delete from comments where id = ?").run(commentId);
+  db.prepare("update issues set updated_at = ? where id = ?").run(now(), row.issue_id);
+}
+
+export function listPinned(db: DatabaseSync, repoId: number): Issue[] {
+  const rows = db
+    .prepare(`${ISSUE_SELECT} where i.repo_id = ? and i.is_pull = 0 and i.pinned_at is not null order by i.pinned_at desc`)
+    .all(repoId) as Row[];
+  return toIssues(db, rows);
 }
 
 /** Participants: the author and every commenter, in order of first appearance. */

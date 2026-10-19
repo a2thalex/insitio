@@ -1,11 +1,13 @@
 import type { Context, Hono } from "hono";
 import type { Deps } from "../../deps.js";
 import { ValidationError } from "../../services/errors.js";
+import { assertCanTalk, listMilestones, listTemplates, reactionSummary, recordMentions, REACTION_GLYPH, REACTIONS, type ReactionEmoji } from "../../services/issueExtras.js";
 import {
-  PER_PAGE, addComment, createIssue, createLabel, deleteLabel, getIssue, labelCounts, listComments, listEvents, listIssues,
-  listLabels, participants, setIssueLabels, setIssueState, updateIssue, type Issue,
+  PER_PAGE, addComment, createIssue, createLabel, deleteLabel, getIssue, labelCounts, listComments, listEvents, listIssues, listPinned,
+  listLabels, participants, setIssueLabels, setIssueState, updateIssue, type CloseReason, type Issue,
 } from "../../services/issues.js";
 import { can } from "../../services/permissions.js";
+import { getUserByName } from "../../services/users.js";
 import { getPull } from "../../services/pulls.js";
 import type { Env } from "../env.js";
 import { field, fields, form, loginRedirect } from "../middleware.js";
@@ -20,6 +22,22 @@ import { repoPage, withRepo } from "./code.js";
 export function canManage(c: Context<Env>, ctx: RepoCtx, issue: Issue): boolean {
   const user = c.get("user");
   return !!user && (user.id === issue.authorId || can(ctx.access, "write"));
+}
+
+function ReactionBar({ action, csrf, summary }: { action: string; csrf: string; summary: { emoji: ReactionEmoji; count: number; mine: boolean }[] }) {
+  return (
+    <form method="post" action={action} class="d-flex flex-wrap mt-2" style="gap:4px">
+      <CsrfField csrf={csrf} />
+      {REACTIONS.map((emoji) => {
+        const row = summary.find((item) => item.emoji === emoji);
+        return (
+          <button class={`btn btn-sm ${row?.mine ? "selected" : ""}`} type="submit" name="emoji" value={emoji} aria-pressed={row?.mine ? "true" : "false"} aria-label={`${REACTION_GLYPH[emoji]} ${row?.count ?? 0}`}>
+            {REACTION_GLYPH[emoji]} {row?.count ? row.count : ""}
+          </button>
+        );
+      })}
+    </form>
+  );
 }
 
 function loginHref(c: Context<Env>) {
@@ -46,21 +64,40 @@ function NewIssueForm({ ctx, csrf, error, title = "", body = "" }: { ctx: RepoCt
 export function issueRoutes(deps: Deps, app: Hono<Env>) {
   const R = "/:owner/:repo";
 
-  app.get(`${R}/issues`, withRepo(deps, "read", (c, ctx) => {
+  app.get(`${R}/issues`, withRepo(deps, "read", async (c, ctx) => {
     const { owner, name } = ctx.repo;
     const state = c.req.query("state") === "closed" ? "closed" : "open";
     const q = c.req.query("q") ?? "";
     const labelName = c.req.query("label") ?? "";
+    const query = new URL(c.req.url).searchParams;
+    const assigneeName = query.has("no:assignee") ? "none" : (c.req.query("assignee") ?? "");
+    const milestoneName = query.has("no:milestone") ? "none" : (c.req.query("milestone") ?? "");
+    const rawReason = c.req.query("reason");
+    const reason: CloseReason | undefined = rawReason === "not_planned" ? "not_planned" : rawReason === "completed" ? "completed" : undefined;
     const page = Math.max(1, Number(c.req.query("page") ?? 1) || 1);
     const labels = listLabels(deps.db, ctx.repo.id);
     const label = labels.find((l) => l.name.toLowerCase() === labelName.toLowerCase());
     if (labelName && !label) return notFound(c, "That label");
-    const filter = { isPull: false, labelId: label?.id, q, page };
+    const milestones = listMilestones(deps.db, ctx.repo.id, "all");
+    const milestone = milestoneName && milestoneName !== "none" ? milestones.find((m) => m.title.toLowerCase() === milestoneName.toLowerCase()) : undefined;
+    if (milestoneName && milestoneName !== "none" && !milestone) return notFound(c, "That milestone");
+    const assignee = assigneeName && assigneeName !== "none" ? getUserByName(deps.db, assigneeName) : undefined;
+    if (assigneeName && assigneeName !== "none" && !assignee) return notFound(c, "That user");
+    const filter = {
+      isPull: false as const,
+      labelId: label?.id,
+      q,
+      page,
+      assigneeId: assigneeName === "none" ? "none" as const : assignee?.id,
+      milestoneId: milestoneName === "none" ? "none" as const : milestone?.id,
+      reason,
+    };
     const list = listIssues(deps.db, ctx.repo.id, { ...filter, state });
     const open = listIssues(deps.db, ctx.repo.id, { ...filter, state: "open", page: 1 }).total;
     const closed = listIssues(deps.db, ctx.repo.id, { ...filter, state: "closed", page: 1 }).total;
+    const pinned = listPinned(deps.db, ctx.repo.id);
     const href = (p: Record<string, string | number>) =>
-      `${repoUrl(owner, name, "issues")}?${new URLSearchParams(Object.entries({ state, q, label: label?.name ?? "", ...p }).filter(([, v]) => v !== "" && v !== undefined).map(([k, v]) => [k, String(v)]))}`;
+      `${repoUrl(owner, name, "issues")}?${new URLSearchParams(Object.entries({ state, q, label: label?.name ?? "", assignee: assigneeName, milestone: milestoneName, reason: reason ?? "", ...p }).filter(([, v]) => v !== "" && v !== undefined).map(([k, v]) => [k, String(v)]))}`;
     return repoPage(
       c,
       ctx,
@@ -74,12 +111,19 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
             <input class="form-control flex-auto" type="search" name="q" value={q} placeholder="Search issues" aria-label="Search issues" />
           </form>
           <a class="btn" href={repoUrl(owner, name, "labels")}><Octicon name="tag" class="mr-1" />Labels</a>
+          <a class="btn" href={repoUrl(owner, name, "milestones")}><Octicon name="milestone" class="mr-1" />Milestones</a>
           {c.get("user") && <a class="btn btn-primary" href={repoUrl(owner, name, "issues", "new")}>New issue</a>}
         </div>
         {label && (
           <p class="mb-3 f6">
             Filtered by label <LabelChip label={label} /> · <a href={href({ label: "" })}>Clear filter</a>
           </p>
+        )}
+        {pinned.length > 0 && !q && !label && !assigneeName && !milestoneName && !reason && (
+          <div class="Box mb-3">
+            <div class="Box-header">Pinned</div>
+            {pinned.map((i) => <IssueRow ctx={ctx} issue={i} state={i.state} href={repoUrl(owner, name, "issues", String(i.number))} />)}
+          </div>
         )}
         <div class="Box">
           <div class="Box-header d-flex flex-items-center">
@@ -108,7 +152,29 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
 
   app.get(`${R}/issues/new`, withRepo(deps, "read", (c, ctx) => {
     if (!c.get("user")) return loginRedirect(c);
-    return repoPage(c, ctx, "issues", `New issue · ${ctx.repo.owner}/${ctx.repo.name}`, <NewIssueForm ctx={ctx} csrf={c.get("csrf")} />);
+    const templates = listTemplates(deps.db, ctx.repo.id);
+    const chosen = templates.find((t) => String(t.id) === (c.req.query("template") ?? ""));
+    if (templates.length && !chosen && c.req.query("blank") !== "1") {
+      return repoPage(
+        c,
+        ctx,
+        "issues",
+        `New issue · ${ctx.repo.owner}/${ctx.repo.name}`,
+        <div>
+          <h1 class="f3 text-normal mb-3">Choose a template</h1>
+          <div class="Box">
+            {templates.map((t) => (
+              <a class="Box-row d-block" href={`${repoUrl(ctx.repo.owner, ctx.repo.name, "issues", "new")}?template=${t.id}`}>
+                <strong>{t.name}</strong>
+                {t.about && <div class="f6 color-fg-muted">{t.about}</div>}
+              </a>
+            ))}
+            <a class="Box-row d-block" href={`${repoUrl(ctx.repo.owner, ctx.repo.name, "issues", "new")}?blank=1`}>Open a blank issue</a>
+          </div>
+        </div>,
+      );
+    }
+    return repoPage(c, ctx, "issues", `New issue · ${ctx.repo.owner}/${ctx.repo.name}`, <NewIssueForm ctx={ctx} csrf={c.get("csrf")} title={chosen?.title ?? ""} body={chosen?.body ?? ""} />);
   }));
 
   app.post(`${R}/issues`, withRepo(deps, "read", async (c, ctx) => {
@@ -117,6 +183,7 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
     const f = await form(c);
     try {
       const issue = createIssue(deps.db, ctx.repo.id, user.id, { title: field(f, "title"), body: field(f, "body") });
+      recordMentions(deps.db, user, ctx.repo, `${field(f, "title")}\n${field(f, "body")}`, { kind: "issue", number: issue.number });
       return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "issues", String(issue.number)));
     } catch (err) {
       if (!(err instanceof ValidationError)) throw err;
@@ -148,6 +215,9 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
           </h1>
           <div class="d-flex flex-items-center mt-2 color-fg-muted">
             <StateBadge state={issue.state} isPull={false} />
+            {issue.closeReason === "completed" && <span class="Label mr-2">Completed</span>}
+            {issue.closeReason === "not_planned" && <span class="Label mr-2">Not planned</span>}
+            {issue.locked && <span class="Label mr-2">Locked</span>}
             <span>
               <a class="text-bold Link--secondary" href={`/${issue.author}`}>{issue.author}</a> opened this issue · {comments.length} comment{comments.length === 1 ? "" : "s"}
             </span>
@@ -155,11 +225,82 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
         </div>
         <div class="d-md-flex">
           <div class="flex-auto min-width-0 mr-md-4">
-            <Timeline ctx={ctx} issue={issue} comments={comments} events={listEvents(deps.db, issue.id)} />
-            <CommentForm action={`${base}/comment`} csrf={c.get("csrf")} canToggle={canManage(c, ctx, issue)} state={issue.state} isPull={false} signedIn={!!c.get("user")} loginHref={loginHref(c)} />
+            <Timeline
+              ctx={ctx}
+              issue={issue}
+              comments={comments}
+              events={listEvents(deps.db, issue.id)}
+              openingExtra={
+                <>
+                  {canManage(c, ctx, issue) && (
+                    <details class="mt-2">
+                      <summary class="btn btn-sm">Edit</summary>
+                      <form method="post" action={`${base}/edit`} class="mt-2">
+                        <CsrfField csrf={c.get("csrf")} />
+                        <input class="form-control mb-2" name="title" value={issue.title} aria-label="Title" required maxlength={256} />
+                        <textarea class="form-control" name="body" rows={6} aria-label="Description">{issue.body}</textarea>
+                        <button class="btn btn-sm btn-primary mt-2" type="submit">Save</button>
+                      </form>
+                    </details>
+                  )}
+                  <ReactionBar action={`${base}/reactions`} csrf={c.get("csrf")} summary={reactionSummary(deps.db, "issue", issue.id, c.get("user")?.id ?? null)} />
+                </>
+              }
+              commentExtra={(comment) => {
+                const viewer = c.get("user");
+                const editable = !!viewer && (viewer.id === comment.authorId || ctx.access === "admin");
+                return (
+                  <>
+                    <ReactionBar action={`${base}/comments/${comment.id}/reactions`} csrf={c.get("csrf")} summary={reactionSummary(deps.db, "comment", comment.id, viewer?.id ?? null)} />
+                    {editable && (
+                      <details class="mt-2">
+                        <summary class="btn btn-sm">Edit</summary>
+                        <form method="post" action={`${base}/comments/${comment.id}`} class="mt-2">
+                          <CsrfField csrf={c.get("csrf")} />
+                          <textarea class="form-control" name="body" rows={4}>{comment.body}</textarea>
+                          <div class="d-flex mt-2" style="gap:8px">
+                            <button class="btn btn-sm btn-primary" type="submit" name="action" value="edit">Update comment</button>
+                            <button class="btn btn-sm btn-danger" type="submit" name="action" value="delete" data-confirm="Delete this comment?">Delete</button>
+                          </div>
+                        </form>
+                      </details>
+                    )}
+                  </>
+                );
+              }}
+            />
+            <CommentForm action={`${base}/comment`} csrf={c.get("csrf")} canToggle={canManage(c, ctx, issue)} state={issue.state} isPull={false} signedIn={!!c.get("user")} loginHref={loginHref(c)} locked={issue.locked} canWrite={can(ctx.access, "write")} />
           </div>
           <aside class="col-md-3 flex-shrink-0" aria-label="Issue details">
             <LabelsSidebar ctx={ctx} issue={issue} allLabels={listLabels(deps.db, ctx.repo.id)} canEdit={can(ctx.access, "write")} csrf={c.get("csrf")} action={`${base}/labels`} />
+            <div class="discussion-sidebar-item">
+              <div class="discussion-sidebar-heading">Assignees</div>
+              {issue.assignees.length === 0 ? <span class="color-fg-muted">No one assigned</span> : issue.assignees.map((a) => <div><a href={`/${a.username}`}>{a.username}</a></div>)}
+              {can(ctx.access, "write") && (
+                <form method="post" action={`${base}/assignees`} class="mt-2">
+                  <CsrfField csrf={c.get("csrf")} />
+                  <input class="form-control input-sm mb-1" name="assignees" aria-label="Assignees" value={issue.assignees.map((a) => a.username).join(" ")} />
+                  <button class="btn btn-sm" type="submit">Save assignees</button>
+                </form>
+              )}
+            </div>
+            <div class="discussion-sidebar-item">
+              <div class="discussion-sidebar-heading">Milestone</div>
+              <form method="post" action={`${base}/milestone`}>
+                <CsrfField csrf={c.get("csrf")} />
+                <select class="form-select" name="milestone" aria-label="Milestone" disabled={!can(ctx.access, "write")}>
+                  <option value="">No milestone</option>
+                  {listMilestones(deps.db, ctx.repo.id, "all").map((m) => <option value={String(m.number)} selected={issue.milestoneId === m.id}>{m.title}</option>)}
+                </select>
+                {can(ctx.access, "write") && <button class="btn btn-sm mt-2" type="submit">Save</button>}
+              </form>
+            </div>
+            {can(ctx.access, "write") && (
+              <div class="discussion-sidebar-item d-flex" style="gap:8px">
+                <form method="post" action={`${base}/lock`}><CsrfField csrf={c.get("csrf")} /><button class="btn btn-sm" type="submit">{issue.locked ? "Unlock" : "Lock"} conversation</button></form>
+                <form method="post" action={`${base}/pin`}><CsrfField csrf={c.get("csrf")} /><button class="btn btn-sm" type="submit">{issue.pinnedAt ? "Unpin" : "Pin"}</button></form>
+              </div>
+            )}
             <Participants names={participants(issue, comments)} />
           </aside>
         </div>
@@ -183,9 +324,13 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
           return renderError(c, 409, "This pull request was merged, so it can't be closed or reopened.");
         }
       }
-      if (body.trim()) addComment(deps.db, issue.id, user.id, body);
-      else if (action === "comment") throw new ValidationError("Comment can't be blank");
-      if (action === "close") setIssueState(deps.db, issue.id, "closed", user.id);
+      if (body.trim()) {
+        assertCanTalk(issue, ctx.access);
+        addComment(deps.db, issue.id, user.id, body);
+        recordMentions(deps.db, user, ctx.repo, body, { kind: issue.isPull ? "pull" : "issue", number: issue.number });
+      } else if (action === "comment") throw new ValidationError("Comment can't be blank");
+      const reason = field(f, "reason") === "not_planned" ? "not_planned" : "completed";
+      if (action === "close") setIssueState(deps.db, issue.id, "closed", user.id, issue.isPull ? undefined : reason);
       if (action === "reopen") setIssueState(deps.db, issue.id, "open", user.id);
       return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, kind, String(issue.number)));
     });
@@ -206,9 +351,11 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
   app.post(`${R}/issues/:n/edit`, withRepo(deps, "read", async (c, ctx) => {
     const issue = loadIssue(c, ctx);
     if (!issue) return notFound(c);
-    if (!canManage(c, ctx, issue)) return renderError(c, 403, "You can't edit this issue.");
+    const user = c.get("user");
+    if (!user || !canManage(c, ctx, issue)) return renderError(c, 403, "You can't edit this issue.");
     const f = await form(c);
     updateIssue(deps.db, issue.id, { title: field(f, "title"), body: field(f, "body") });
+    recordMentions(deps.db, user, ctx.repo, `${field(f, "title")}\n${field(f, "body")}`, { kind: issue.isPull ? "pull" : "issue", number: issue.number });
     return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, issue.isPull ? "pull" : "issues", String(issue.number)));
   }));
 

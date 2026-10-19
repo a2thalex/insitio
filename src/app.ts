@@ -20,6 +20,7 @@ import { refRoutes } from "./web/routes/refs.js";
 import { archiveRoutes } from "./web/routes/archive.js";
 import { releaseRoutes } from "./web/routes/releases.js";
 import { socialRoutes } from "./web/routes/social.js";
+import { issueBoardRoutes } from "./web/routes/issueBoard.js";
 import { issueRoutes } from "./web/routes/issues.js";
 import { pullRoutes } from "./web/routes/pulls.js";
 import { repoSettingsRoutes } from "./web/routes/repoSettings.js";
@@ -69,6 +70,7 @@ export function buildApp(deps: Deps): Hono<Env> {
   archiveRoutes(deps, app);
   releaseRoutes(deps, app);
   socialRoutes(deps, app);
+  issueBoardRoutes(deps, app);
   issueRoutes(deps, app);
   pullRoutes(deps, app);
   repoSettingsRoutes(deps, app);

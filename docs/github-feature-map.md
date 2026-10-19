@@ -23,10 +23,10 @@ repository tabs, repository settings, user settings and Insights navigation.
 | GitHub | Insitio |
 |---|---|
 | Open/close/reopen, comments, labels, filters, search | ✓ |
-| Assignees, milestones | ✗ |
-| Edit/delete comments, reactions | ✗ (issue edit route exists, no UI) |
-| Issue templates, close reasons, lock, pin, sub-issues | ✗ |
-| Cross-references and "Fixes #n" auto-close | ◐ (links only) |
+| Assignees, milestones | ✓ |
+| Edit/delete comments, reactions | ✓ |
+| Issue templates, close reasons, lock, pin, sub-issues | ◐ (sub-issues still missing) |
+| Cross-references and "Fixes #n" auto-close | ✓ |
 
 ## Repository: Pull requests
 | GitHub | Insitio |

@@ -220,6 +220,24 @@ export class Repo {
     return { content: stdout, size, truncated };
   }
 
+  /** Messages of up to 100 commits reachable from `to` and not from `from`. */
+  async commitMessages(from: string | null, to: string): Promise<{ sha: string; subject: string; body: string }[]> {
+    if (from && !/^[0-9a-f]{40}$/i.test(from)) throw new GitError(["log"], 1, "bad range");
+    if (!/^[0-9a-f]{40}$/i.test(to)) throw new GitError(["log"], 1, "bad range");
+    const range = from ? `${from}..${to}` : to;
+    const { stdout } = await this.git(["log", "--reverse", "--format=%H%x1f%s%x1f%b%x1e", "--max-count=100", range]);
+    return stdout
+      .toString("utf8")
+      .split("\x1e")
+      .map((record) => record.replace(/^\n+/, ""))
+      .filter(Boolean)
+      .map((record) => {
+        const [sha, subject, body] = record.split("\x1f");
+        return { sha, subject: subject ?? "", body: (body ?? "").trim() };
+      })
+      .filter((commit) => /^[0-9a-f]{40}$/i.test(commit.sha));
+  }
+
   async log(ref: string, opts: { path?: string; skip: number; limit: number }): Promise<Commit[]> {
     assertSafeRef(ref);
     if (opts.path) assertSafePath(opts.path);
