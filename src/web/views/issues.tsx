@@ -211,6 +211,7 @@ export function IssueRow({ ctx, issue, state, href }: { ctx: RepoCtx; issue: Iss
       <span class="mr-2 mt-1 flex-shrink-0"><StateIcon state={state} isPull={issue.isPull} /></span>
       <div class="flex-auto min-width-0">
         <a class="Link--primary text-bold f5 mr-1" href={href}>{issue.title}</a>
+        {issue.draft && <span class="Label Label--secondary ml-1">Draft</span>}
         {!issue.isPull && issue.closeReason === "not_planned" && <span class="Label Label--secondary ml-1">Not planned</span>}
         {!issue.isPull && issue.closeReason === "completed" && state !== "open" && <span class="Label Label--secondary ml-1">Completed</span>}
         {issue.labels.map((l) => <span class="mr-1"><LabelChip label={l} href={`${base}?label=${encodeURIComponent(l.name)}`} /></span>)}

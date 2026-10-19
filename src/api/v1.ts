@@ -10,7 +10,8 @@ import { ForbiddenError, NotFoundError, ValidationError } from "../services/erro
 import { getMilestone, getMilestoneById, recordMentions, resolveAssignees, setAssignees, setMilestone } from "../services/issueExtras.js";
 import { createIssue, getIssue, setIssueState, updateIssue, type Issue } from "../services/issues.js";
 import { accessLevel, can, type Access } from "../services/permissions.js";
-import { createRepo, getRepo, listAllVisible, listReposForOwner, validateRepoName, type RepoRow } from "../services/repos.js";
+import { setStatus } from "../services/pullExtras.js";
+import { createRepo, getRepo, gitFor, listAllVisible, listReposForOwner, validateRepoName, type RepoRow } from "../services/repos.js";
 import {
   attachAsset,
   createRelease,
@@ -403,6 +404,26 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
       setIssueState(deps.db, issue.id, body.state, user.id, body.state === "closed" ? (reason === "not_planned" ? "not_planned" : "completed") : undefined);
     }
     return c.json(issueJson(repo, getIssue(deps.db, repo.id, issue.number)!));
+  });
+
+  app.post("/repos/:owner/:name/statuses/:sha", auth, async (c) => {
+    const repo = repoFor(c, "write");
+    if (repo instanceof Response) return repo;
+    const sha = c.req.param("sha") ?? "";
+    if (!/^[0-9a-f]{40}$/i.test(sha)) throw new ValidationError("sha must be a 40-character commit id");
+    const found = await gitFor(deps, repo).resolve(sha);
+    if (!found) throw new ValidationError("That commit does not exist in this repository.");
+    const body = await jsonObject(c);
+    if (!body) return apiError(c, 400, "bad_request", "The request body must be a JSON object.");
+    if (typeof body.context !== "string") throw new ValidationError("context is required and must be a string");
+    if (typeof body.state !== "string") throw new ValidationError("state is required and must be a string");
+    if (body.description !== undefined && typeof body.description !== "string") throw new ValidationError("description must be a string");
+    const status = setStatus(deps.db, repo.id, found, {
+      context: body.context,
+      state: body.state,
+      description: typeof body.description === "string" ? body.description : "",
+    }, c.get("apiUser").id);
+    return c.json({ sha: found, ...status });
   });
 
   // Logout: revokes the token that made this request, and nothing else.

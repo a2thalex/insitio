@@ -1,6 +1,7 @@
 import type { Context, Hono } from "hono";
 import type { Deps } from "../../deps.js";
 import { ValidationError } from "../../services/errors.js";
+import { listRequiredChecks, setRequiredChecks } from "../../services/pullExtras.js";
 import {
   addCollaborator, deleteRepo, listCollaborators, removeCollaborator, setDefaultBranch, updateRepo, type Collaborator,
 } from "../../services/repos.js";
@@ -82,6 +83,10 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
           <button class="btn" type="submit" name="action" value="add"><Octicon name="person-add" class="mr-1" />Add collaborator</button>
         </form>
 
+        <div class="Subhead"><h2 class="Subhead-heading">Required checks</h2></div>
+        <p class="f6 color-fg-muted">One context per line, up to 10. A pull request cannot merge until each one is success on its head commit.</p>
+        <p class="mb-6"><a href={`${base}/checks`}>Edit required checks</a></p>
+
         <div class="Subhead"><h2 class="Subhead-heading color-fg-danger">Danger zone</h2></div>
         <div class="Box Box--danger p-3">
           <h3 class="f5">Delete this repository</h3>
@@ -110,6 +115,28 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
       setDefaultBranch(deps.db, ctx.repo.id, branch);
     }
     return c.redirect(`${repoUrl(ctx.repo.owner, ctx.repo.name, "settings")}?saved=1`);
+  }));
+
+  app.get(`${R}/settings/checks`, withRepo(deps, "write", (c, ctx) => {
+    const contexts = listRequiredChecks(deps.db, ctx.repo.id).join("\n");
+    return repoPage(
+      c,
+      ctx,
+      "settings",
+      `Required checks · ${ctx.repo.owner}/${ctx.repo.name}`,
+      <form method="post" action={repoUrl(ctx.repo.owner, ctx.repo.name, "settings", "checks")} class="Box p-3" style="max-width:760px">
+        <CsrfField csrf={c.get("csrf")} />
+        <h1 class="f3 text-normal">Required checks</h1>
+        <p class="f6 color-fg-muted">One context per line, up to 10.</p>
+        <textarea class="form-control mb-2" name="contexts" rows={6} aria-label="Required checks">{contexts}</textarea>
+        <button class="btn btn-primary" type="submit">Save checks</button>
+      </form>,
+    );
+  }));
+
+  app.post(`${R}/settings/checks`, withRepo(deps, "write", async (c, ctx) => {
+    setRequiredChecks(deps.db, ctx.repo.id, field(await form(c), "contexts").split(/\r?\n/));
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings", "checks"));
   }));
 
   app.post(`${R}/settings/collaborators`, withRepo(deps, "admin", async (c, ctx) => {

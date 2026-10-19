@@ -59,14 +59,17 @@ export function assigneesFor(db: DatabaseSync, issueIds: number[]): Map<number, 
 
 /** Users who may be assigned, or a validation error before any row is written. */
 export function resolveAssignees(db: DatabaseSync, repo: RepoRow, usernames: string[]): User[] {
-  const unique = [...new Set(usernames.map((name) => name.trim()).filter(Boolean))];
-  if (unique.length > MAX_ASSIGNEES) throw new ValidationError(`An issue can have at most ${MAX_ASSIGNEES} assignees.`);
+  const names = usernames.map((name) => name.trim()).filter(Boolean);
   const users: User[] = [];
-  for (const name of unique) {
+  const seen = new Set<number>();
+  for (const name of names) {
     const user = getUserByName(db, name);
     if (!user || !can(accessLevel(db, user, repo), "read")) throw new ValidationError(`${name} can't be assigned on this repository.`);
+    if (seen.has(user.id)) continue;
+    seen.add(user.id);
     users.push(user);
   }
+  if (users.length > MAX_ASSIGNEES) throw new ValidationError(`An issue can have at most ${MAX_ASSIGNEES} assignees.`);
   return users;
 }
 
@@ -238,6 +241,8 @@ export function saveTemplate(db: DatabaseSync, repoId: number, input: { id?: num
     db.prepare("update issue_templates set name = ?, about = ?, title = ?, body = ? where id = ? and repo_id = ?").run(name, about, title, body, input.id, repoId);
     return;
   }
+  const taken = db.prepare("select 1 from issue_templates where repo_id = ? and name = ?").get(repoId, name);
+  if (taken) throw new ValidationError("A template with that name already exists.");
   const count = (db.prepare("select count(*) as n from issue_templates where repo_id = ?").get(repoId) as Row).n;
   if (count >= MAX_TEMPLATES) throw new ValidationError(`A repository can have at most ${MAX_TEMPLATES} issue templates.`);
   db.prepare("insert into issue_templates (repo_id, name, about, title, body, position) values (?, ?, ?, ?, ?, ?)").run(repoId, name, about, title, body, count);
