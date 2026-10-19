@@ -7,6 +7,7 @@ import { MergeConflictError, RefMovedError } from "../../git/repo.js";
 import { ValidationError } from "../../services/errors.js";
 import { assertCanTalk } from "../../services/issueExtras.js";
 import { can } from "../../services/permissions.js";
+import { assertNotBlocked } from "../../services/account.js";
 import { getPull, setPullDraft } from "../../services/pulls.js";
 import { diffLineText, pullChanges } from "./pulls.js";
 import {
@@ -101,6 +102,7 @@ export function pullBoardRoutes(deps: Deps, app: Hono<Env>) {
     const pull = pullOf(c, ctx);
     if (!pull) return notFound(c);
     assertCanTalk(pull, ctx.access);
+    assertNotBlocked(deps.db, user.id, ctx.repo.ownerId);
     const f = await form(c);
     const raw = field(f, "state");
     const state = raw === "approve" ? "approve" : raw === "changes" ? "changes" : "comment";
@@ -131,6 +133,7 @@ export function pullBoardRoutes(deps: Deps, app: Hono<Env>) {
     const pull = pullOf(c, ctx);
     if (!pull) return notFound(c);
     assertCanTalk(pull, ctx.access);
+    assertNotBlocked(deps.db, user.id, ctx.repo.ownerId);
     const f = await form(c);
     const path = field(f, "path");
     const side = field(f, "side") === "left" ? "left" : field(f, "side") === "right" ? "right" : "";

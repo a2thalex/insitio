@@ -11,6 +11,8 @@ export type User = {
   email: string;
   isAdmin: boolean;
   bio: string;
+  theme: "dark" | "light" | "system";
+  notify: "participating" | "all" | "ignore";
   createdAt: number;
 };
 
@@ -33,6 +35,8 @@ export function toUser(r: Row): User {
     email: r.email,
     isAdmin: !!r.is_admin,
     bio: r.bio,
+    theme: r.theme === "light" || r.theme === "system" ? r.theme : "dark",
+    notify: r.notify === "all" || r.notify === "ignore" ? r.notify : "participating",
     createdAt: r.created_at,
   };
 }
@@ -57,7 +61,9 @@ export function createUser(db: DatabaseSync, u: NewUser): User {
   const res = db
     .prepare("insert into users (username, display_name, email, password_hash, is_admin, created_at) values (?, ?, ?, ?, ?, ?)")
     .run(username, (u.displayName ?? "").trim(), email, hashPassword(u.password), u.isAdmin ? 1 : 0, now());
-  return getUserById(db, Number(res.lastInsertRowid))!;
+  const id = Number(res.lastInsertRowid);
+  if (email) db.prepare("insert into emails (user_id, email, is_primary) values (?, ?, 1)").run(id, email);
+  return getUserById(db, id)!;
 }
 
 export function getUserByName(db: DatabaseSync, username: string): User | null {
@@ -93,12 +99,24 @@ export function authenticate(db: DatabaseSync, username: string, password: strin
 export function updateProfile(db: DatabaseSync, id: number, p: { displayName: string; email: string; bio: string }): void {
   const email = p.email.trim();
   if (email && !/^[^\s@]+@[^\s@]+$/.test(email)) throw new ValidationError("Email address is invalid");
-  db.prepare("update users set display_name = ?, email = ?, bio = ? where id = ?").run(
-    p.displayName.trim().slice(0, 100),
-    email,
-    p.bio.trim().slice(0, 500),
-    id,
-  );
+  if (email) {
+    const taken = db.prepare("select user_id from emails where email = ? collate nocase").get(email) as Row | undefined;
+    if (taken && taken.user_id !== id) throw new ValidationError("That email is already in use");
+  }
+  tx(db, () => {
+    db.prepare("update users set display_name = ?, email = ?, bio = ? where id = ?").run(
+      p.displayName.trim().slice(0, 100),
+      email,
+      p.bio.trim().slice(0, 500),
+      id,
+    );
+    db.prepare("update emails set is_primary = 0 where user_id = ?").run(id);
+    if (email) {
+      db.prepare(
+        "insert into emails (user_id, email, is_primary) values (?, ?, 1) on conflict(email) do update set is_primary = 1",
+      ).run(id, email);
+    }
+  });
 }
 
 export function changePassword(db: DatabaseSync, id: number, current: string, next: string): void {
@@ -119,14 +137,16 @@ export function setAdmin(db: DatabaseSync, id: number, isAdmin: boolean): void {
 
 // Sessions
 
-export function createSession(db: DatabaseSync, userId: number): { id: string; csrf: string } {
+export function createSession(db: DatabaseSync, userId: number, userAgent = ""): { id: string; csrf: string } {
   const id = randomToken();
   const csrf = randomToken(24);
-  db.prepare("insert into sessions (id, user_id, csrf_token, expires_at) values (?, ?, ?, ?)").run(
+  db.prepare("insert into sessions (id, user_id, csrf_token, expires_at, created_at, user_agent) values (?, ?, ?, ?, ?, ?)").run(
     sha256Hex(id),
     userId,
     csrf,
     now() + SESSION_DAYS * DAY,
+    now(),
+    userAgent.slice(0, 200),
   );
   return { id, csrf };
 }

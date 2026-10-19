@@ -147,11 +147,11 @@ export function Layout({ title, user, csrf, children }: PageProps) {
   return (
     <>
       {raw("<!doctype html>")}
-      <html lang="en" data-color-mode="dark" data-light-theme="dark" data-dark-theme="dark">
+      <html lang="en" data-color-mode={user?.theme === "light" ? "light" : user?.theme === "system" ? "auto" : "dark"} data-light-theme="light" data-dark-theme="dark">
         <head>
           <meta charset="utf-8" />
           <meta name="viewport" content="width=device-width, initial-scale=1" />
-          <meta name="theme-color" content="#131c21" />
+          <meta name="theme-color" content={user?.theme === "light" ? "#f6f4ee" : "#131c21"} />
           <title>{title ? `${title} · Insitio` : "Insitio"}</title>
           <link rel="preconnect" href="https://fonts.googleapis.com" />
           <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />

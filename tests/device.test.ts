@@ -252,6 +252,19 @@ describe("the cap on pending device codes per bucket", () => {
     const beforeBucket = 4;
     // Later migrations are already applied. Drop what they added so replaying from the bucket migration can succeed.
     deps.db.exec(`
+      drop table if exists security_events;
+      drop table if exists saved_replies;
+      drop table if exists blocks;
+      drop table if exists gpg_keys;
+      drop table if exists ssh_keys;
+      drop table if exists recovery_codes;
+      drop table if exists emails;
+      alter table sessions drop column user_agent;
+      alter table sessions drop column created_at;
+      alter table users drop column totp_pending;
+      alter table users drop column totp_secret;
+      alter table users drop column notify;
+      alter table users drop column theme;
       drop table if exists deploy_keys;
       drop table if exists webhook_deliveries;
       drop table if exists webhooks;
