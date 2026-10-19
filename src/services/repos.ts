@@ -138,10 +138,18 @@ export function listReposForOwner(db: DatabaseSync, ownerId: number, viewer: Use
 export function listReposForMember(db: DatabaseSync, user: User): RepoRow[] {
   const rows = db
     .prepare(
-      `${SELECT} where r.owner_id = ? or r.id in (select repo_id from collaborators where user_id = ?)
+      `${SELECT} where r.owner_id = ?
+         or r.id in (select repo_id from collaborators where user_id = ?)
+         or r.owner_id in (select org_id from org_members where user_id = ? and role = 'owner')
+         or r.id in (
+           select tr.repo_id from team_repos tr
+           join team_members tm on tm.team_id = tr.team_id
+           join teams t on t.id = tr.team_id
+           where tm.user_id = ? and t.org_id = r.owner_id
+         )
        order by r.created_at desc`,
     )
-    .all(user.id, user.id) as Row[];
+    .all(user.id, user.id, user.id, user.id) as Row[];
   return rows.map(toRepo);
 }
 

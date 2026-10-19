@@ -6,6 +6,7 @@ import { ForbiddenError, ValidationError } from "./errors.js";
 import { addComment, addEvent, getIssue, setIssueState, type Issue } from "./issues.js";
 import { accessLevel, can } from "./permissions.js";
 import { getRepo, type RepoRow } from "./repos.js";
+import { notify } from "./notifications.js";
 import { getUserById, getUserByName, type User } from "./users.js";
 
 export const REACTIONS = ["+1", "-1", "laugh", "hooray", "confused", "heart", "rocket", "eyes"] as const;
@@ -75,15 +76,31 @@ export function resolveAssignees(db: DatabaseSync, repo: RepoRow, usernames: str
 
 export function setAssignees(db: DatabaseSync, repo: RepoRow, issueId: number, usernames: string[], actorId: number): void {
   const users = resolveAssignees(db, repo, usernames);
+  const added: User[] = [];
   tx(db, () => {
     const current = new Set((assigneesFor(db, [issueId]).get(issueId) ?? []).map((a) => a.id));
     const next = new Set(users.map((u) => u.id));
     db.prepare("delete from issue_assignees where issue_id = ?").run(issueId);
     const insert = db.prepare("insert into issue_assignees (issue_id, user_id) values (?, ?)");
     for (const user of users) insert.run(issueId, user.id);
-    for (const user of users) if (!current.has(user.id)) addEvent(db, issueId, actorId, "assigned", user.username);
+    for (const user of users) if (!current.has(user.id)) {
+      addEvent(db, issueId, actorId, "assigned", user.username);
+      added.push(user);
+    }
     for (const id of current) if (!next.has(id)) addEvent(db, issueId, actorId, "unassigned", getUserById(db, id)?.username ?? "");
   });
+  const issue = db.prepare("select number, is_pull from issues where id = ?").get(issueId) as
+    | { number: number; is_pull: number }
+    | undefined;
+  if (!issue) return;
+  for (const user of added) {
+    notify(db, user.id, actorId, {
+      title: `You were assigned to ${repo.owner}/${repo.name}#${issue.number}`,
+      url: `/${repo.owner}/${repo.name}/${issue.is_pull ? "pull" : "issues"}/${issue.number}`,
+      reason: "assign",
+      repoId: repo.id,
+    });
+  }
 }
 
 export function listMilestones(db: DatabaseSync, repoId: number, state: "open" | "closed" | "all" = "open"): Milestone[] {

@@ -6,7 +6,7 @@ import { ErrorPage, Layout } from "./views/layout.js";
 
 export function render(c: Context<Env>, title: string, body: Child, status: ContentfulStatusCode = 200) {
   return c.html(
-    <Layout title={title} user={c.get("user")} csrf={c.get("csrf")}>
+    <Layout title={title} user={c.get("user")} csrf={c.get("csrf")} unread={c.get("unread")}>
       {body}
     </Layout>,
     status,
@@ -14,7 +14,7 @@ export function render(c: Context<Env>, title: string, body: Child, status: Cont
 }
 
 export function renderError(c: Context<Env>, status: ContentfulStatusCode, message: string) {
-  return c.html(<ErrorPage status={status} message={message} user={c.get("user")} csrf={c.get("csrf")} />, status);
+  return c.html(<ErrorPage status={status} message={message} user={c.get("user")} csrf={c.get("csrf")} unread={c.get("unread")} />, status);
 }
 
 export const notFound = (c: Context<Env>, what = "This page") =>

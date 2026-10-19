@@ -6,5 +6,7 @@ export type Env = {
     session: { id: string; csrf: string } | null;
     /** The CSRF token forms on this request must echo back. */
     csrf: string;
+    /** Unread inbox rows for the signed-in user. Anonymous requests stay at 0. */
+    unread: number;
   };
 };

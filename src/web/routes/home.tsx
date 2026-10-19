@@ -1,10 +1,14 @@
 import type { Hono } from "hono";
 import type { Deps } from "../../deps.js";
+import { listNotifications, markNotificationsRead } from "../../services/notifications.js";
 import { listAllVisible, listReposForMember, listStarred, searchRepos, type RepoRow } from "../../services/repos.js";
+import { searchCode, searchIssues, searchUsers } from "../../services/search.js";
 import { recentOpenIssues } from "../../services/issues.js";
 import type { Env } from "../env.js";
+import { form, loginRedirect } from "../middleware.js";
+import { blobUrl } from "../paths.js";
 import { render } from "../render.js";
-import { Avatar, InsitioMark, Octicon, TimeAgo } from "../views/layout.js";
+import { Avatar, CsrfField, InsitioMark, Octicon, TimeAgo } from "../views/layout.js";
 import { RepoListItem } from "../views/repoList.js";
 
 function RepoLink({ repo }: { repo: RepoRow }) {
@@ -110,26 +114,80 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
     );
   });
 
-  app.get("/search", (c) => {
+  app.get("/notifications", (c) => {
+    const user = c.get("user");
+    if (!user) return loginRedirect(c);
+    const notes = listNotifications(deps.db, user.id);
+    return render(
+      c,
+      "Notifications",
+      <div class="container-md p-responsive py-4">
+        <div class="d-flex flex-items-center mb-3">
+          <h1 class="f2 text-normal flex-auto">Notifications</h1>
+          <form method="post" action="/notifications/read">
+            <CsrfField csrf={c.get("csrf")} />
+            <button class="btn btn-sm" type="submit">Mark all read</button>
+          </form>
+        </div>
+        {notes.length === 0 ? (
+          <div class="blankslate Box"><h3 class="blankslate-heading">No notifications</h3></div>
+        ) : (
+          <div class="Box">
+            {notes.map((note) => (
+              <a class={`Box-row d-block ${note.readAt ? "color-fg-muted" : ""}`} href={note.url}>
+                {note.title}
+                <span class="f6 d-block">{note.reason}</span>
+              </a>
+            ))}
+          </div>
+        )}
+      </div>,
+    );
+  });
+
+  app.post("/notifications/read", async (c) => {
+    const user = c.get("user");
+    if (!user) return loginRedirect(c);
+    await form(c);
+    markNotificationsRead(deps.db, user.id);
+    return c.redirect("/notifications");
+  });
+
+  app.get("/search", async (c) => {
     const q = (c.req.query("q") ?? "").trim();
-    const results = q ? searchRepos(deps.db, q, c.get("user")) : listAllVisible(deps.db, c.get("user"));
+    const type = c.req.query("type") ?? "repos";
+    const viewer = c.get("user");
+    const repos = q && type === "repos" ? searchRepos(deps.db, q, viewer) : type === "repos" ? listAllVisible(deps.db, viewer) : [];
+    const issues = q && type === "issues" ? searchIssues(deps.db, q, viewer) : [];
+    const users = q && type === "users" ? searchUsers(deps.db, q) : [];
+    const codeRepos = () => {
+      const seen = new Set<number>();
+      const repos = viewer ? [...listReposForMember(deps.db, viewer), ...listAllVisible(deps.db, viewer)] : listAllVisible(deps.db, null);
+      return repos.filter((repo) => {
+        if (seen.has(repo.id)) return false;
+        seen.add(repo.id);
+        return true;
+      });
+    };
+    const code = q && type === "code" ? await searchCode(deps, q, codeRepos()) : [];
+    const tab = (name: string, label: string) => (
+      <a class={type === name ? "text-bold mr-3" : "mr-3"} href={`/search?q=${encodeURIComponent(q)}&type=${name}`}>{label}</a>
+    );
     return render(
       c,
       q ? `Search: ${q}` : "Explore",
       <div class="container-lg p-responsive py-4">
-        <form action="/search" method="get" class="d-flex mb-4">
-          <input class="form-control flex-auto mr-2" type="search" name="q" value={q} placeholder="Search repositories" aria-label="Search repositories" />
+        <form action="/search" method="get" class="d-flex mb-3">
+          <input type="hidden" name="type" value={type} />
+          <input class="form-control flex-auto mr-2" type="search" name="q" value={q} placeholder="Search" aria-label="Search" />
           <button class="btn" type="submit">Search</button>
         </form>
-        <h1 class="f3 text-normal mb-3">{q ? `${results.length} repository results` : "Recently created repositories"}</h1>
-        {results.length === 0 ? (
-          <div class="blankslate Box">
-            <Octicon name="search" size={24} />
-            <h3 class="blankslate-heading">No repositories found</h3>
-          </div>
-        ) : (
-          <div class="Box">{results.map((r) => <RepoListItem repo={r} showOwner />)}</div>
-        )}
+        <nav class="mb-3" aria-label="Search type">{tab("repos", "Repositories")}{tab("issues", "Issues")}{tab("users", "Users")}{tab("code", "Code")}</nav>
+        <h1 class="f3 text-normal mb-3">{q ? "Results" : "Recently created repositories"}</h1>
+        {type === "repos" && (repos.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No repositories found</h3></div> : <div class="Box">{repos.map((r) => <RepoListItem repo={r} showOwner />)}</div>)}
+        {type === "issues" && (issues.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No issues found</h3></div> : <div class="Box">{issues.map((hit) => <a class="Box-row d-block" href={`/${hit.owner}/${hit.name}/${hit.isPull ? "pull" : "issues"}/${hit.number}`}>{hit.owner}/{hit.name}#{hit.number} {hit.title}</a>)}</div>)}
+        {type === "users" && (users.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No people found</h3></div> : <div class="Box">{users.map((hit) => <a class="Box-row d-block" href={`/${hit.username}`}>{hit.username}{hit.kind === "org" ? " · organization" : ""}</a>)}</div>)}
+        {type === "code" && (code.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No code found</h3></div> : <div class="Box">{code.map((hit) => <a class="Box-row d-block" href={blobUrl(hit.owner, hit.name, hit.ref, hit.path)}><span class="text-mono f6">{hit.owner}/{hit.name}:{hit.path}:{hit.line}</span><div>{hit.text}</div></a>)}</div>)}
       </div>,
     );
   });

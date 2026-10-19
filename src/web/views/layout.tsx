@@ -8,7 +8,7 @@ import { assetUrl } from "../assets.js";
 const FONTS_URL =
   "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap";
 
-export type PageProps ={ title: string; user: User | null; csrf: string; children?: Child };
+export type PageProps = { title: string; user: User | null; csrf: string; unread?: number; children?: Child };
 
 export function Octicon({ name, size = 16, class: cls }: { name: string; size?: number; class?: string }) {
   const icon = octicons[name];
@@ -82,7 +82,7 @@ export function InsitioMark({ size = 28 }: { size?: number }) {
   );
 }
 
-function Header({ user, csrf }: { user: User | null; csrf: string }) {
+function Header({ user, csrf, unread = 0 }: { user: User | null; csrf: string; unread?: number }) {
   return (
     <header class="Header px-3 px-md-4" role="banner">
       <div class="Header-item">
@@ -97,13 +97,23 @@ function Header({ user, csrf }: { user: User | null; csrf: string }) {
             class="form-control Header-input width-full"
             type="search"
             name="q"
-            placeholder="Search repositories…"
-            aria-label="Search repositories"
+            placeholder="Search"
+            aria-label="Search"
           />
         </form>
       </div>
       {user ? (
         <>
+          <div class="Header-item">
+            <a
+              href="/notifications"
+              class="Header-link d-flex flex-items-center"
+              aria-label={unread > 0 ? `${unread} unread notifications` : "Notifications"}
+            >
+              <Octicon name="bell" />
+              {unread > 0 && <span class="Counter ml-1">{unread > 99 ? "99+" : unread}</span>}
+            </a>
+          </div>
           <div class="Header-item">
             <a href="/new" class="Header-link" aria-label="Create new repository" title="New repository">
               <Octicon name="plus" />
@@ -124,6 +134,7 @@ function Header({ user, csrf }: { user: User | null; csrf: string }) {
                 <a class="dropdown-item" href={`/${user.username}?tab=repositories`}>Your repositories</a>
                 <a class="dropdown-item" href={`/${user.username}?tab=stars`}>Your stars</a>
                 <div class="dropdown-divider"></div>
+                <a class="dropdown-item" href="/orgs/new">New organization</a>
                 <a class="dropdown-item" href="/settings/profile">Settings</a>
                 {user.isAdmin && <a class="dropdown-item" href="/site-admin">Site admin</a>}
                 <form method="post" action="/logout">
@@ -143,7 +154,7 @@ function Header({ user, csrf }: { user: User | null; csrf: string }) {
   );
 }
 
-export function Layout({ title, user, csrf, children }: PageProps) {
+export function Layout({ title, user, csrf, unread = 0, children }: PageProps) {
   return (
     <>
       {raw("<!doctype html>")}
@@ -164,7 +175,7 @@ export function Layout({ title, user, csrf, children }: PageProps) {
         </head>
         <body>
           <a class="px-2 py-4 color-bg-accent-emphasis color-fg-on-emphasis show-on-focus" href="#main">Skip to content</a>
-          <Header user={user} csrf={csrf} />
+          <Header user={user} csrf={csrf} unread={unread} />
           <main id="main">{children}</main>
           <footer class="container-xl p-responsive py-6 mt-6 border-top color-fg-muted f6 d-flex flex-justify-between" role="contentinfo">
             <span>Insitio · self-hosted, invite-only</span>
@@ -179,7 +190,7 @@ export function Layout({ title, user, csrf, children }: PageProps) {
 export function ErrorPage(props: Omit<PageProps, "title" | "children"> & { status: number; message: string }) {
   const titles: Record<number, string> = { 400: "Bad request", 403: "Forbidden", 404: "Page not found", 409: "Conflict", 500: "Server error" };
   return (
-    <Layout title={titles[props.status] ?? "Error"} user={props.user} csrf={props.csrf}>
+    <Layout title={titles[props.status] ?? "Error"} user={props.user} csrf={props.csrf} unread={props.unread}>
       <div class="container-md p-responsive py-6 text-center">
         <h1 class="f00-light color-fg-muted">{props.status}</h1>
         <p class="f3 mb-2">{titles[props.status] ?? "Something went wrong"}</p>
