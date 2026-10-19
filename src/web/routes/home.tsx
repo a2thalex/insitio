@@ -27,34 +27,28 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
   app.get("/", (c) => {
     const user = c.get("user");
     if (!user) {
+      const host = new URL(c.req.url).host;
+      const recent = listAllVisible(deps.db, null, 8);
       return render(
         c,
         "",
-        <div class="constellation">
-          <div class="container-md p-responsive py-6 text-center">
-            <InsitioMark size={72} />
-            <span class="eyebrow mt-4">Private, invite-only git hosting</span>
-            <h1 class="f00-light mt-2">Code that stays where it belongs.</h1>
-            <p class="f2 serif color-fg-accent mt-1">In situ.</p>
-            <p class="f4 color-fg-muted mt-3 mb-5 mx-auto" style="max-width:520px">
-              Repositories, issues and pull requests on your own server, for the people you invite.
-            </p>
+        <div class="gate">
+          <div class="gate-intro">
+            <InsitioMark size={40} />
+            <h1>Insitio</h1>
+            <p class="lede">A private git host. Repositories stay on this server, and only the people you invite can get in.</p>
             <a class="btn btn-primary btn-large" href="/login">Sign in</a>
-            <p class="color-fg-muted f6 mt-3">Have an invite link? Open it to create your account.</p>
-            <div class="d-flex flex-wrap flex-justify-center mt-6 text-left" style="gap:16px">
-              {[
-                ["01", "Repositories", "Push and clone over HTTPS with personal access tokens. Browse code, history and diffs."],
-                ["02", "Issues", "Track work with Markdown discussions, labels and filters."],
-                ["03", "Pull requests", "Review changes side by side and merge them on the server."],
-              ].map(([n, title, body]) => (
-                <div class="Box p-4" style="flex:1 1 220px;max-width:280px">
-                  <span class="eyebrow eyebrow-accent">{n}</span>
-                  <h2 class="f3 mt-1 mb-2">{title}</h2>
-                  <p class="f6 color-fg-muted mb-0">{body}</p>
-                </div>
-              ))}
-            </div>
+            <p class="gate-note">Accounts start from an invite link. There is no open sign-up.</p>
+            <pre class="gate-clone"><b>git clone</b> https://{host}/owner/name.git</pre>
           </div>
+          <section class="gate-shelf" aria-label="Public repositories">
+            <h2>Public repositories</h2>
+            {recent.length === 0 ? (
+              <p class="color-fg-muted">Nothing on this server is public yet.</p>
+            ) : (
+              <div class="Box">{recent.map((repo) => <RepoListItem repo={repo} showOwner />)}</div>
+            )}
+          </section>
         </div>,
       );
     }

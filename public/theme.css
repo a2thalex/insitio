@@ -285,12 +285,73 @@ a { color: var(--ins-link); }
 .diff-table .hunk td { background-color: rgba(86, 184, 207, 0.08); }
 .diff-table .hunk .blob-num { background-color: rgba(86, 184, 207, 0.14); }
 
-/* Constellation backdrop for the landing and sign-in pages */
+/* Constellation backdrop for sign-in. The public home page does not use it. */
 .constellation {
   background-image: url("/static/constellation.svg");
   background-size: cover;
   background-position: center top;
   min-height: calc(100vh - 140px);
+}
+
+/* Public home: a name and a shelf of repositories, not a centered poster. */
+.gate {
+  display: grid;
+  grid-template-columns: minmax(260px, 380px) minmax(0, 1fr);
+  gap: 56px;
+  align-items: start;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 72px 32px 88px;
+}
+.gate-intro h1 {
+  font-size: 64px;
+  line-height: 0.9;
+  margin: 18px 0 14px;
+}
+.gate-intro .lede {
+  font-size: 18px;
+  line-height: 1.45;
+  max-width: 28ch;
+  margin: 0 0 22px;
+  color: var(--ins-fg-2);
+}
+.gate-note {
+  margin: 14px 0 0;
+  color: var(--ins-fg-muted);
+  font-size: 13px;
+  max-width: 32ch;
+}
+.gate-clone {
+  margin: 28px 0 0;
+  padding: 12px 14px;
+  background: var(--ins-inset);
+  border: 1px solid var(--ins-border-soft);
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ins-fg-muted);
+  overflow-x: auto;
+}
+.gate-clone b {
+  color: var(--ins-accent);
+  font-weight: 500;
+}
+.gate-shelf h2 {
+  font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ins-fg-muted);
+  margin: 6px 0 12px;
+}
+@media (max-width: 760px) {
+  .gate {
+    grid-template-columns: 1fr;
+    gap: 36px;
+    padding: 36px 16px 56px;
+  }
+  .gate-intro h1 { font-size: 52px; }
 }
 
 /* Insitio mark */
