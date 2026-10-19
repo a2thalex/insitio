@@ -32,11 +32,34 @@ function pullState(p: Pull): IssueState {
   return p.mergedAt ? "merged" : p.state;
 }
 
-/** A PR's commits and diff; after a merge they come from the merge commit's parents so they stay visible. */
-async function pullChanges(ctx: RepoCtx, p: Pull): Promise<Changes> {
-  const [base, head] = p.mergeCommit ? [`${p.mergeCommit}^1`, `${p.mergeCommit}^2`] : [p.baseRef, p.headRef];
+/** A PR's commits and diff. A merge commit uses its two parents. A squash or rebase uses the base it was computed from. */
+export async function pullChanges(ctx: RepoCtx, p: Pull): Promise<Changes> {
+  let base = p.baseRef;
+  let head = p.headRef;
+  if (p.mergeCommit) {
+    const meta = await ctx.git.commit(p.mergeCommit);
+    if (meta.parents.length >= 2) {
+      base = `${p.mergeCommit}^1`;
+      head = `${p.mergeCommit}^2`;
+    } else {
+      base = p.mergeBaseSha ?? meta.parents[0] ?? p.baseRef;
+      head = p.mergeCommit;
+    }
+  }
   const cmp = await ctx.git.compare(base, head);
   return { commits: cmp.commits, files: cmp.files, truncated: cmp.diffTruncated };
+}
+
+export function diffLineText(files: DiffFile[], path: string, side: "left" | "right", line: number): string | null {
+  for (const file of files) {
+    if ((side === "left" ? file.oldPath : file.newPath) !== path) continue;
+    for (const hunk of file.hunks) {
+      for (const item of hunk.lines) {
+        if ((side === "left" ? item.oldNo : item.newNo) === line) return item.text;
+      }
+    }
+  }
+  return null;
 }
 
 function plural(n: number, word: string) {
@@ -437,8 +460,24 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
     } else {
       const ref = pull.mergeCommit ?? pull.headRef;
       const notes = listLineComments(deps.db, pull.id);
-      const noteOn = (path: string, side: "left" | "right", line: number) => notes.filter((note) => note.path === path && note.side === side && note.line === line);
+      const current = (note: (typeof notes)[number]) => diffLineText(changes.files, note.path, note.side, note.line) === note.lineText;
+      const stale = notes.filter((note) => !current(note));
+      const noteOn = (path: string, side: "left" | "right", line: number, text: string) =>
+        notes.filter((note) => note.path === path && note.side === side && note.line === line && note.lineText === text);
       content = (
+        <>
+        {stale.length > 0 && (
+          <div class="Box mb-3">
+            <div class="Box-header">Outdated</div>
+            {stale.map((note) => (
+              <div class="Box-row">
+                <a class="text-bold" href={`/${note.username}`}>{note.username}</a>
+                <span class="f6 color-fg-muted ml-2">{note.path}:{note.line}</span>
+                <div class="markdown-body">{raw(issueMarkdown(ctx, note.body))}</div>
+              </div>
+            ))}
+          </div>
+        )}
         <DiffView
           files={changes.files}
           truncated={changes.truncated}
@@ -448,7 +487,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
               line.oldNo ? { side: "left" as const, line: line.oldNo, path: file.oldPath } : null,
               line.newNo ? { side: "right" as const, line: line.newNo, path: file.newPath } : null,
             ].filter((spot): spot is { side: "left" | "right"; line: number; path: string } => !!spot);
-            const shown = spots.flatMap((spot) => noteOn(spot.path, spot.side, spot.line).map((note) => ({ ...note, side: spot.side })));
+            const shown = spots.flatMap((spot) => noteOn(spot.path, spot.side, spot.line, line.text).map((note) => ({ ...note, side: spot.side })));
             if (!shown.length && !viewer) return null;
             return (
               <>
@@ -483,6 +522,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
             );
           }}
         />
+        </>
       );
     }
 
@@ -541,23 +581,22 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
     if (!pull) return notFound(c);
     if (pull.state !== "open" || pull.mergedAt) return renderError(c, 409, "This pull request is already closed.");
     if (pull.draft) return renderError(c, 409, "This pull request is still a draft.");
-    const headBefore = await ctx.git.resolve(pull.headRef);
-    if (headBefore) {
-      const unmet = unmetChecks(deps.db, ctx.repo.id, headBefore);
-      if (unmet.length) return renderError(c, 409, `Required checks have not passed: ${unmet.join(", ")}`);
-    }
+    const [baseBefore, headBefore] = await Promise.all([ctx.git.resolve(pull.baseRef), ctx.git.resolve(pull.headRef)]);
+    if (!baseBefore || !headBefore) return renderError(c, 409, "A branch of this pull request no longer exists.");
+    const unmet = unmetChecks(deps.db, ctx.repo.id, headBefore);
+    if (unmet.length) return renderError(c, 409, `Required checks have not passed: ${unmet.join(", ")}`);
     const f = await form(c);
     const method = field(f, "method");
     const mergeMessage = `Merge pull request #${pull.number} from ${ctx.repo.owner}/${pull.headRef}\n\n${pull.title}`;
     const squashMessage = pull.body.trim() ? `${pull.title}\n\n${pull.body.trim()}` : pull.title;
-    const baseBefore = await ctx.git.resolve(pull.baseRef);
+    const pinned = { base: baseBefore, head: headBefore };
     try {
       const sha = method === "squash"
-        ? await ctx.git.squash(pull.baseRef, pull.headRef, squashMessage, authorFor(user))
+        ? await ctx.git.squash(pull.baseRef, pull.headRef, squashMessage, authorFor(user), pinned)
         : method === "rebase"
-          ? await ctx.git.rebase(pull.baseRef, pull.headRef, authorFor(user))
-          : await ctx.git.merge(pull.baseRef, pull.headRef, mergeMessage, authorFor(user));
-      markMerged(deps.db, pull.id, user.id, sha);
+          ? await ctx.git.rebase(pull.baseRef, pull.headRef, authorFor(user), pinned)
+          : await ctx.git.merge(pull.baseRef, pull.headRef, mergeMessage, authorFor(user), pinned);
+      markMerged(deps.db, pull.id, user.id, sha, baseBefore);
       const text = `${pull.title}\n${pull.body}\n${method === "squash" ? squashMessage : mergeMessage}`;
       applyClosingReferences(deps.db, user, ctx.repo, text, `pull request #${pull.number}`);
       recordMentions(deps.db, user, ctx.repo, text, { kind: "pull", number: pull.number });
@@ -577,7 +616,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
     } catch (err) {
       if (err instanceof MergeConflictError) return renderError(c, 409, "This branch has conflicts that must be resolved before merging.");
       if (err instanceof RefMovedError) return renderError(c, 409, "The base branch changed while merging. Reload and try again.");
-      if (err instanceof GitError && /nothing to merge|more than 100/.test(err.stderr)) return renderError(c, 409, err.stderr);
+      if (err instanceof GitError && /nothing to merge|more than 100|merge commit/.test(err.stderr)) return renderError(c, 409, err.stderr);
       throw err;
     }
     return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "pull", String(pull.number)));

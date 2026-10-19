@@ -339,10 +339,11 @@ export class Repo {
   }
 
   /** Creates a merge commit of head into base, like GitHub's "Create a merge commit". */
-  async merge(base: string, head: string, message: string, author: Author): Promise<string> {
+  async merge(base: string, head: string, message: string, author: Author, pinned?: { base: string; head: string }): Promise<string> {
     assertSafeRef(base);
     const [b, h] = await Promise.all([this.resolve(base), this.resolve(head)]);
     if (!b || !h) throw new GitError(["merge"], 128, "branch not found");
+    if (pinned && (b !== pinned.base || h !== pinned.head)) throw new RefMovedError(base);
     const anc = await this.git(["merge-base", "--is-ancestor", h, b], { okCodes: [0, 1] });
     if (anc.code === 0) throw new GitError(["merge"], 1, "nothing to merge");
     const mt = await this.git(["merge-tree", "--write-tree", "--no-messages", b, h], { okCodes: [0, 1] });
@@ -356,10 +357,11 @@ export class Repo {
   }
 
   /** One commit on `base` with the merged tree and no second parent. */
-  async squash(base: string, head: string, message: string, author: Author): Promise<string> {
+  async squash(base: string, head: string, message: string, author: Author, pinned?: { base: string; head: string }): Promise<string> {
     assertSafeRef(base);
     const [b, h] = await Promise.all([this.resolve(base), this.resolve(head)]);
     if (!b || !h) throw new GitError(["merge"], 128, "branch not found");
+    if (pinned && (b !== pinned.base || h !== pinned.head)) throw new RefMovedError(base);
     const anc = await this.git(["merge-base", "--is-ancestor", h, b], { okCodes: [0, 1] });
     if (anc.code === 0) throw new GitError(["merge"], 1, "nothing to merge");
     const mt = await this.git(["merge-tree", "--write-tree", "--no-messages", b, h], { okCodes: [0, 1] });
@@ -374,10 +376,11 @@ export class Repo {
    * Replays up to 100 commits from `head` onto `base`. A fast-forward moves the ref.
    * The ref stays put if any replayed commit conflicts.
    */
-  async rebase(base: string, head: string, committer: Author): Promise<string> {
+  async rebase(base: string, head: string, committer: Author, pinned?: { base: string; head: string }): Promise<string> {
     assertSafeRef(base);
     const [b, h] = await Promise.all([this.resolve(base), this.resolve(head)]);
     if (!b || !h) throw new GitError(["rebase"], 128, "branch not found");
+    if (pinned && (b !== pinned.base || h !== pinned.head)) throw new RefMovedError(base);
     const headInBase = await this.git(["merge-base", "--is-ancestor", h, b], { okCodes: [0, 1] });
     if (headInBase.code === 0) throw new GitError(["rebase"], 1, "nothing to merge");
     const baseInHead = await this.git(["merge-base", "--is-ancestor", b, h], { okCodes: [0, 1] });
@@ -399,15 +402,25 @@ export class Repo {
       .filter(Boolean)
       .map((record) => {
         const [sha, parents, name, email, at, subject, body] = record.split("\x1f");
-        return { sha, parent: (parents ?? "").split(" ")[0], name: name ?? "", email: email ?? "", at: at ?? "", subject: subject ?? "", body: body ?? "" };
+        return {
+          sha,
+          parents: (parents ?? "").split(" ").filter(Boolean),
+          name: name ?? "",
+          email: email ?? "",
+          at: at ?? "",
+          subject: subject ?? "",
+          body: body ?? "",
+        };
       })
       .filter((commit) => /^[0-9a-f]{40}$/i.test(commit.sha));
     if (commits.length > 100) throw new GitError(["rebase"], 1, "more than 100 commits to rebase");
+    if (commits.some((commit) => commit.parents.length > 1)) throw new GitError(["rebase"], 1, "rebase cannot replay a merge commit");
     let onto = b;
     for (const commit of commits) {
-      if (!/^[0-9a-f]{40}$/i.test(commit.parent)) throw new GitError(["rebase"], 1, "a commit has no parent");
+      const parent = commit.parents[0];
+      if (!/^[0-9a-f]{40}$/i.test(parent)) throw new GitError(["rebase"], 1, "a commit has no parent");
       const mt = await this.git(
-        ["merge-tree", "--write-tree", "--no-messages", `--merge-base=${commit.parent}`, onto, commit.sha],
+        ["merge-tree", "--write-tree", "--no-messages", `--merge-base=${parent}`, onto, commit.sha],
         { okCodes: [0, 1] },
       );
       if (mt.code === 1) throw new MergeConflictError();

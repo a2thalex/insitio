@@ -12,14 +12,17 @@ const MAX_CHECKS = 10;
 type Row = Record<string, any>;
 
 export function setReviewers(db: DatabaseSync, repo: RepoRow, issueId: number, usernames: string[]): void {
-  const unique = [...new Set(usernames.map((name) => name.trim()).filter(Boolean))];
-  if (unique.length > MAX_REVIEWERS) throw new ValidationError(`A pull request can have at most ${MAX_REVIEWERS} reviewers.`);
+  const names = usernames.map((name) => name.trim()).filter(Boolean);
   const users: User[] = [];
-  for (const name of unique) {
+  const seen = new Set<number>();
+  for (const name of names) {
     const user = getUserByName(db, name);
     if (!user || !can(accessLevel(db, user, repo), "read")) throw new ValidationError(`${name} can't review this repository.`);
+    if (seen.has(user.id)) continue;
+    seen.add(user.id);
     users.push(user);
   }
+  if (users.length > MAX_REVIEWERS) throw new ValidationError(`A pull request can have at most ${MAX_REVIEWERS} reviewers.`);
   tx(db, () => {
     db.prepare("delete from pull_reviewers where issue_id = ?").run(issueId);
     const insert = db.prepare("insert into pull_reviewers (issue_id, user_id) values (?, ?)");
@@ -83,6 +86,8 @@ export type LineComment = {
   path: string;
   side: "left" | "right";
   line: number;
+  commitSha: string;
+  lineText: string;
   body: string;
   createdAt: number;
 };
@@ -91,13 +96,13 @@ export function addLineComment(
   db: DatabaseSync,
   issueId: number,
   userId: number,
-  input: { path: string; side: "left" | "right"; line: number; body: string },
+  input: { path: string; side: "left" | "right"; line: number; body: string; commitSha: string; lineText: string },
 ): void {
   const text = input.body.trim();
   if (!text) throw new ValidationError("Comment can't be blank");
   db.prepare(
-    "insert into pull_line_comments (issue_id, user_id, path, side, line, body, created_at) values (?, ?, ?, ?, ?, ?, ?)",
-  ).run(issueId, userId, input.path, input.side, input.line, text.slice(0, 10_000), now());
+    "insert into pull_line_comments (issue_id, user_id, path, side, line, commit_sha, line_text, body, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(issueId, userId, input.path, input.side, input.line, input.commitSha, input.lineText, text.slice(0, 10_000), now());
 }
 
 export function listLineComments(db: DatabaseSync, issueId: number): LineComment[] {
@@ -115,6 +120,8 @@ export function listLineComments(db: DatabaseSync, issueId: number): LineComment
     path: row.path,
     side: row.side,
     line: row.line,
+    commitSha: row.commit_sha,
+    lineText: row.line_text,
     body: row.body,
     createdAt: row.created_at,
   }));
@@ -150,6 +157,8 @@ export function savePullTemplate(db: DatabaseSync, repoId: number, input: { name
   const name = input.name.trim();
   if (!name) throw new ValidationError("Template name can't be blank.");
   if (name.length > 60) throw new ValidationError("Template name is too long.");
+  const taken = db.prepare("select 1 from pull_templates where repo_id = ? and name = ?").get(repoId, name);
+  if (taken) throw new ValidationError("A template with that name already exists.");
   const count = (db.prepare("select count(*) as n from pull_templates where repo_id = ?").get(repoId) as Row).n;
   if (count >= MAX_TEMPLATES) throw new ValidationError(`A repository can have at most ${MAX_TEMPLATES} pull request templates.`);
   db.prepare("insert into pull_templates (repo_id, name, about, title, body, position) values (?, ?, ?, ?, ?, ?)").run(

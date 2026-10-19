@@ -263,6 +263,7 @@ const MIGRATIONS = [
   // Pull requests: drafts, reviewers, reviews, line comments, templates, statuses.
   `
   alter table pulls add column draft integer not null default 0;
+  alter table pulls add column merge_base_sha text;
   create table pull_reviewers (
     issue_id integer not null references issues(id) on delete cascade,
     user_id integer not null references users(id) on delete cascade,
@@ -284,6 +285,8 @@ const MIGRATIONS = [
     path text not null,
     side text not null check (side in ('left', 'right')),
     line integer not null,
+    commit_sha text not null default '',
+    line_text text not null default '',
     body text not null,
     created_at integer not null
   );

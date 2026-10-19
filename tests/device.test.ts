@@ -258,6 +258,7 @@ describe("the cap on pending device codes per bucket", () => {
       drop table if exists pull_templates;
       drop table if exists commit_statuses;
       drop table if exists required_checks;
+      alter table pulls drop column merge_base_sha;
       alter table pulls drop column draft;
       drop table if exists issue_mentions;
       drop table if exists activities;

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { RefMovedError } from "../src/git/repo.js";
 import { createPull, getPull } from "../src/services/pulls.js";
 import { createRepo, gitFor, type RepoRow } from "../src/services/repos.js";
 import { createAccessToken, type User } from "../src/services/users.js";
@@ -40,6 +41,11 @@ describe("pull request workflow", () => {
     const bobWho = t.loginAs(bob);
     expect((await t.post("/ada/hello/pull/1/reviewers", { reviewers: "bob" }, adaWho)).status).toBe(302);
     expect((await t.post("/ada/hello/pull/1/reviewers", { reviewers: "nobody" }, adaWho)).status).toBe(400);
+    expect((await t.post("/ada/hello/pull/1/reviewers", { reviewers: "ada Ada" }, adaWho)).status).toBe(302);
+    const reviewerCount = t.deps.db.prepare(
+      "select count(*) as n from pull_reviewers r join issues i on i.id = r.issue_id where i.repo_id = ? and i.number = 1",
+    ).get(repo.id) as { n: number };
+    expect(reviewerCount.n).toBe(1);
     const names = Array.from({ length: 11 }, (_, i) => t.user(`u${i}`).username);
     expect((await t.post("/ada/hello/pull/1/reviewers", { reviewers: names.join(" ") }, adaWho)).status).toBe(400);
 
@@ -84,6 +90,7 @@ describe("pull request workflow", () => {
     expect(commit.parents).toEqual([before]);
     expect(commit.subject).toBe("Add feature");
     expect(commit.body).toContain("Squashed body");
+    expect(await (await t.get("/ada/hello/pull/1/files")).text()).toContain("feature.txt");
 
     await git.commitFiles("ahead", { "ahead.txt": "ahead\n" }, "Ahead", author, "main");
     createPull(t.deps.db, repo.id, ada.id, { title: "Ahead", body: "", baseRef: "main", headRef: "ahead" });
@@ -116,6 +123,31 @@ describe("pull request workflow", () => {
     const form = await (await t.get("/ada/hello/compare/main...docs?template=1", adaWho)).text();
     expect(form).toContain('value="Fix:"');
     expect(form).toContain("What broke");
+    expect((await t.post("/ada/hello/pulls/templates", { name: "Fix", about: "", title: "", body: "" }, adaWho)).status).toBe(400);
+  });
+
+  it("moves a stale line comment out of the diff and will not rebase a merge commit", async () => {
+    createPull(t.deps.db, repo.id, ada.id, { title: "Add feature", body: "", baseRef: "main", headRef: "feature" });
+    expect((await t.post("/ada/hello/pull/1/line-comments", { path: "feature.txt", side: "right", line: "1", body: "original note" }, adaWho)).status).toBe(302);
+    await git.commitFiles("feature", { "feature.txt": "inserted\nnew feature\n" }, "Insert a line", author);
+    const files = await (await t.get("/ada/hello/pull/1/files", adaWho)).text();
+    expect(files).toContain("Outdated");
+    expect(files.split("original note").length - 1).toBe(1);
+
+    await git.commitFiles("main", { "later.txt": "later\n" }, "Later", author);
+    expect((await t.post("/ada/hello/pull/1/update", {}, adaWho)).status).toBe(302);
+    await git.commitFiles("main", { "again.txt": "again\n" }, "Again", author);
+    const base = await git.resolve("main");
+    const refused = await t.post("/ada/hello/pull/1/merge", { method: "rebase" }, adaWho);
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain("merge commit");
+    expect(await git.resolve("main")).toBe(base);
+  });
+
+  it("refuses to merge a head other than the one whose checks were read", async () => {
+    const base = (await git.resolve("main"))!;
+    await expect(git.merge("main", "feature", "nope", author, { base, head: "b".repeat(40) })).rejects.toBeInstanceOf(RefMovedError);
+    expect(await git.resolve("main")).toBe(base);
   });
 
   it("refuses to merge until required checks succeed, and hides a private repository", async () => {

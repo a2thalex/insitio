@@ -7,6 +7,8 @@ export type Pull = Issue & {
   baseRef: string;
   headRef: string;
   draft: boolean;
+  /** The base commit the merge was computed from. Keeps a squash or rebase diff readable. */
+  mergeBaseSha: string | null;
   mergedAt: number | null;
   mergedBy: string | null;
   mergeCommit: string | null;
@@ -16,7 +18,7 @@ type Row = Record<string, any>;
 
 const PULL_SELECT = `select i.*, u.username as author,
   (select count(*) from comments c where c.issue_id = i.id) as comment_count,
-  p.base_ref, p.head_ref, p.draft, p.merged_at, p.merge_commit, mu.username as merged_by_name
+  p.base_ref, p.head_ref, p.draft, p.merge_base_sha, p.merged_at, p.merge_commit, mu.username as merged_by_name
   from issues i join users u on u.id = i.author_id
   join pulls p on p.issue_id = i.id left join users mu on mu.id = p.merged_by`;
 
@@ -27,6 +29,7 @@ function toPulls(db: DatabaseSync, rows: Row[]): Pull[] {
     baseRef: rows[n].base_ref,
     headRef: rows[n].head_ref,
     draft: !!rows[n].draft,
+    mergeBaseSha: rows[n].merge_base_sha ?? null,
     mergedAt: rows[n].merged_at,
     mergedBy: rows[n].merged_by_name,
     mergeCommit: rows[n].merge_commit,
@@ -83,10 +86,10 @@ export function setPullDraft(db: DatabaseSync, issueId: number, draft: boolean):
   db.prepare("update pulls set draft = ? where issue_id = ?").run(draft ? 1 : 0, issueId);
 }
 
-export function markMerged(db: DatabaseSync, issueId: number, userId: number, sha: string): void {
+export function markMerged(db: DatabaseSync, issueId: number, userId: number, sha: string, baseSha: string | null = null): void {
   tx(db, () => {
     const t = now();
-    db.prepare("update pulls set merged_at = ?, merged_by = ?, merge_commit = ? where issue_id = ?").run(t, userId, sha, issueId);
+    db.prepare("update pulls set merged_at = ?, merged_by = ?, merge_commit = ?, merge_base_sha = ? where issue_id = ?").run(t, userId, sha, baseSha, issueId);
     db.prepare("update issues set state = 'closed', closed_at = ?, updated_at = ? where id = ?").run(t, t, issueId);
     addEvent(db, issueId, userId, "merged", sha);
   });

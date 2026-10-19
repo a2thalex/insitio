@@ -8,6 +8,7 @@ import { ValidationError } from "../../services/errors.js";
 import { assertCanTalk } from "../../services/issueExtras.js";
 import { can } from "../../services/permissions.js";
 import { getPull, setPullDraft } from "../../services/pulls.js";
+import { diffLineText, pullChanges } from "./pulls.js";
 import {
   addLineComment, addReview, deleteLineComment, deletePullTemplate, getLineComment, listPullTemplates, savePullTemplate, setReviewers, updateLineComment,
 } from "../../services/pullExtras.js";
@@ -140,9 +141,11 @@ export function pullBoardRoutes(deps: Deps, app: Hono<Env>) {
       throw new ValidationError("That path can't be commented on.");
     }
     if (!side || !Number.isInteger(line) || line < 1) throw new ValidationError("Choose a line in the diff.");
-    const diff = await ctx.git.compare(pull.baseRef, pull.headRef);
-    if (!onDiff(diff.files, path, side, line)) throw new ValidationError("That line is not in the diff.");
-    addLineComment(deps.db, pull.id, user.id, { path, side, line, body: field(f, "body") });
+    const diff = await pullChanges(ctx, pull);
+    const lineText = diffLineText(diff.files, path, side, line);
+    if (lineText === null || !onDiff(diff.files, path, side, line)) throw new ValidationError("That line is not in the diff.");
+    const commitSha = pull.mergeCommit ?? (await ctx.git.resolve(pull.headRef)) ?? "";
+    addLineComment(deps.db, pull.id, user.id, { path, side, line, body: field(f, "body"), commitSha, lineText });
     return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "pull", String(pull.number), "files"));
   }));
 
