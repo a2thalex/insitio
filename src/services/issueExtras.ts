@@ -98,6 +98,7 @@ export function setAssignees(db: DatabaseSync, repo: RepoRow, issueId: number, u
       title: `You were assigned to ${repo.owner}/${repo.name}#${issue.number}`,
       url: `/${repo.owner}/${repo.name}/${issue.is_pull ? "pull" : "issues"}/${issue.number}`,
       reason: "assign",
+      repoId: repo.id,
     });
   }
 }

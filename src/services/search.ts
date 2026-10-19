@@ -8,7 +8,7 @@ type Row = Record<string, any>;
 
 export type IssueHit = { owner: string; name: string; number: number; title: string; isPull: boolean };
 export type UserHit = { username: string; kind: "user" | "org" };
-export type CodeHit = { owner: string; name: string; path: string; line: number; text: string };
+export type CodeHit = { owner: string; name: string; ref: string; path: string; line: number; text: string };
 
 const SELECT = `select i.number, i.title, i.is_pull, i.repo_id, r.owner_id, r.name, r.is_private, u.username as owner
   from issues i join repos r on r.id = i.repo_id join users u on u.id = r.owner_id`;
@@ -41,7 +41,7 @@ export async function searchCode(deps: Deps, q: string, repos: RepoRow[]): Promi
     const found = await gitFor(deps, repo).grep(repo.defaultBranch, q, 5);
     for (const file of found) {
       for (const line of file.lines) {
-        hits.push({ owner: repo.owner, name: repo.name, path: file.path, line: line.no, text: line.text });
+        hits.push({ owner: repo.owner, name: repo.name, ref: repo.defaultBranch, path: file.path, line: line.no, text: line.text });
         if (hits.length >= 30) return hits;
       }
     }

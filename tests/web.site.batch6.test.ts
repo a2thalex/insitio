@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createIssue } from "../src/services/issues.js";
 import { listNotifications } from "../src/services/notifications.js";
 import { createOrg } from "../src/services/orgs.js";
-import { createRepo } from "../src/services/repos.js";
+import { addCollaborator, createRepo, removeCollaborator } from "../src/services/repos.js";
 import { authenticate, type User } from "../src/services/users.js";
 import { testApp, type Who } from "./helpers.js";
 
@@ -82,6 +82,17 @@ describe("notifications", () => {
     expect((await t.post(`/ada/hello/issues/${issue.number}/comment`, { body: "again", action: "comment" }, bobWho)).status).toBe(302);
     expect(listNotifications(t.deps.db, ada.id).map((note) => note.title)).toEqual(["bob commented on ada/hello#1"]);
     expect((await t.get("/notifications")).status).toBe(302);
+
+    const secret = await createRepo(t.deps, ada, { name: "secret", description: "", isPrivate: true, initReadme: true });
+    addCollaborator(t.deps.db, secret.id, bob.id, "write");
+    const hidden = createIssue(t.deps.db, secret.id, bob.id, { title: "Quiet bug", body: "" });
+    expect((await t.post(`/ada/secret/issues/${hidden.number}/comment`, { body: "while you can read", action: "comment" }, adaWho)).status).toBe(302);
+    expect(listNotifications(t.deps.db, bob.id).some((note) => note.title.includes("ada/secret"))).toBe(true);
+    removeCollaborator(t.deps.db, secret.id, bob.id);
+    expect(listNotifications(t.deps.db, bob.id).some((note) => note.title.includes("secret"))).toBe(false);
+    expect(await (await t.get("/notifications", bobWho)).text()).not.toContain("ada/secret");
+    expect((await t.post(`/ada/secret/issues/${hidden.number}/comment`, { body: "after access is gone", action: "comment" }, adaWho)).status).toBe(302);
+    expect(listNotifications(t.deps.db, bob.id).some((note) => note.title.includes("secret"))).toBe(false);
   });
 });
 
@@ -107,7 +118,9 @@ describe("search", () => {
     expect(orgs).not.toContain('href="/orgs/acme"');
 
     const code = await (await t.get("/search?q=codetoken77&type=code")).text();
-    expect(code).toContain("/ada/codetoken77/blob/README.md");
+    expect(code).toContain("/ada/codetoken77/blob/main/README.md");
+    const signedIn = await (await t.get("/search?q=codetoken77&type=code", bobWho)).text();
+    expect(signedIn).toContain("/ada/codetoken77/blob/main/README.md");
     const leaked = await (await t.get("/search?q=secret&type=code", bobWho)).text();
     expect(leaked).not.toContain("/ada/secret/blob/");
   });

@@ -445,6 +445,7 @@ const MIGRATIONS = [
   create table notifications (
     id integer primary key,
     user_id integer not null references users(id) on delete cascade,
+    repo_id integer not null references repos(id) on delete cascade,
     title text not null,
     url text not null,
     reason text not null,

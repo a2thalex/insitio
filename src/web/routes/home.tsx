@@ -6,6 +6,7 @@ import { searchCode, searchIssues, searchUsers } from "../../services/search.js"
 import { recentOpenIssues } from "../../services/issues.js";
 import type { Env } from "../env.js";
 import { form, loginRedirect } from "../middleware.js";
+import { blobUrl } from "../paths.js";
 import { render } from "../render.js";
 import { Avatar, CsrfField, InsitioMark, Octicon, TimeAgo } from "../views/layout.js";
 import { RepoListItem } from "../views/repoList.js";
@@ -159,7 +160,16 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
     const repos = q && type === "repos" ? searchRepos(deps.db, q, viewer) : type === "repos" ? listAllVisible(deps.db, viewer) : [];
     const issues = q && type === "issues" ? searchIssues(deps.db, q, viewer) : [];
     const users = q && type === "users" ? searchUsers(deps.db, q) : [];
-    const code = q && type === "code" ? await searchCode(deps, q, (viewer ? listReposForMember(deps.db, viewer) : listAllVisible(deps.db, null)).filter((repo) => !repo.isPrivate || viewer)) : [];
+    const codeRepos = () => {
+      const seen = new Set<number>();
+      const repos = viewer ? [...listReposForMember(deps.db, viewer), ...listAllVisible(deps.db, viewer)] : listAllVisible(deps.db, null);
+      return repos.filter((repo) => {
+        if (seen.has(repo.id)) return false;
+        seen.add(repo.id);
+        return true;
+      });
+    };
+    const code = q && type === "code" ? await searchCode(deps, q, codeRepos()) : [];
     const tab = (name: string, label: string) => (
       <a class={type === name ? "text-bold mr-3" : "mr-3"} href={`/search?q=${encodeURIComponent(q)}&type=${name}`}>{label}</a>
     );
@@ -177,7 +187,7 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
         {type === "repos" && (repos.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No repositories found</h3></div> : <div class="Box">{repos.map((r) => <RepoListItem repo={r} showOwner />)}</div>)}
         {type === "issues" && (issues.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No issues found</h3></div> : <div class="Box">{issues.map((hit) => <a class="Box-row d-block" href={`/${hit.owner}/${hit.name}/${hit.isPull ? "pull" : "issues"}/${hit.number}`}>{hit.owner}/{hit.name}#{hit.number} {hit.title}</a>)}</div>)}
         {type === "users" && (users.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No people found</h3></div> : <div class="Box">{users.map((hit) => <a class="Box-row d-block" href={`/${hit.username}`}>{hit.username}{hit.kind === "org" ? " · organization" : ""}</a>)}</div>)}
-        {type === "code" && (code.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No code found</h3></div> : <div class="Box">{code.map((hit) => <a class="Box-row d-block" href={`/${hit.owner}/${hit.name}/blob/${hit.path.split("/").map((part) => encodeURIComponent(part)).join("/")}`}><span class="text-mono f6">{hit.owner}/{hit.name}:{hit.path}:{hit.line}</span><div>{hit.text}</div></a>)}</div>)}
+        {type === "code" && (code.length === 0 ? <div class="blankslate Box"><h3 class="blankslate-heading">No code found</h3></div> : <div class="Box">{code.map((hit) => <a class="Box-row d-block" href={blobUrl(hit.owner, hit.name, hit.ref, hit.path)}><span class="text-mono f6">{hit.owner}/{hit.name}:{hit.path}:{hit.line}</span><div>{hit.text}</div></a>)}</div>)}
       </div>,
     );
   });

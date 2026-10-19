@@ -336,7 +336,7 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
         addComment(deps.db, issue.id, user.id, body);
         recordMentions(deps.db, user, ctx.repo, body, { kind: issue.isPull ? "pull" : "issue", number: issue.number });
         const path = `/${ctx.repo.owner}/${ctx.repo.name}/${issue.isPull ? "pull" : "issues"}/${issue.number}`;
-        notify(deps.db, issue.authorId, user.id, { title: `${user.username} commented on ${ctx.repo.owner}/${ctx.repo.name}#${issue.number}`, url: path, reason: "comment" });
+        notify(deps.db, issue.authorId, user.id, { title: `${user.username} commented on ${ctx.repo.owner}/${ctx.repo.name}#${issue.number}`, url: path, reason: "comment", repoId: ctx.repo.id });
       } else if (action === "comment") throw new ValidationError("Comment can't be blank");
       const reason = field(f, "reason") === "not_planned" ? "not_planned" : "completed";
       if (action === "close") setIssueState(deps.db, issue.id, "closed", user.id, issue.isPull ? undefined : reason);

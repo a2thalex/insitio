@@ -17,12 +17,15 @@ from anyone who was not given access.
    title, a URL on this site, a short reason, and a read time. The header links here and shows
    the unread count. A comment notifies the issue or pull-request author. A new assignee is
    notified once, not on every save. The actor is not notified. `users.notify = ignore` drops
-   the row. There is still no outbound mail. The list shows the latest 50.
+   the row. A person who cannot read the repository does not get the row, and a row already
+   stored disappears from their inbox if they lose access. There is still no outbound mail.
+   The list shows the latest 50 they can still read.
 2. **Search** — `GET /search?q=&type=repos|issues|users|code`. An empty query still lists recent
    public repositories. Issues match title or body, then the viewer's access, at most 30 hits
    from 80 candidates. People match the username, and an organization is labeled and linked to
    its profile at `/:name`. Code runs `git grep` on the default branch of at most 15 repositories
-   the viewer can already see, 5 files each, and stops at 30 lines.
+   the viewer can already see, including other people's public repositories, 5 files each, and
+   stops at 30 lines. A hit links to `/owner/name/blob/<default-branch>/path`.
 3. **Organizations and teams** — `GET/POST /orgs/new`, `GET /orgs/:name` (owners only), and
    posts to add a member, create a team, add a team member, and grant a repository role
    (`read`, `write`, or `admin`). An organization is a user row with `kind = org`. It cannot
