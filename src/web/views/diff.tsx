@@ -1,4 +1,5 @@
-import type { DiffFile } from "../../git/diff.js";
+import type { Child } from "hono/jsx";
+import type { DiffFile, DiffLine } from "../../git/diff.js";
 import { highlightCode, languageFor } from "../highlight.js";
 import { raw } from "hono/html";
 import { Octicon } from "./layout.js";
@@ -29,7 +30,7 @@ function fileLabel(f: DiffFile) {
 }
 
 /** Summary line plus one table per file, with old/new line number columns and hunk headers. */
-export function DiffView({ files, truncated, viewFileHref }: { files: DiffFile[]; truncated?: boolean; viewFileHref?: (f: DiffFile) => string | null }) {
+export function DiffView({ files, truncated, viewFileHref, lineExtra }: { files: DiffFile[]; truncated?: boolean; viewFileHref?: (f: DiffFile) => string | null; lineExtra?: (file: DiffFile, line: DiffLine) => Child | null }) {
   const additions = files.reduce((n, f) => n + f.additions, 0);
   const deletions = files.reduce((n, f) => n + f.deletions, 0);
   const shown = files.slice(0, MAX_FILES);
@@ -74,13 +75,24 @@ export function DiffView({ files, truncated, viewFileHref }: { files: DiffFile[]
                           <td class="blob-num" colspan={2}><Octicon name="unfold" size={12} /></td>
                           <td class="blob-code-hunk text-mono">{h.header}</td>
                         </tr>
-                        {h.lines.map((l) => (
-                          <tr class={l.type}>
-                            <td class="blob-num">{l.oldNo ?? ""}</td>
-                            <td class="blob-num">{l.newNo ?? ""}</td>
-                            <td class="blob-code">{raw(highlightCode(l.text, lang))}</td>
-                          </tr>
-                        ))}
+                        {h.lines.map((l) => {
+                          const extra = lineExtra?.(f, l) ?? null;
+                          return (
+                            <>
+                              <tr class={l.type}>
+                                <td class="blob-num">{l.oldNo ?? ""}</td>
+                                <td class="blob-num">{l.newNo ?? ""}</td>
+                                <td class="blob-code">{raw(highlightCode(l.text, lang))}</td>
+                              </tr>
+                              {extra && (
+                                <tr>
+                                  <td class="blob-num" colspan={2}></td>
+                                  <td class="blob-code p-2">{extra}</td>
+                                </tr>
+                              )}
+                            </>
+                          );
+                        })}
                       </>
                     ))}
                   </tbody>

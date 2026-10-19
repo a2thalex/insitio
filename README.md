@@ -10,7 +10,7 @@ The page layouts, URL scheme and data-loading approach come from evidence gather
 - **Code**: repository home with README, file tree, syntax-highlighted file view with line-range permalinks, raw and download links, blame, creating and editing files in the browser, zip and tar.gz archives, branches and tags, releases with downloadable assets, forks, watches, topics, a language bar, license detection and contributors.
 - **Fast listings**: directory listings render immediately, and the "last commit" columns load afterwards from `/tree-commit-info/`, the same split github.com uses.
 - **Issues**: Markdown comments, `#123` and `@user` links, labels, assignees, milestones, reactions, templates, close reasons, lock and pin, search, and "Fixes #n" auto-close.
-- **Pull requests**: compare branches, open a PR, then use the Conversation, Commits and Files changed tabs. Merges happen server-side with a merge commit, and conflicts are detected before you click merge.
+- **Pull requests**: compare branches, open a PR (including drafts), then use the Conversation, Commits and Files changed tabs. Reviewers can approve or request changes, and comments can sit on a diff line. Merge with a merge commit, squash, or rebase, and require status checks before merging.
 - **People**: invite-only sign-up, profiles, stars, collaborators with read, write or admin roles, and a site-admin page.
 - **Code search**: case-insensitive search across the default branch (`git grep`).
 - **Command line**: `nsit`, a single-file client for people and AI agents that does everyday git work without git installed and signs in, creates repositories and pushes from the terminal. See [The nsit command line](#the-nsit-command-line).

@@ -32,10 +32,10 @@ repository tabs, repository settings, user settings and Insights navigation.
 | GitHub | Insitio |
 |---|---|
 | Compare, open, conversation, commits, files, merge commit | ✓ |
-| Reviewers, approve / request changes | ✗ |
-| Line-level review comments, suggestions | ✗ |
-| Draft PRs, squash and rebase merge, delete branch after merge | ✗ |
-| Update branch, PR templates, required checks | ✗ |
+| Reviewers, approve / request changes | ✓ |
+| Line-level review comments, suggestions | ✓ (suggestions are shown, not applied) |
+| Draft PRs, squash and rebase merge, delete branch after merge | ✓ |
+| Update branch, PR templates, required checks | ✓ |
 
 ## Repository: other tabs
 | GitHub tab | Insitio |

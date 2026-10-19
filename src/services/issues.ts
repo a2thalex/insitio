@@ -27,6 +27,8 @@ export type Issue = {
   commentCount: number;
   labels: Label[];
   assignees: Assignee[];
+  /** Set on pull requests. Absent on issues. */
+  draft?: boolean;
 };
 
 export type Comment = { id: number; authorId: number; author: string; body: string; createdAt: number };

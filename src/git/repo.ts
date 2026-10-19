@@ -302,6 +302,11 @@ export class Repo {
     }
   }
 
+  async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
+    const res = await this.git(["merge-base", "--is-ancestor", ancestor, descendant], { okCodes: [0, 1] });
+    return res.code === 0;
+  }
+
   async mergeBase(a: string, b: string): Promise<string | null> {
     const { stdout, code } = await this.git(["merge-base", a, b], { okCodes: [0, 1] });
     return code === 0 ? stdout.toString().trim() : null;
@@ -348,6 +353,80 @@ export class Repo {
     ).stdout.toString().trim();
     await this.updateRef(base, sha, b);
     return sha;
+  }
+
+  /** One commit on `base` with the merged tree and no second parent. */
+  async squash(base: string, head: string, message: string, author: Author): Promise<string> {
+    assertSafeRef(base);
+    const [b, h] = await Promise.all([this.resolve(base), this.resolve(head)]);
+    if (!b || !h) throw new GitError(["merge"], 128, "branch not found");
+    const anc = await this.git(["merge-base", "--is-ancestor", h, b], { okCodes: [0, 1] });
+    if (anc.code === 0) throw new GitError(["merge"], 1, "nothing to merge");
+    const mt = await this.git(["merge-tree", "--write-tree", "--no-messages", b, h], { okCodes: [0, 1] });
+    if (mt.code === 1) throw new MergeConflictError();
+    const tree = mt.stdout.toString().split("\n")[0].trim();
+    const sha = (await this.git(["commit-tree", tree, "-p", b, "-m", message], { env: authorEnv(author) })).stdout.toString().trim();
+    await this.updateRef(base, sha, b);
+    return sha;
+  }
+
+  /**
+   * Replays up to 100 commits from `head` onto `base`. A fast-forward moves the ref.
+   * The ref stays put if any replayed commit conflicts.
+   */
+  async rebase(base: string, head: string, committer: Author): Promise<string> {
+    assertSafeRef(base);
+    const [b, h] = await Promise.all([this.resolve(base), this.resolve(head)]);
+    if (!b || !h) throw new GitError(["rebase"], 128, "branch not found");
+    const headInBase = await this.git(["merge-base", "--is-ancestor", h, b], { okCodes: [0, 1] });
+    if (headInBase.code === 0) throw new GitError(["rebase"], 1, "nothing to merge");
+    const baseInHead = await this.git(["merge-base", "--is-ancestor", b, h], { okCodes: [0, 1] });
+    if (baseInHead.code === 0) {
+      await this.updateRef(base, h, b);
+      return h;
+    }
+    const log = await this.git([
+      "log",
+      "--reverse",
+      "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e",
+      "--max-count=101",
+      `${b}..${h}`,
+    ]);
+    const commits = log.stdout
+      .toString("utf8")
+      .split("\x1e")
+      .map((record) => record.replace(/^\n+/, ""))
+      .filter(Boolean)
+      .map((record) => {
+        const [sha, parents, name, email, at, subject, body] = record.split("\x1f");
+        return { sha, parent: (parents ?? "").split(" ")[0], name: name ?? "", email: email ?? "", at: at ?? "", subject: subject ?? "", body: body ?? "" };
+      })
+      .filter((commit) => /^[0-9a-f]{40}$/i.test(commit.sha));
+    if (commits.length > 100) throw new GitError(["rebase"], 1, "more than 100 commits to rebase");
+    let onto = b;
+    for (const commit of commits) {
+      if (!/^[0-9a-f]{40}$/i.test(commit.parent)) throw new GitError(["rebase"], 1, "a commit has no parent");
+      const mt = await this.git(
+        ["merge-tree", "--write-tree", "--no-messages", `--merge-base=${commit.parent}`, onto, commit.sha],
+        { okCodes: [0, 1] },
+      );
+      if (mt.code === 1) throw new MergeConflictError();
+      const tree = mt.stdout.toString().split("\n")[0].trim();
+      const message = commit.body.trim() ? `${commit.subject}\n\n${commit.body.trim()}` : commit.subject;
+      onto = (
+        await this.git(["commit-tree", tree, "-p", onto, "-m", message], {
+          env: {
+            GIT_AUTHOR_NAME: commit.name,
+            GIT_AUTHOR_EMAIL: commit.email,
+            GIT_AUTHOR_DATE: `${commit.at} +0000`,
+            GIT_COMMITTER_NAME: committer.name,
+            GIT_COMMITTER_EMAIL: committer.email,
+          },
+        })
+      ).stdout.toString().trim();
+    }
+    await this.updateRef(base, onto, b);
+    return onto;
   }
 
   /** Case-insensitive fixed-string search over text files at a ref. */

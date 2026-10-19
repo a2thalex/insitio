@@ -6,6 +6,7 @@ import { PER_PAGE, addEvent, insertIssue, toIssues, type Issue } from "./issues.
 export type Pull = Issue & {
   baseRef: string;
   headRef: string;
+  draft: boolean;
   mergedAt: number | null;
   mergedBy: string | null;
   mergeCommit: string | null;
@@ -15,7 +16,7 @@ type Row = Record<string, any>;
 
 const PULL_SELECT = `select i.*, u.username as author,
   (select count(*) from comments c where c.issue_id = i.id) as comment_count,
-  p.base_ref, p.head_ref, p.merged_at, p.merge_commit, mu.username as merged_by_name
+  p.base_ref, p.head_ref, p.draft, p.merged_at, p.merge_commit, mu.username as merged_by_name
   from issues i join users u on u.id = i.author_id
   join pulls p on p.issue_id = i.id left join users mu on mu.id = p.merged_by`;
 
@@ -25,6 +26,7 @@ function toPulls(db: DatabaseSync, rows: Row[]): Pull[] {
     ...i,
     baseRef: rows[n].base_ref,
     headRef: rows[n].head_ref,
+    draft: !!rows[n].draft,
     mergedAt: rows[n].merged_at,
     mergedBy: rows[n].merged_by_name,
     mergeCommit: rows[n].merge_commit,
@@ -35,7 +37,7 @@ export function createPull(
   db: DatabaseSync,
   repoId: number,
   authorId: number,
-  p: { title: string; body: string; baseRef: string; headRef: string },
+  p: { title: string; body: string; baseRef: string; headRef: string; draft?: boolean },
 ): Pull {
   if (p.baseRef === p.headRef) throw new ValidationError("Choose different branches to compare");
   const id = tx(db, () => {
@@ -47,7 +49,7 @@ export function createPull(
       .get(repoId, p.baseRef, p.headRef) as Row | undefined;
     if (dup) throw new ValidationError(`A pull request for these branches already exists (#${dup.number})`);
     const issueId = insertIssue(db, repoId, authorId, { title: p.title, body: p.body, isPull: true });
-    db.prepare("insert into pulls (issue_id, base_ref, head_ref) values (?, ?, ?)").run(issueId, p.baseRef, p.headRef);
+    db.prepare("insert into pulls (issue_id, base_ref, head_ref, draft) values (?, ?, ?, ?)").run(issueId, p.baseRef, p.headRef, p.draft ? 1 : 0);
     return issueId;
   });
   return toPulls(db, [db.prepare(`${PULL_SELECT} where i.id = ?`).get(id) as Row])[0];
@@ -75,6 +77,10 @@ export function listPulls(
     .prepare(`${PULL_SELECT} where ${clause} order by i.number desc limit ? offset ?`)
     .all(repoId, PER_PAGE, (Math.max(1, f.page) - 1) * PER_PAGE) as Row[];
   return { items: toPulls(db, rows), total };
+}
+
+export function setPullDraft(db: DatabaseSync, issueId: number, draft: boolean): void {
+  db.prepare("update pulls set draft = ? where issue_id = ?").run(draft ? 1 : 0, issueId);
 }
 
 export function markMerged(db: DatabaseSync, issueId: number, userId: number, sha: string): void {

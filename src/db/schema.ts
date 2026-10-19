@@ -260,6 +260,60 @@ const MIGRATIONS = [
   );
   create index issue_mentions_issue on issue_mentions (issue_id);
   `,
+  // Pull requests: drafts, reviewers, reviews, line comments, templates, statuses.
+  `
+  alter table pulls add column draft integer not null default 0;
+  create table pull_reviewers (
+    issue_id integer not null references issues(id) on delete cascade,
+    user_id integer not null references users(id) on delete cascade,
+    primary key (issue_id, user_id)
+  );
+  create table pull_reviews (
+    id integer primary key,
+    issue_id integer not null references issues(id) on delete cascade,
+    user_id integer not null references users(id),
+    state text not null check (state in ('comment', 'approve', 'changes')),
+    body text not null default '',
+    created_at integer not null
+  );
+  create index pull_reviews_issue on pull_reviews (issue_id, created_at);
+  create table pull_line_comments (
+    id integer primary key,
+    issue_id integer not null references issues(id) on delete cascade,
+    user_id integer not null references users(id),
+    path text not null,
+    side text not null check (side in ('left', 'right')),
+    line integer not null,
+    body text not null,
+    created_at integer not null
+  );
+  create index pull_line_comments_issue on pull_line_comments (issue_id);
+  create table pull_templates (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    name text not null,
+    about text not null default '',
+    title text not null default '',
+    body text not null default '',
+    position integer not null default 0,
+    unique (repo_id, name)
+  );
+  create table commit_statuses (
+    repo_id integer not null references repos(id) on delete cascade,
+    sha text not null,
+    context text not null,
+    state text not null check (state in ('pending', 'success', 'failure', 'error')),
+    description text not null default '',
+    creator_id integer references users(id) on delete set null,
+    updated_at integer not null,
+    primary key (repo_id, sha, context)
+  );
+  create table required_checks (
+    repo_id integer not null references repos(id) on delete cascade,
+    context text not null,
+    primary key (repo_id, context)
+  );
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

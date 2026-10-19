@@ -49,6 +49,9 @@ export function renderMarkdown(md: string, opts: { repo?: RepoContext } = {}): s
     renderer: {
       code({ text, lang }) {
         const language = (lang ?? "").split(/\s/)[0] || null;
+        if (language === "suggestion") {
+          return `<div class="suggestion"><p><strong>Suggested change</strong></p><pre><code class="hljs">${highlightCode(text, null)}</code></pre></div>\n`;
+        }
         return `<pre><code class="hljs">${highlightCode(text, language)}</code></pre>\n`;
       },
     },
@@ -67,7 +70,7 @@ export function renderMarkdown(md: string, opts: { repo?: RepoContext } = {}): s
       th: ["align"],
       td: ["align"],
     },
-    allowedClasses: { code: ["hljs", /^language-/], span: [/^hljs-/] },
+    allowedClasses: { code: ["hljs", /^language-/], span: [/^hljs-/], div: ["suggestion"] },
     allowedSchemes: ["http", "https", "mailto"],
     transformTags: {
       a: (tag, attribs) => {
