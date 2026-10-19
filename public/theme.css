@@ -349,10 +349,47 @@ a { color: var(--ins-link); }
   .gate {
     grid-template-columns: 1fr;
     gap: 36px;
-    padding: 36px 16px 56px;
+    padding: 36px 16px 40px;
   }
   .gate-intro h1 { font-size: 52px; }
+  .install { padding: 0 16px 56px; }
 }
+
+.install {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 8px 32px 80px;
+}
+.install > h2 {
+  font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ins-fg-muted);
+  margin: 0 0 14px;
+}
+.install-steps {
+  list-style: decimal;
+  margin: 0;
+  padding-left: 1.4rem;
+  display: grid;
+  gap: 16px;
+}
+.install-steps > li {
+  background: var(--ins-surface);
+  border: 1px solid var(--ins-border);
+  border-radius: 12px;
+  padding: 14px 16px 16px;
+}
+.install-steps h3 {
+  font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0;
+  margin: 0 0 8px;
+}
+.install-steps .Box { margin-top: 8px; }
 
 /* Insitio mark */
 .insitio-mark .node { fill: currentColor; }

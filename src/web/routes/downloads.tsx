@@ -25,29 +25,53 @@ function CopyCommand({ command, label }: { command: string; label: string }) {
   );
 }
 
+/** The three steps for using this server from a terminal. `baseUrl` has no trailing slash. */
+export function InstallSteps({ baseUrl }: { baseUrl: string }) {
+  const base = baseUrl.replace(/\/$/, "");
+  const windows = `irm ${base}/install.ps1 | iex`;
+  const unix = `curl -fsSL ${base}/install.sh | sh`;
+  return (
+    <ol class="install-steps">
+      <li>
+        <h3>Install nsit</h3>
+        <p>One command. It downloads nsit, checks the SHA-256 checksum, and stops if the file does not match. No administrator account is required.</p>
+        <p class="mb-1"><strong>Windows.</strong> Open PowerShell and run:</p>
+        <CopyCommand label="Windows" command={windows} />
+        <p class="color-fg-muted f6 mt-2">Close that window and open a new one, so the new terminal can find <code class="text-mono">nsit</code>. It is installed at <code class="text-mono">%LOCALAPPDATA%\Programs\nsit</code>.</p>
+        <p class="mb-1 mt-3"><strong>macOS and Linux.</strong> In a terminal, run:</p>
+        <CopyCommand label="macOS and Linux" command={unix} />
+        <p class="color-fg-muted f6 mt-2">nsit goes to <code class="text-mono">~/.local/bin</code>. If the shell says it cannot find nsit, the script prints the line to add to your shell profile. Read the script first: <a href="/install.ps1">install.ps1</a> · <a href="/install.sh">install.sh</a>.</p>
+      </li>
+      <li>
+        <h3>Sign nsit in</h3>
+        <CopyCommand label="sign-in" command="nsit auth login" />
+        <p class="color-fg-muted f6 mt-2 mb-0">nsit prints a short code and opens this server in the browser. Approve that code while you are signed in. Do not type your password into the terminal.</p>
+      </li>
+      <li>
+        <h3>Clone or create a repository</h3>
+        <CopyCommand label="clone" command="nsit clone owner/name" />
+        <p class="mt-3 mb-1">Create a new one instead:</p>
+        <CopyCommand label="create" command="nsit repo create name" />
+        <p class="color-fg-muted f6 mt-2 mb-0">
+          With git, clone <code class="text-mono">git clone {base}/owner/name.git</code>. Use a personal access token from{" "}
+          <a href="/settings/tokens">Settings → Tokens</a> as the password. Your account password will not work.
+        </p>
+      </li>
+    </ol>
+  );
+}
+
 function DownloadPage({ baseUrl, releaseRepo }: { baseUrl: string; releaseRepo: string }) {
   const base = releaseBase(releaseRepo);
   return (
     <div class="container-md p-responsive py-5" style="max-width:760px">
-      <span class="eyebrow">Command-line client</span>
-      <h1 class="f1 text-normal mt-1 mb-2">Download nsit</h1>
+      <h1 class="f1 text-normal mt-1 mb-2">Install nsit</h1>
       <p class="f4 color-fg-muted mb-4">
-        nsit is the Insitio command-line tool. Install it, then run <code class="text-mono">nsit auth login</code> to connect it to this server.
+        nsit is the command-line tool for this Insitio. Do these three steps in order.
       </p>
+      <InstallSteps baseUrl={baseUrl} />
 
-      <h2 class="f3 mb-2">Install with one command</h2>
-      <h3 class="f5 mt-3 mb-1">Windows (PowerShell)</h3>
-      <CopyCommand label="Windows" command={`irm ${baseUrl}/install.ps1 | iex`} />
-      <h3 class="f5 mt-3 mb-1">macOS and Linux</h3>
-      <CopyCommand label="macOS and Linux" command={`curl -fsSL ${baseUrl}/install.sh | sh`} />
-      <p class="color-fg-muted f6 mt-3 mb-5">
-        Each script downloads the binary from the latest release, checks its SHA-256 checksum and stops if it does not match.
-        Nothing needs admin rights: nsit goes to <code class="text-mono">%LOCALAPPDATA%\Programs\nsit</code> on Windows and to{" "}
-        <code class="text-mono">~/.local/bin</code> on macOS and Linux. Want to read a script first?{" "}
-        <a href="/install.ps1">install.ps1</a> · <a href="/install.sh">install.sh</a>
-      </p>
-
-      <h2 class="f3 mb-2">Download a binary</h2>
+      <h2 class="f3 mt-5 mb-2">Or download a binary</h2>
       <div class="Box mb-2">
         {DOWNLOADS.map((d) => (
           <div class="Box-row d-flex flex-items-center">
@@ -74,11 +98,6 @@ function DownloadPage({ baseUrl, releaseRepo }: { baseUrl: string; releaseRepo: 
         <span class="color-fg-muted">On Windows, compare the hash with the nsit-windows-x64.exe line in SHA256SUMS.</span>
       </div>
 
-      <h2 class="f3 mb-2">Connect it</h2>
-      <p class="mb-2">
-        Run <code class="text-mono">nsit auth login</code> in your terminal. It shows a short code to approve in your browser, so no password or token is typed
-        into the terminal.
-      </p>
     </div>
   );
 }

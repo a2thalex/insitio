@@ -102,6 +102,9 @@ function Header({ user, csrf, unread = 0 }: { user: User | null; csrf: string; u
           />
         </form>
       </div>
+      <div class="Header-item">
+        <a href="/download" class="Header-link">Install</a>
+      </div>
       {user ? (
         <>
           <div class="Header-item">
