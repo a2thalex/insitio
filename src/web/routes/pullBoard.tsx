@@ -4,6 +4,7 @@ import { assertCommitPath } from "../../git/paths.js";
 import type { Deps } from "../../deps.js";
 import { GitError } from "../../git/run.js";
 import { MergeConflictError, RefMovedError } from "../../git/repo.js";
+import { listBranchRules } from "../../services/repoAdmin.js";
 import { ValidationError } from "../../services/errors.js";
 import { assertCanTalk } from "../../services/issueExtras.js";
 import { can } from "../../services/permissions.js";
@@ -173,6 +174,9 @@ export function pullBoardRoutes(deps: Deps, app: Hono<Env>) {
     const pull = pullOf(c, ctx);
     if (!pull) return notFound(c);
     if (pull.mergedAt) return renderError(c, 409, "This pull request was merged.");
+    if (listBranchRules(deps.db, ctx.repo.id).some((rule) => rule.branch === pull.headRef) && ctx.access !== "admin") {
+      return renderError(c, 403, "This branch is protected.");
+    }
     const comment = getLineComment(deps.db, pull.id, Number(c.req.param("id")));
     if (!comment || comment.side !== "right") return renderError(c, 400, "Only a suggestion on the new side can be applied.");
     const suggestion = suggestionBlock(comment.body);
@@ -182,17 +186,32 @@ export function pullBoardRoutes(deps: Deps, app: Hono<Env>) {
     } catch {
       throw new ValidationError("That path can't be changed.");
     }
-    if (!(await ctx.git.resolve(pull.headRef))) throw new ValidationError("The head branch is gone.");
+    const head = await ctx.git.resolve(pull.headRef);
+    if (!head) throw new ValidationError("The head branch is gone.");
+    const dir = comment.path.includes("/") ? comment.path.slice(0, comment.path.lastIndexOf("/")) : "";
+    const baseName = comment.path.slice(dir.length ? dir.length + 1 : 0);
+    let mode = "";
+    try {
+      mode = (await ctx.git.tree(head, dir)).find((entry) => entry.name === baseName)?.mode ?? "";
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err;
+    }
+    if (mode !== "100644") throw new ValidationError("Suggestions can only be applied to regular files.");
     let blob;
     try {
-      blob = await ctx.git.blob(pull.headRef, comment.path, 1_000_000);
+      blob = await ctx.git.blob(head, comment.path, 1_000_000);
     } catch (err) {
       if (err instanceof GitError) throw new ValidationError("That file is not on the head branch.");
       throw err;
     }
     if (blob.truncated || blob.content.includes(0)) throw new ValidationError("That file can't be edited from a suggestion.");
     const next = applySuggestionToFile(blob.content.toString("utf8"), comment.line, comment.lineText, suggestion);
-    await ctx.git.commitFiles(pull.headRef, { [comment.path]: next }, `Apply suggestion on ${comment.path}`, authorFor(user));
+    try {
+      await ctx.git.commitFiles(pull.headRef, { [comment.path]: next }, `Apply suggestion on ${comment.path}`, authorFor(user), undefined, head);
+    } catch (err) {
+      if (err instanceof RefMovedError) return renderError(c, 409, "The branch changed while applying. Reload and try again.");
+      throw err;
+    }
     return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "pull", String(pull.number), "files"));
   }));
 }

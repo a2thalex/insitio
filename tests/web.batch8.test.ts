@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createIssue } from "../src/services/issues.js";
+import { addGistFile, createGist } from "../src/services/gists.js";
 import { addLineComment } from "../src/services/pullExtras.js";
 import { createPull } from "../src/services/pulls.js";
-import { authorFor, createRepo, gitFor } from "../src/services/repos.js";
+import { saveBranchRule } from "../src/services/repoAdmin.js";
+import { addCollaborator, authorFor, createRepo, gitFor } from "../src/services/repos.js";
+import { suggestionBlock } from "../src/services/suggestions.js";
 import type { User } from "../src/services/users.js";
 import { testApp, type Who } from "./helpers.js";
 
@@ -33,6 +36,10 @@ describe("sub-issues and gists", () => {
     expect(await (await t.get("/gists")).text()).not.toContain("secret words");
     expect(await (await t.get(`/gists/${id}`, adaWho)).text()).toContain("secret words");
     expect((await t.post("/gists", { description: "Bad", filename: "../x", body: "nope" }, adaWho)).status).toBe(400);
+    const packed = createGist(t.deps.db, ada.id, { description: "Full", secret: false, files: [{ name: "a.txt", body: "one" }] });
+    for (let n = 2; n <= 10; n++) addGistFile(t.deps.db, packed, ada.id, `f${n}.txt`, "x");
+    expect((await t.post(`/gists/${packed}/files`, { filename: "a.txt", body: "replaced" }, adaWho)).status).toBe(302);
+    expect(await (await t.get(`/gists/${packed}`, adaWho)).text()).toContain("replaced");
 
     expect((await t.post("/gists", { description: "Public note", filename: "hello.txt", body: "visible" }, adaWho)).status).toBe(302);
     expect(await (await t.get("/gists")).text()).toContain("Public note");
@@ -69,5 +76,11 @@ describe("apply suggestion", () => {
     const stale = t.deps.db.prepare("select id from pull_line_comments order by id desc").get() as { id: number };
     expect((await t.post(`/ada/hello/pull/${pull.number}/line-comments/${stale.id}/apply`, {}, adaWho)).status).toBe(400);
     expect((await git.blob("feature", "note.txt", 1000)).content.toString("utf8")).toBe("new\n");
+    expect(suggestionBlock("```suggestion\nconst fence = \"```\";\ndone\n```")).toBe("const fence = \"```\";\ndone");
+
+    saveBranchRule(t.deps.db, repo.id, { branch: "feature", requirePr: true, approvals: 0 });
+    const bob = t.user("bob");
+    addCollaborator(t.deps.db, repo.id, bob.id, "write");
+    expect((await t.post(`/ada/hello/pull/${pull.number}/line-comments/${comment.id}/apply`, {}, t.loginAs(bob))).status).toBe(403);
   });
 });

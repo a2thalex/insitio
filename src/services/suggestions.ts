@@ -1,10 +1,13 @@
 import { ValidationError } from "./errors.js";
 
-/** The body of the first ```suggestion fence, without a trailing newline. Null when there is none. */
+/** The body of the first suggestion fence. A closing fence is a line that is only ```. Null when there is none. */
 export function suggestionBlock(body: string): string | null {
-  const match = /```suggestion\r?\n([\s\S]*?)```/.exec(body);
-  if (!match) return null;
-  return match[1].replace(/\n$/, "");
+  const lines = body.split(/\r?\n/).map((line) => line.replace(/\r$/, ""));
+  const start = lines.findIndex((line) => line.trim() === "```suggestion");
+  if (start < 0) return null;
+  const end = lines.findIndex((line, index) => index > start && line.trim() === "```");
+  if (end < 0) return null;
+  return lines.slice(start + 1, end).join("\n");
 }
 
 /**

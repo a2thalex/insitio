@@ -44,8 +44,9 @@ export function addGistFile(db: DatabaseSync, gistId: string, ownerId: number, n
   if (!gist || gist.owner_id !== ownerId) throw new ValidationError("That gist does not exist.");
   const fileName = gistFileName(name);
   if (body.length > 100_000) throw new ValidationError("A gist file can be at most 100,000 characters.");
+  const existing = db.prepare("select 1 as n from gist_files where gist_id = ? and name = ?").get(gistId, fileName) as Row | undefined;
   const count = (db.prepare("select count(*) as n from gist_files where gist_id = ?").get(gistId) as Row).n as number;
-  if (count >= 10) throw new ValidationError("A gist can have at most 10 files.");
+  if (!existing && count >= 10) throw new ValidationError("A gist can have at most 10 files.");
   db.prepare(
     "insert into gist_files (gist_id, name, body) values (?, ?, ?) on conflict (gist_id, name) do update set body = excluded.body",
   ).run(gistId, fileName, body);
