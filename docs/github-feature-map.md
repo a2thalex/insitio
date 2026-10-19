@@ -25,7 +25,7 @@ repository tabs, repository settings, user settings and Insights navigation.
 | Open/close/reopen, comments, labels, filters, search | ✓ |
 | Assignees, milestones | ✓ |
 | Edit/delete comments, reactions | ✓ |
-| Issue templates, close reasons, lock, pin, sub-issues | ◐ (sub-issues still missing) |
+| Issue templates, close reasons, lock, pin, sub-issues | ✓ |
 | Cross-references and "Fixes #n" auto-close | ✓ |
 
 ## Repository: Pull requests
@@ -33,7 +33,7 @@ repository tabs, repository settings, user settings and Insights navigation.
 |---|---|
 | Compare, open, conversation, commits, files, merge commit | ✓ |
 | Reviewers, approve / request changes | ✓ |
-| Line-level review comments, suggestions | ✓ (suggestions are shown, not applied) |
+| Line-level review comments, suggestions | ✓ (a suggestion replaces the commented line) |
 | Draft PRs, squash and rebase merge, delete branch after merge | ✓ |
 | Update branch, PR templates, required checks | ✓ |
 
@@ -76,6 +76,6 @@ repository tabs, repository settings, user settings and Insights navigation.
 | Activity feed, explore/trending | ◐ (recent repos only) |
 | Global code/issue/user search | ✓ |
 | Organizations and teams | ✓ |
-| Gists, packages, sponsors, marketplace, Codespaces, Pages | ✗ |
+| Gists, packages, sponsors, marketplace, Codespaces, Pages | ◐ (gists; the rest are out of scope) |
 | SSH git transport, Git LFS | ✗ |
 | Email notifications | ✗ |

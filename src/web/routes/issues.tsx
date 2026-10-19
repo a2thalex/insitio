@@ -12,6 +12,7 @@ import {
 import { can } from "../../services/permissions.js";
 import { getUserByName } from "../../services/users.js";
 import { getPull } from "../../services/pulls.js";
+import { addSubIssue, childIssues, parentIssue } from "../../services/subissues.js";
 import type { Env } from "../env.js";
 import { field, fields, form, loginRedirect } from "../middleware.js";
 import { repoUrl } from "../paths.js";
@@ -289,6 +290,20 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
                 </form>
               )}
             </div>
+            {!issue.isPull && (
+              <div class="discussion-sidebar-item">
+                <div class="discussion-sidebar-heading">Sub-issues</div>
+                {parentIssue(deps.db, issue.id) && <p class="f6">Parent <a href={`${repoUrl(owner, name, "issues", String(parentIssue(deps.db, issue.id)!.number))}`}>#{parentIssue(deps.db, issue.id)!.number}</a></p>}
+                {childIssues(deps.db, issue.id).map((child) => <div><a href={`${repoUrl(owner, name, "issues", String(child.number))}`}>#{child.number}</a> {child.title}</div>)}
+                {can(ctx.access, "write") && (
+                  <form method="post" action={`${base}/subissue`} class="mt-2">
+                    <CsrfField csrf={c.get("csrf")} />
+                    <input class="form-control input-sm mb-1" name="number" aria-label="Sub-issue number" inputmode="numeric" />
+                    <button class="btn btn-sm" type="submit">Add sub-issue</button>
+                  </form>
+                )}
+              </div>
+            )}
             <div class="discussion-sidebar-item">
               <div class="discussion-sidebar-heading">Milestone</div>
               <form method="post" action={`${base}/milestone`}>
@@ -343,6 +358,15 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
       if (action === "reopen") setIssueState(deps.db, issue.id, "open", user.id);
       return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, kind, String(issue.number)));
     });
+  app.post(`${R}/issues/:n/subissue`, withRepo(deps, "write", async (c, ctx) => {
+    const issue = loadIssue(c, ctx);
+    if (!issue || issue.isPull) return notFound(c);
+    const number = Number(field(await form(c), "number"));
+    if (!Number.isInteger(number) || number < 1) throw new ValidationError("Enter an issue number.");
+    addSubIssue(deps.db, ctx.repo.id, issue.id, number);
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "issues", String(issue.number)));
+  }));
+
   app.post(`${R}/issues/:n/comment`, commentHandler("issues"));
   app.post(`${R}/pull/:n/comment`, commentHandler("pull"));
 

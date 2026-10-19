@@ -270,9 +270,9 @@ export class Repo {
   }
 
   /** Commits files onto a branch without a worktree; a missing branch starts from `from` (or as a root commit). */
-  async commitFiles(branch: string, files: Record<string, string>, message: string, author: Author, from?: string): Promise<string> {
+  async commitFiles(branch: string, files: Record<string, string>, message: string, author: Author, from?: string, expected?: string): Promise<string> {
     assertSafeRef(branch);
-    const existing = await this.resolve(branch);
+    const existing = expected ?? (await this.resolve(branch));
     const parent = existing ?? (from ? await this.resolve(from) : null);
     const tmp = await mkdtemp(join(tmpdir(), "insitio-index-"));
     const env = { GIT_INDEX_FILE: join(tmp, "index") };

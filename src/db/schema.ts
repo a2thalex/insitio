@@ -524,6 +524,29 @@ const MIGRATIONS = [
     created_at integer not null
   );
   `,
+  // Sub-issues and gists. A secret gist is a random id, not a counter.
+  `
+  create table issue_children (
+    parent_id integer not null references issues(id) on delete cascade,
+    child_id integer not null references issues(id) on delete cascade,
+    primary key (parent_id, child_id),
+    unique (child_id)
+  );
+  create table gists (
+    id text primary key,
+    owner_id integer not null references users(id) on delete cascade,
+    description text not null default '',
+    secret integer not null default 0 check (secret in (0, 1)),
+    created_at integer not null,
+    updated_at integer not null
+  );
+  create table gist_files (
+    gist_id text not null references gists(id) on delete cascade,
+    name text not null,
+    body text not null,
+    primary key (gist_id, name)
+  );
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

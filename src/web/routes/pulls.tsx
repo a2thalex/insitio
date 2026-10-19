@@ -15,6 +15,7 @@ import {
 import { assertNotBlocked, listSavedReplies } from "../../services/account.js";
 import { deliverWebhooks, listBranchRules } from "../../services/repoAdmin.js";
 import { authorFor } from "../../services/repos.js";
+import { suggestionBlock } from "../../services/suggestions.js";
 import type { Env } from "../env.js";
 import { raw } from "hono/html";
 import { field, form, loginRedirect } from "../middleware.js";
@@ -500,6 +501,12 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
                   <div class="mb-2">
                     <a class="text-bold" href={`/${note.username}`}>{note.username}</a>
                     <div class="markdown-body">{raw(issueMarkdown(ctx, note.body))}</div>
+                    {can(ctx.access, "write") && note.side === "right" && suggestionBlock(note.body) !== null && (
+                      <form method="post" action={`${base}/line-comments/${note.id}/apply`} class="mt-1">
+                        <CsrfField csrf={c.get("csrf")} />
+                        <button class="btn btn-sm" type="submit">Apply suggestion</button>
+                      </form>
+                    )}
                     {viewer && (viewer.id === note.userId || ctx.access === "admin") && (
                       <form method="post" action={`${base}/line-comments/${note.id}`} class="mt-1">
                         <CsrfField csrf={c.get("csrf")} />
