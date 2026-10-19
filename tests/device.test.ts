@@ -247,8 +247,23 @@ describe("the cap on pending device codes per bucket", () => {
   it("migrates a database that already holds device codes: they keep their rows and get no bucket", () => {
     const { deps } = setup();
     const version = (deps.db.prepare("pragma user_version").get() as { user_version: number }).user_version;
-    // Turn the database back into what it was before the bucket column existed.
-    deps.db.exec("drop index device_codes_bucket; alter table device_codes drop column bucket; pragma user_version = " + (version - 1));
+    // The bucket column is user_version 5. Rewind to that migration specifically: later migrations
+    // must not be what this test undoes, or the column would not be added back.
+    const beforeBucket = 4;
+    // Later migrations are already applied. Drop what they added so replaying from the bucket migration can succeed.
+    deps.db.exec(`
+      drop table if exists repo_analyses;
+      drop table if exists release_assets;
+      drop table if exists releases;
+      drop table if exists repo_topics;
+      drop table if exists topics;
+      drop table if exists watches;
+      alter table repos drop column forked_from_id;
+      alter table repos drop column website;
+      drop index if exists device_codes_bucket;
+      alter table device_codes drop column bucket;
+      pragma user_version = ${beforeBucket};
+    `);
     deps.db
       .prepare("insert into device_codes (device_code_hash, user_code_hash, client_name, expires_at, created_at) values ('d', 'u', 'legacy', ?, ?)")
       .run(T0 + 600, T0);

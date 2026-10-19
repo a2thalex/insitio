@@ -14,10 +14,12 @@ export type RepoRow = {
   owner: string;
   name: string;
   description: string;
+  website: string;
   isPrivate: boolean;
   defaultBranch: string;
   createdAt: number;
   stars: number;
+  forkedFromId: number | null;
 };
 
 type Row = Record<string, any>;
@@ -35,10 +37,12 @@ function toRepo(r: Row): RepoRow {
     owner: r.owner,
     name: r.name,
     description: r.description,
+    website: r.website ?? "",
     isPrivate: !!r.is_private,
     defaultBranch: r.default_branch,
     createdAt: r.created_at,
     stars: r.star_count,
+    forkedFromId: r.forked_from_id ?? null,
   };
 }
 
@@ -47,8 +51,16 @@ export function gitFor(deps: Deps, repo: RepoRow): Repo {
 }
 
 /** The git identity used for commits Insitio makes on a user's behalf. */
-export function authorFor(user: User): Author {
-  return { name: user.displayName || user.username, email: user.email || `${user.username}@users.noreply.insitio` };
+export function authorFor(user: User, baseUrl?: string): Author {
+  let host = "insitio";
+  if (baseUrl) {
+    try {
+      host = new URL(baseUrl).host || host;
+    } catch {
+      // keep the fallback host
+    }
+  }
+  return { name: user.displayName || user.username, email: user.email || `${user.username}@users.noreply.${host}` };
 }
 
 export function validateRepoName(name: string): string {
@@ -122,13 +134,28 @@ export function listReposForMember(db: DatabaseSync, user: User): RepoRow[] {
 }
 
 export function searchRepos(db: DatabaseSync, q: string, viewer: User | null, limit = 50): RepoRow[] {
-  const like = `%${q.replace(/[%_]/g, (m) => "\\" + m)}%`;
+  const topics: string[] = [];
+  const rest = q
+    .replace(/(?:^|\s)topic:([a-z0-9-]{1,50})(?=\s|$)/gi, (_match, name: string) => {
+      topics.push(name.toLowerCase());
+      return " ";
+    })
+    .trim();
+  const where: string[] = [];
+  const params: string[] = [];
+  if (rest) {
+    const like = `%${rest.replace(/[%_]/g, (m) => "\\" + m)}%`;
+    where.push("(r.name like ? escape '\\' or r.description like ? escape '\\' or u.username like ? escape '\\')");
+    params.push(like, like, like);
+  }
+  for (const topic of topics) {
+    where.push("exists (select 1 from repo_topics rt where rt.repo_id = r.id and rt.topic = ?)");
+    params.push(topic);
+  }
+  if (!where.length) return [];
   const rows = db
-    .prepare(
-      `${SELECT} where (r.name like ? escape '\\' or r.description like ? escape '\\' or u.username like ? escape '\\')
-       order by star_count desc, r.name collate nocase limit 500`,
-    )
-    .all(like, like, like) as Row[];
+    .prepare(`${SELECT} where ${where.join(" and ")} order by star_count desc, r.name collate nocase limit 500`)
+    .all(...params) as Row[];
   return visible(db, rows, viewer).slice(0, limit);
 }
 
@@ -138,6 +165,36 @@ export function listAllVisible(db: DatabaseSync, viewer: User | null, limit = 50
 
 export function updateRepo(db: DatabaseSync, id: number, p: { description: string; isPrivate: boolean }): void {
   db.prepare("update repos set description = ?, is_private = ? where id = ?").run(p.description.trim().slice(0, 350), p.isPrivate ? 1 : 0, id);
+}
+
+export function normalizeWebsite(input: string): string {
+  const value = input.trim();
+  if (!value) return "";
+  if (value.length > 255) throw new ValidationError("Website URL is too long.");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ValidationError("Website must be an http or https URL.");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new ValidationError("Website must be an http or https URL.");
+  return value;
+}
+
+export function updateAbout(db: DatabaseSync, id: number, p: { description: string; website: string }): void {
+  db.prepare("update repos set description = ?, website = ? where id = ?").run(p.description.trim().slice(0, 350), p.website, id);
+}
+
+/** The parent repository, when the viewer is allowed to know it exists. */
+export function forkParent(db: DatabaseSync, repo: RepoRow, viewer: User | null): { owner: string; name: string } | null {
+  if (!repo.forkedFromId) return null;
+  const parent = getRepoById(db, repo.forkedFromId);
+  if (!parent || !can(accessLevel(db, viewer, parent), "read")) return null;
+  return { owner: parent.owner, name: parent.name };
+}
+
+export function listForks(db: DatabaseSync, repoId: number, viewer: User | null): RepoRow[] {
+  return visible(db, db.prepare(`${SELECT} where r.forked_from_id = ? order by r.created_at desc`).all(repoId) as Row[], viewer);
 }
 
 export function setDefaultBranch(db: DatabaseSync, id: number, branch: string): void {

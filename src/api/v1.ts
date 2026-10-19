@@ -7,8 +7,22 @@ import type { Deps } from "../deps.js";
 import { createRateLimiter } from "../rateLimit.js";
 import { DeviceCapacityError, pollDevice, startDevice } from "../services/devices.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../services/errors.js";
-import { accessLevel } from "../services/permissions.js";
+import { accessLevel, can, type Access } from "../services/permissions.js";
 import { createRepo, getRepo, listAllVisible, listReposForOwner, validateRepoName, type RepoRow } from "../services/repos.js";
+import {
+  attachAsset,
+  createRelease,
+  getReleaseById,
+  latestRelease,
+  listAssets,
+  listReleases,
+  partialAssetPath,
+  releaseDir,
+  RELEASE_ASSET_MAX_BYTES,
+  type Release,
+} from "../services/releases.js";
+import { saveRawBody } from "../web/multipart.js";
+import { mkdir } from "node:fs/promises";
 import { deleteAccessToken, getUserByName, userForBearerToken, type User } from "../services/users.js";
 
 // The API is mounted ahead of the web app's middleware, so it applies its own body cap.
@@ -81,7 +95,10 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
   const app = new Hono<ApiEnv>();
   const auth = requireUser(deps);
 
-  app.use("*", bodyLimit({ maxSize: MAX_BODY_BYTES, onError: (c) => apiError(c, 413, "too_large", "The request body is too large.") }));
+  app.use("*", async (c, next) => {
+    if (c.req.method === "POST" && /\/releases\/\d+\/assets$/.test(c.req.path)) return next();
+    return bodyLimit({ maxSize: MAX_BODY_BYTES, onError: (ctx) => apiError(ctx, 413, "too_large", "The request body is too large.") })(c, next);
+  });
 
   app.onError((err, c) => {
     if (err instanceof ValidationError) return apiError(c, 422, "invalid", err.message);
@@ -200,6 +217,95 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
       case "expired":
         return apiError(c, 400, "expired_token", "This sign-in code has expired. Start again.");
     }
+  });
+
+  function repoFor(c: Context<ApiEnv>, need: Access): RepoRow | Response {
+    const repo = getRepo(deps.db, c.req.param("owner") ?? "", c.req.param("name") ?? "");
+    const level = repo ? accessLevel(deps.db, c.get("apiUser"), repo) : "none";
+    if (!repo || level === "none") return apiError(c, 404, "not_found", "Repository not found");
+    if (!can(level, need)) return apiError(c, 403, "forbidden", "You don't have permission to do that.");
+    return repo;
+  }
+
+  function releaseJson(repo: RepoRow, release: Release) {
+    const assets = listAssets(deps.db, release.id).map((asset) => ({
+      id: asset.id,
+      name: asset.name,
+      size: asset.size,
+      download_count: asset.downloadCount,
+      content_type: asset.contentType,
+      browser_download_url: `${deps.config.baseUrl}/${repo.owner}/${repo.name}/releases/download/${encodeURIComponent(release.tag)}/${encodeURIComponent(asset.name)}`,
+    }));
+    return {
+      id: release.id,
+      tag_name: release.tag,
+      name: release.title,
+      body: release.body,
+      draft: release.draft,
+      prerelease: release.prerelease,
+      make_latest: release.makeLatest,
+      html_url: `${deps.config.baseUrl}/${repo.owner}/${repo.name}/releases/tag/${encodeURIComponent(release.tag)}`,
+      published_at: release.publishedAt ? new Date(release.publishedAt * 1000).toISOString() : null,
+      assets,
+    };
+  }
+
+  app.get("/repos/:owner/:name/releases", auth, (c) => {
+    const repo = repoFor(c, "read");
+    if (repo instanceof Response) return repo;
+    const level = accessLevel(deps.db, c.get("apiUser"), repo);
+    const list = listReleases(deps.db, repo.id, { includeDrafts: can(level, "write"), page: 1 });
+    return c.json(list.items.map((release) => releaseJson(repo, release)));
+  });
+
+  app.get("/repos/:owner/:name/releases/latest", auth, (c) => {
+    const repo = repoFor(c, "read");
+    if (repo instanceof Response) return repo;
+    const release = latestRelease(deps.db, repo.id);
+    if (!release) return apiError(c, 404, "not_found", "No latest release");
+    return c.json(releaseJson(repo, release));
+  });
+
+  app.post("/repos/:owner/:name/releases", auth, async (c) => {
+    const repo = repoFor(c, "write");
+    if (repo instanceof Response) return repo;
+    const body = await jsonObject(c);
+    if (!body) return apiError(c, 400, "bad_request", "The request body must be a JSON object.");
+    const tag = body.tag_name;
+    if (typeof tag !== "string") throw new ValidationError("tag_name is required and must be a string");
+    const release = await createRelease(deps, repo, c.get("apiUser"), {
+      tag,
+      target: typeof body.target_commitish === "string" ? body.target_commitish : repo.defaultBranch,
+      title: typeof body.name === "string" && body.name ? body.name : tag,
+      body: typeof body.body === "string" ? body.body : "",
+      draft: body.draft === true,
+      prerelease: body.prerelease === true,
+      setLatest: body.make_latest !== false && body.make_latest !== "false",
+    });
+    return c.json(releaseJson(repo, release), 201);
+  });
+
+  app.post("/repos/:owner/:name/releases/:id/assets", auth, async (c) => {
+    const repo = repoFor(c, "write");
+    if (repo instanceof Response) return repo;
+    const release = getReleaseById(deps.db, Number(c.req.param("id")));
+    if (!release || release.repoId !== repo.id) return apiError(c, 404, "not_found", "Release not found");
+    const name = c.req.query("name") ?? "";
+    await mkdir(releaseDir(deps.config.dataDir, repo.id, release.id), { recursive: true });
+    const temp = partialAssetPath(deps.config.dataDir, repo.id, release.id);
+    const size = await saveRawBody(c.req.raw.body, temp, RELEASE_ASSET_MAX_BYTES);
+    const type = c.req.header("content-type") ?? "application/octet-stream";
+    const asset = await attachAsset(deps, repo, release, temp, name, size, type.split(";")[0].trim() || "application/octet-stream");
+    return c.json(
+      {
+        id: asset.id,
+        name: asset.name,
+        size: asset.size,
+        download_count: asset.downloadCount,
+        browser_download_url: `${deps.config.baseUrl}/${repo.owner}/${repo.name}/releases/download/${encodeURIComponent(release.tag)}/${encodeURIComponent(asset.name)}`,
+      },
+      201,
+    );
   });
 
   // Logout: revokes the token that made this request, and nothing else.

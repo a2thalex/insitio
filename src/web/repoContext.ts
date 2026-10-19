@@ -3,7 +3,8 @@ import type { Deps } from "../deps.js";
 import type { Repo } from "../git/repo.js";
 import { countIssues } from "../services/issues.js";
 import { accessLevel, can, type Access } from "../services/permissions.js";
-import { getRepo, gitFor, isStarred, type RepoRow } from "../services/repos.js";
+import { forkParent, getRepo, gitFor, isStarred, listForks, type RepoRow } from "../services/repos.js";
+import { getWatch, watcherCount, type WatchLevel } from "../services/watches.js";
 import { getUserByEmail } from "../services/users.js";
 import type { Env } from "./env.js";
 import { loginRedirect } from "./middleware.js";
@@ -15,6 +16,12 @@ export type RepoCtx = {
   access: Access;
   starred: boolean;
   counts: { issues: number; pulls: number };
+  /** People who chose "All activity". */
+  watchers: number;
+  forks: number;
+  watchLevel: WatchLevel;
+  /** Set only when the viewer may see the parent repository. */
+  forkedFrom: { owner: string; name: string } | null;
   /** Maps a commit author email to a Insitio username when one matches. */
   userForEmail: (email: string) => string | null;
 };
@@ -43,6 +50,10 @@ export async function loadRepo(deps: Deps, c: Context<Env>, need: Access = "read
       issues: countIssues(deps.db, repo.id, false).open,
       pulls: countIssues(deps.db, repo.id, true).open,
     },
+    watchers: watcherCount(deps.db, repo.id),
+    forks: listForks(deps.db, repo.id, user).length,
+    watchLevel: user ? getWatch(deps.db, user.id, repo.id) : "participating",
+    forkedFrom: forkParent(deps.db, repo, user),
     userForEmail: (email) => {
       const key = email.toLowerCase();
       if (!cache.has(key)) cache.set(key, getUserByEmail(deps.db, email)?.username ?? null);

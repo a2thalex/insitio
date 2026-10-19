@@ -1,5 +1,6 @@
 import type { Child } from "hono/jsx";
 import type { Commit, TreeEntry } from "../../git/repo.js";
+import type { WatchLevel } from "../../services/watches.js";
 import type { RepoCtx } from "../repoContext.js";
 import { blobUrl, commitUrl, commitsUrl, encPath, repoUrl, treeUrl } from "../paths.js";
 import { Avatar, CsrfField, Octicon, TimeAgo } from "./layout.js";
@@ -20,25 +21,36 @@ export function RepoLayout({ ctx, tab, csrf, signedIn, children }: { ctx: RepoCt
     <>
       <div class="repo-header pt-3 border-bottom">
         <div class="container-xl px-3 px-md-4 d-flex flex-wrap flex-items-center mb-3">
-          <div class="d-flex flex-items-center flex-auto repo-title mb-2 mb-md-0">
-            <Octicon name={repo.isPrivate ? "lock" : "repo"} class="color-fg-muted mr-2" />
-            <nav aria-label="Breadcrumbs">
-              <a href={`/${repo.owner}`}>{repo.owner}</a>
-              <span class="mx-1 color-fg-muted">/</span>
-              <strong>
-                <a href={base}>{repo.name}</a>
-              </strong>
-            </nav>
-            <span class="Label Label--secondary ml-2">{repo.isPrivate ? "Private" : "Public"}</span>
+          <div class="flex-auto mb-2 mb-md-0">
+            <div class="d-flex flex-items-center repo-title">
+              <Octicon name={repo.isPrivate ? "lock" : "repo"} class="color-fg-muted mr-2" />
+              <nav aria-label="Breadcrumbs">
+                <a href={`/${repo.owner}`}>{repo.owner}</a>
+                <span class="mx-1 color-fg-muted">/</span>
+                <strong>
+                  <a href={base}>{repo.name}</a>
+                </strong>
+              </nav>
+              <span class="Label Label--secondary ml-2">{repo.isPrivate ? "Private" : "Public"}</span>
+            </div>
+            {ctx.forkedFrom && (
+              <p class="f6 color-fg-muted mt-1 mb-0">
+                forked from <a href={`/${ctx.forkedFrom.owner}/${ctx.forkedFrom.name}`}>{ctx.forkedFrom.owner}/{ctx.forkedFrom.name}</a>
+              </p>
+            )}
           </div>
-          <form method="post" action={`${base}/${ctx.starred ? "unstar" : "star"}`} class="d-flex">
-            <CsrfField csrf={csrf} />
-            <button class="btn btn-sm" type="submit" disabled={!signedIn} title={signedIn ? undefined : "Sign in to star"} aria-label={ctx.starred ? "Unstar this repository" : "Star this repository"}>
-              <Octicon name={ctx.starred ? "star-fill" : "star"} class={ctx.starred ? "color-fg-attention mr-1" : "mr-1"} />
-              {ctx.starred ? "Starred" : "Star"}
-              <span class="Counter ml-1">{repo.stars}</span>
-            </button>
-          </form>
+          <div class="d-flex flex-items-center" style="gap:8px">
+            <WatchButton base={base} csrf={csrf} signedIn={signedIn} level={ctx.watchLevel} count={ctx.watchers} />
+            <ForkButton base={base} csrf={csrf} signedIn={signedIn} count={ctx.forks} />
+            <form method="post" action={`${base}/${ctx.starred ? "unstar" : "star"}`} class="d-flex">
+              <CsrfField csrf={csrf} />
+              <button class="btn btn-sm" type="submit" disabled={!signedIn} title={signedIn ? undefined : "Sign in to star"} aria-label={ctx.starred ? "Unstar this repository" : "Star this repository"}>
+                <Octicon name={ctx.starred ? "star-fill" : "star"} class={ctx.starred ? "color-fg-attention mr-1" : "mr-1"} />
+                {ctx.starred ? "Starred" : "Star"}
+                <span class="Counter ml-1">{repo.stars}</span>
+              </button>
+            </form>
+          </div>
         </div>
         <nav class="UnderlineNav px-3 px-md-4" aria-label="Repository">
           <div class="UnderlineNav-body">
@@ -90,7 +102,7 @@ export function RefPicker({ current, branches, tags, hrefFor }: { current: strin
   );
 }
 
-export function CloneButton({ url }: { url: string }) {
+export function CloneButton({ url, zipHref, tarHref }: { url: string; zipHref?: string; tarHref?: string }) {
   return (
     <details class="details-reset details-overlay d-inline-block position-relative">
       <summary class="btn btn-sm btn-primary">
@@ -107,8 +119,67 @@ export function CloneButton({ url }: { url: string }) {
           </span>
         </div>
         <p class="note mt-2">Use a personal access token as the password.</p>
+        {(zipHref || tarHref) && (
+          <div class="d-flex flex-column mt-3" style="gap:6px">
+            {zipHref && <a href={zipHref}><Octicon name="file-zip" class="mr-1" />Download ZIP</a>}
+            {tarHref && <a href={tarHref}><Octicon name="file-zip" class="mr-1" />Download TAR</a>}
+          </div>
+        )}
       </div>
     </details>
+  );
+}
+
+const WATCH_LABEL: Record<WatchLevel, string> = {
+  participating: "Participating",
+  all: "All activity",
+  ignore: "Ignore",
+};
+
+function WatchButton({ base, csrf, signedIn, level, count }: { base: string; csrf: string; signedIn: boolean; level: WatchLevel; count: number }) {
+  return (
+    <details class="details-reset details-overlay d-inline-block position-relative">
+      <summary class="btn btn-sm" aria-label={`Watch, ${WATCH_LABEL[level]}`}>
+        <Octicon name="eye" class="mr-1" />
+        {WATCH_LABEL[level] === "Participating" ? "Watch" : WATCH_LABEL[level]}
+        <span class="Counter ml-1">{count}</span>
+        <span class="dropdown-caret ml-1"></span>
+      </summary>
+      <div class="dropdown-menu dropdown-menu-sw p-3" style="top:34px; width:280px">
+        {signedIn ? (
+          <form method="post" action={`${base}/watch`}>
+            <CsrfField csrf={csrf} />
+            <p class="f6 color-fg-muted mb-2">Notifications for this repository. Participating is the default and is not stored.</p>
+            {(["participating", "all", "ignore"] as const).map((value) => (
+              <button class={`btn btn-sm btn-block mb-2 ${level === value ? "btn-primary" : ""}`} type="submit" name="level" value={value}>
+                {WATCH_LABEL[value]}
+              </button>
+            ))}
+            <a class="f6" href={`${base}/watchers`}>Watchers</a>
+          </form>
+        ) : (
+          <p class="f6 mb-0"><a href={`/login?next=${encodeURIComponent(base)}`}>Sign in</a> to watch this repository.</p>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function ForkButton({ base, csrf, signedIn, count }: { base: string; csrf: string; signedIn: boolean; count: number }) {
+  if (!signedIn) {
+    return (
+      <a class="btn btn-sm" href={`/login?next=${encodeURIComponent(base)}`}>
+        <Octicon name="repo-forked" class="mr-1" />Fork <span class="Counter ml-1">{count}</span>
+      </a>
+    );
+  }
+  return (
+    <form method="post" action={`${base}/fork`}>
+      <CsrfField csrf={csrf} />
+      <button class="btn btn-sm" type="submit">
+        <Octicon name="repo-forked" class="mr-1" />Fork <span class="Counter ml-1">{count}</span>
+      </button>
+    </form>
   );
 }
 
