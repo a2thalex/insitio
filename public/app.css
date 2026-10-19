@@ -32,7 +32,20 @@ body { background-color: var(--bgColor-default); }
 .blob-num a { color: inherit; }
 .blob-num a:hover { color: var(--fgColor-default); text-decoration: none; }
 .blob-code { padding: 0 10px; white-space: pre; vertical-align: top; }
-.blob-table tr:target .blob-code, .blob-table tr:target .blob-num { background-color: var(--bgColor-attention-muted); }
+.blob-table tr:target .blob-code, .blob-table tr:target .blob-num,
+.blob-table tr.highlighted .blob-code, .blob-table tr.highlighted .blob-num { background-color: var(--bgColor-attention-muted); }
+.blob-menu { width: 1%; position: relative; }
+.blob-menu summary { visibility: hidden; }
+.blob-table tr:hover .blob-menu summary, .blob-menu details[open] summary { visibility: visible; }
+.blob-menu .dropdown-menu { position: absolute; right: 0; z-index: 2; }
+.blame-meta { vertical-align: top; padding: 8px 12px; border-right: 1px solid var(--borderColor-muted); white-space: normal; min-width: 240px; max-width: 360px; }
+.code-editor { display: flex; border: 1px solid var(--borderColor-default); border-radius: 6px; background: var(--bgColor-default); overflow: hidden; }
+.code-editor-gutter { margin: 0; padding: 8px 10px; color: var(--fgColor-muted); text-align: right; user-select: none; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 20px; }
+.code-editor-text { flex: 1; border: 0; border-radius: 0; resize: vertical; min-height: 320px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 20px; tab-size: 4; }
+.lang-bar { display: flex; height: 8px; overflow: hidden; border-radius: 6px; background: var(--bgColor-muted); }
+.lang-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.topic-tag { display: inline-block; padding: 0 10px; border-radius: 2em; background: var(--bgColor-accent-muted); color: var(--fgColor-accent); font-size: 12px; font-weight: 500; line-height: 22px; }
+.topic-tag:hover { text-decoration: none; }
 
 /* Diffs */
 .diff-table { border-collapse: collapse; width: 100%; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 20px; }

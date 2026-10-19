@@ -6,17 +6,22 @@ import type { Deps } from "../../deps.js";
 import type { Commit, TreeEntry } from "../../git/repo.js";
 import { splitRefAndPath } from "../../git/refs.js";
 import { GitError, assertSafePath } from "../../git/run.js";
+import { repoAnalysis } from "../../services/analyze.js";
 import { can, type Access } from "../../services/permissions.js";
+import { latestRelease } from "../../services/releases.js";
 import { star, unstar } from "../../services/repos.js";
+import { listTopics } from "../../services/topics.js";
 import type { Env } from "../env.js";
 import { formatBytes, formatDate, timeAgo } from "../format.js";
 import { highlightLines } from "../highlight.js";
 import { renderMarkdown } from "../markdown.js";
 import { loginRedirect, safeNext } from "../middleware.js";
-import { blobUrl, commitUrl, commitsUrl, encPath, rawUrl, repoUrl, treeUrl } from "../paths.js";
+import { archiveUrl, blameUrl, blobUrl, commitUrl, commitsUrl, deleteUrl, editUrl, encPath, newFileUrl, rawUrl, repoUrl, treeUrl, uploadUrl } from "../paths.js";
 import { loadRepo, type RepoCtx } from "../repoContext.js";
 import { notFound, render } from "../render.js";
-import { Octicon, TimeAgo } from "../views/layout.js";
+import { Octicon, TimeAgo, CsrfField } from "../views/layout.js";
+import { AboutSidebar } from "../views/about.js";
+import { BlobLines } from "../views/editor.js";
 import { DiffView } from "../views/diff.js";
 import {
   CloneButton, CommitAuthor, FileTable, LatestCommitBar, PathBreadcrumbs, RefPicker, RepoLayout, commitHistoryHref, type RepoTab,
@@ -162,6 +167,12 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
     const isRoot = loc.path === "";
     const count = isRoot ? await ctx.git.commitCount(loc.sha) : undefined;
     const readme = await readmeHtml(ctx, loc, entries);
+    const analysis = isRoot ? await repoAnalysis(deps, ctx.repo, loc.sha) : null;
+    const topics = isRoot ? listTopics(deps.db, ctx.repo.id) : [];
+    const release = isRoot ? latestRelease(deps.db, ctx.repo.id) : null;
+    const writable = can(ctx.access, "write");
+    const archiveKind = branches.some((b) => b.name === loc.ref) ? "heads" : tags.includes(loc.ref) ? "tags" : "sha";
+    const archiveRef = archiveKind === "sha" ? loc.sha : loc.ref;
     const title = isRoot ? `${owner}/${name}` : `${name}/${loc.path} at ${loc.ref} · ${owner}/${name}`;
     return repoPage(
       c,
@@ -178,10 +189,10 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
                   <Octicon name="git-branch" class="mr-1 color-fg-muted" />
                   <strong>{branches.length}</strong> Branch{branches.length === 1 ? "" : "es"}
                 </a>
-                <span class="Link--primary f6 ml-2 no-wrap">
+                <a class="Link--primary f6 ml-2 no-wrap" href={repoUrl(owner, name, "tags")}>
                   <Octicon name="tag" class="mr-1 color-fg-muted" />
                   <strong>{tags.length}</strong> Tag{tags.length === 1 ? "" : "s"}
-                </span>
+                </a>
               </>
             ) : (
               <div class="ml-2"><PathBreadcrumbs ctx={ctx} gitRef={loc.ref} path={loc.path} last="text" /></div>
@@ -190,7 +201,19 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
               <form action={repoUrl(owner, name, "search")} method="get" role="search">
                 <input class="form-control input-sm" type="search" name="q" placeholder="Search code" aria-label="Search code in this repository" />
               </form>
-              {isRoot && <CloneButton url={cloneUrl(ctx)} />}
+              {writable && (
+                <>
+                  <a class="btn btn-sm" href={newFileUrl(owner, name, loc.ref, loc.path)}><Octicon name="plus" class="mr-1" />Add file</a>
+                  <a class="btn btn-sm" href={uploadUrl(owner, name, loc.ref, loc.path)}>Upload files</a>
+                </>
+              )}
+              {isRoot && (
+                <CloneButton
+                  url={cloneUrl(ctx)}
+                  zipHref={archiveUrl(owner, name, archiveKind, archiveRef, "zip")}
+                  tarHref={archiveUrl(owner, name, archiveKind, archiveRef, "tar.gz")}
+                />
+              )}
             </div>
           </div>
           <div class="Box">
@@ -199,17 +222,18 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
           </div>
           {readme && <Readme html={readme.html} name={readme.name} />}
         </div>
-        {isRoot && (
-          <aside class="col-md-3 pl-md-4 mt-4 mt-md-0 flex-shrink-0" aria-label="About">
-            <h2 class="f4 mb-3">About</h2>
-            <p class="f4 color-fg-default">{ctx.repo.description || <span class="color-fg-muted f5"><em>No description provided.</em></span>}</p>
-            <ul class="list-style-none f6 color-fg-muted">
-              {readme && <li class="mb-2"><a class="Link--secondary" href="#readme"><Octicon name="book" class="mr-2" />Readme</a></li>}
-              <li class="mb-2"><Octicon name="star" class="mr-2" /><strong>{ctx.repo.stars}</strong> star{ctx.repo.stars === 1 ? "" : "s"}</li>
-              <li class="mb-2"><a class="Link--secondary" href={repoUrl(owner, name, "branches")}><Octicon name="git-branch" class="mr-2" /><strong>{branches.length}</strong> branch{branches.length === 1 ? "" : "es"}</a></li>
-              <li class="mb-2"><Octicon name="history" class="mr-2" />Created <TimeAgo ts={ctx.repo.createdAt} /></li>
-            </ul>
-          </aside>
+        {isRoot && analysis && (
+          <AboutSidebar
+            ctx={ctx}
+            csrf={c.get("csrf")}
+            canAdmin={ctx.access === "admin"}
+            branchCount={branches.length}
+            hasReadme={!!readme}
+            analysis={analysis}
+            topics={topics}
+            latest={release}
+            error={c.req.query("error")}
+          />
         )}
       </div>,
     );
@@ -270,18 +294,11 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
     } else {
       const html = highlightLines(text, fileName);
       body = (
-        <div class="blob-wrapper py-2">
-          <table class="blob-table" aria-label={`Contents of ${fileName}`}>
-            <tbody>
-              {html.map((h, i) => (
-                <tr id={`L${i + 1}`}>
-                  <td class="blob-num"><a href={`#L${i + 1}`}>{i + 1}</a></td>
-                  <td class="blob-code">{raw(h)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <BlobLines
+          lines={html}
+          permalink={(line) => `${deps.config.baseUrl}${blobUrl(owner, name, loc.sha, loc.path)}#L${line}`}
+          blameHref={(line) => `${blameUrl(owner, name, loc.sha, loc.path)}#L${line}`}
+        />
       );
     }
 
@@ -314,6 +331,11 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
               <a class="btn btn-sm BtnGroup-item" href={raw_}>Raw</a>
               <a class="btn btn-sm BtnGroup-item" href={`${raw_}?download=1`} aria-label="Download raw file"><Octicon name="download" /></a>
             </div>
+            {!binary && !blob.truncated && <a class="btn btn-sm" href={blameUrl(owner, name, loc.ref, loc.path)}>Blame</a>}
+            {can(ctx.access, "write") && !binary && !image && !blob.truncated && (
+              <a class="btn btn-sm" href={editUrl(owner, name, loc.ref, loc.path)}><Octicon name="pencil" class="mr-1" />Edit</a>
+            )}
+            {can(ctx.access, "write") && <a class="btn btn-sm" href={deleteUrl(owner, name, loc.ref, loc.path)}>Delete</a>}
             <a class="btn btn-sm" href={commitHistoryHref(ctx, loc.ref, loc.path)}><Octicon name="history" class="mr-1" />History</a>
           </div>
           {body}
@@ -484,13 +506,43 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
   app.get(`${R}/branches`, withRepo(deps, "read", async (c, ctx) => {
     const { owner, name, defaultBranch } = ctx.repo;
     const branches = await ctx.git.branches();
+    const tags = await ctx.git.tags();
+    const writable = can(ctx.access, "write");
+    const deleted = c.req.query("deleted") ?? "";
+    const deletedSha = c.req.query("sha") ?? "";
+    const canRestore = writable && deleted && /^[0-9a-f]{40}$/i.test(deletedSha);
     return repoPage(
       c,
       ctx,
       "code",
       `Branches · ${owner}/${name}`,
       <>
-        <h1 class="f3 text-normal mb-3">Branches</h1>
+        <div class="d-flex flex-items-center mb-3">
+          <h1 class="f3 text-normal flex-auto">Branches</h1>
+        </div>
+        {c.req.query("error") && <div class="flash flash-error mb-3" role="alert">{c.req.query("error")}</div>}
+        {canRestore && (
+          <div class="flash flash-success mb-3" role="status">
+            Deleted <strong>{deleted}</strong> ({deletedSha.slice(0, 7)}).
+            <form method="post" action={repoUrl(owner, name, "branches", "restore")} class="d-inline ml-2">
+              <CsrfField csrf={c.get("csrf")} />
+              <input type="hidden" name="name" value={deleted} />
+              <input type="hidden" name="sha" value={deletedSha} />
+              <button class="btn btn-sm" type="submit">Restore</button>
+            </form>
+          </div>
+        )}
+        {writable && (
+          <form method="post" action={repoUrl(owner, name, "branches")} class="d-flex flex-wrap mb-3" style="gap:8px">
+            <CsrfField csrf={c.get("csrf")} />
+            <input class="form-control input-sm" name="name" placeholder="New branch name" aria-label="New branch name" required style="max-width:240px" />
+            <select class="form-select input-sm" name="source" aria-label="Source branch, tag or commit">
+              {branches.map((b) => <option value={b.name}>{b.name}</option>)}
+              {tags.map((tag) => <option value={tag}>{tag}</option>)}
+            </select>
+            <button class="btn btn-sm" type="submit">Create branch</button>
+          </form>
+        )}
         <div class="Box">
           {branches.length === 0 && <div class="Box-row color-fg-muted">No branches yet.</div>}
           {branches.map((b) => (
@@ -503,6 +555,15 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
                 <a class="btn btn-sm" href={repoUrl(owner, name, "compare", `${encPath(defaultBranch)}...${encPath(b.name)}`)}>
                   <Octicon name="git-pull-request" class="mr-1" />New pull request
                 </a>
+              )}
+              {writable && b.name !== defaultBranch && (
+                <form method="post" action={repoUrl(owner, name, "branches", "delete")} class="ml-2">
+                  <CsrfField csrf={c.get("csrf")} />
+                  <input type="hidden" name="name" value={b.name} />
+                  <button class="btn btn-sm btn-danger" type="submit" data-confirm={`Delete branch ${b.name}?`} aria-label={`Delete branch ${b.name}`}>
+                    <Octicon name="trash" />
+                  </button>
+                </form>
               )}
             </div>
           ))}

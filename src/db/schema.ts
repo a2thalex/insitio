@@ -141,6 +141,62 @@ const MIGRATIONS = [
   alter table device_codes add column bucket text;
   create index device_codes_bucket on device_codes (bucket, expires_at);
   `,
+  // Code tab: website and fork link, watches, topics, releases and the per-commit about cache.
+  `
+  alter table repos add column website text not null default '';
+  alter table repos add column forked_from_id integer references repos(id) on delete set null;
+  create table watches (
+    user_id integer not null references users(id) on delete cascade,
+    repo_id integer not null references repos(id) on delete cascade,
+    level text not null check (level in ('all', 'ignore')),
+    primary key (user_id, repo_id)
+  );
+  create index watches_repo on watches (repo_id, level);
+  create table topics (
+    name text primary key
+  );
+  create table repo_topics (
+    repo_id integer not null references repos(id) on delete cascade,
+    topic text not null references topics(name) on delete cascade,
+    primary key (repo_id, topic)
+  );
+  create index repo_topics_topic on repo_topics (topic);
+  create table releases (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    tag text not null default '',
+    target text not null default '',
+    title text not null,
+    body text not null default '',
+    draft integer not null default 0,
+    prerelease integer not null default 0,
+    make_latest text not null default 'legacy' check (make_latest in ('true', 'false', 'legacy')),
+    author_id integer not null references users(id),
+    created_at integer not null,
+    published_at integer
+  );
+  create index releases_repo on releases (repo_id, published_at);
+  create unique index releases_repo_tag on releases (repo_id, tag) where tag <> '';
+  create table release_assets (
+    id integer primary key,
+    release_id integer not null references releases(id) on delete cascade,
+    name text not null,
+    size integer not null,
+    content_type text not null default 'application/octet-stream',
+    download_count integer not null default 0,
+    created_at integer not null,
+    unique (release_id, name)
+  );
+  create table repo_analyses (
+    repo_id integer not null references repos(id) on delete cascade,
+    commit_sha text not null,
+    languages_json text not null,
+    license_id text not null default '',
+    license_path text not null default '',
+    contributors_json text not null,
+    primary key (repo_id, commit_sha)
+  );
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

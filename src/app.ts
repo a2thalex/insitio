@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { streamsItsBody } from "./web/middleware.js";
 import { apiV1 } from "./api/v1.js";
 import type { Deps } from "./deps.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "./services/errors.js";
@@ -13,6 +14,12 @@ import { adminRoutes } from "./web/routes/admin.js";
 import { homeRoutes } from "./web/routes/home.js";
 import { newRepoRoutes } from "./web/routes/newRepo.js";
 import { codeRoutes } from "./web/routes/code.js";
+import { editRoutes } from "./web/routes/edit.js";
+import { blameRoutes } from "./web/routes/blame.js";
+import { refRoutes } from "./web/routes/refs.js";
+import { archiveRoutes } from "./web/routes/archive.js";
+import { releaseRoutes } from "./web/routes/releases.js";
+import { socialRoutes } from "./web/routes/social.js";
 import { issueRoutes } from "./web/routes/issues.js";
 import { pullRoutes } from "./web/routes/pulls.js";
 import { repoSettingsRoutes } from "./web/routes/repoSettings.js";
@@ -33,7 +40,10 @@ export function buildApp(deps: Deps): Hono<Env> {
   // sits ahead of the cookie session, CSRF guard and HTML error pages below.
   app.route("/api/v1", apiV1(deps));
   // Forms are small; cap bodies before anything parses them. Git pushes bypass Hono entirely.
-  app.use("*", bodyLimit({ maxSize: MAX_FORM_BYTES, onError: (c) => renderError(c, 413, "That request was too large.") }));
+  app.use("*", async (c, next) => {
+    if (streamsItsBody(c.req.path, c.req.method)) return next();
+    return bodyLimit({ maxSize: MAX_FORM_BYTES, onError: (ctx) => renderError(ctx, 413, "That request was too large.") })(c, next);
+  });
   app.use("*", loadSession(deps));
   app.use("*", csrfGuard((c) => renderError(c, 403, "Your form expired or was sent from another site. Reload the page and try again.")));
   app.use("*", async (c, next) => {
@@ -53,6 +63,12 @@ export function buildApp(deps: Deps): Hono<Env> {
   downloadRoutes(deps, app);
   newRepoRoutes(deps, app);
   codeRoutes(deps, app);
+  editRoutes(deps, app);
+  blameRoutes(deps, app);
+  refRoutes(deps, app);
+  archiveRoutes(deps, app);
+  releaseRoutes(deps, app);
+  socialRoutes(deps, app);
   issueRoutes(deps, app);
   pullRoutes(deps, app);
   repoSettingsRoutes(deps, app);

@@ -74,6 +74,105 @@ async function loadTreeCommitInfo(table) {
 }
 for (const table of document.querySelectorAll("[data-tree-commit-info]")) loadTreeCommitInfo(table);
 
+// Line permalinks: #L10 and #L10-L20. Click selects a line; shift-click extends the range.
+function highlightLineRange() {
+  const match = /^#L(\d+)(?:-L?(\d+))?$/.exec(location.hash);
+  for (const row of document.querySelectorAll(".blob-table tr.highlighted")) row.classList.remove("highlighted");
+  if (!match) return;
+  let start = Number(match[1]);
+  let end = match[2] ? Number(match[2]) : start;
+  if (start > end) [start, end] = [end, start];
+  for (let line = start; line <= end; line++) document.getElementById(`L${line}`)?.classList.add("highlighted");
+}
+let lineAnchor = null;
+document.addEventListener("click", (event) => {
+  const link = event.target.closest(".blob-table .blob-num a");
+  if (!link) return;
+  const line = Number(link.closest("tr")?.id.slice(1));
+  if (!line) return;
+  event.preventDefault();
+  if (event.shiftKey && lineAnchor) {
+    const [lo, hi] = lineAnchor < line ? [lineAnchor, line] : [line, lineAnchor];
+    location.hash = `#L${lo}-L${hi}`;
+  } else {
+    lineAnchor = line;
+    location.hash = `#L${line}`;
+  }
+  highlightLineRange();
+});
+window.addEventListener("hashchange", highlightLineRange);
+highlightLineRange();
+
+// Plain editor: Tab inserts a tab, and the gutter tracks the lines.
+function syncGutter(area) {
+  const gutter = area.parentElement?.querySelector("[data-editor-gutter]");
+  if (!gutter) return;
+  const count = Math.max(1, area.value.split("\n").length);
+  const next = Array.from({ length: count }, (_, i) => String(i + 1)).join("\n");
+  if (gutter.textContent !== next) gutter.textContent = next;
+}
+document.addEventListener("keydown", (event) => {
+  const area = event.target.closest("[data-code-editor]");
+  if (!area || event.key !== "Tab") return;
+  event.preventDefault();
+  const start = area.selectionStart;
+  area.setRangeText("\t", start, area.selectionEnd, "end");
+  syncGutter(area);
+});
+document.addEventListener("input", (event) => {
+  const area = event.target.closest("[data-code-editor]");
+  if (area) syncGutter(area);
+});
+document.addEventListener("scroll", (event) => {
+  const area = event.target;
+  if (!(area instanceof HTMLTextAreaElement) || !area.matches("[data-code-editor]")) return;
+  const gutter = area.parentElement?.querySelector("[data-editor-gutter]");
+  if (gutter) gutter.scrollTop = area.scrollTop;
+}, true);
+
+// Folder drops keep the relative path in the uploaded filename.
+async function filesFromList(items) {
+  const files = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      files.push(new File([file], `${prefix}${file.name}`, { type: file.type }));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const entries = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+      for (const child of entries) await walk(child, `${prefix}${entry.name}/`);
+    }
+  };
+  for (const item of items) {
+    const entry = item.webkitGetAsEntry?.();
+    if (entry) await walk(entry, "");
+    else if (item.getAsFile?.()) files.push(item.getAsFile());
+  }
+  return files;
+}
+document.addEventListener("dragover", (event) => {
+  if (event.target.closest("[data-drop-zone]")) event.preventDefault();
+});
+document.addEventListener("drop", async (event) => {
+  const zone = event.target.closest("[data-upload-drop]");
+  if (!zone) return;
+  event.preventDefault();
+  const form = zone.closest("form");
+  const files = await filesFromList([...event.dataTransfer.items]);
+  if (!files.length) return;
+  const body = new FormData(form);
+  body.delete("files");
+  for (const file of files) body.append("files", file, file.name);
+  const response = await fetch(form.action, { method: "POST", body, headers: { "x-csrf-token": form.dataset.csrf || "" } });
+  if (response.redirected) {
+    location.href = response.url;
+    return;
+  }
+  document.open();
+  document.write(await response.text());
+  document.close();
+});
+
 // Confirm destructive buttons.
 document.addEventListener("submit", (event) => {
   const message = event.submitter?.dataset.confirm ?? event.target.dataset.confirm;

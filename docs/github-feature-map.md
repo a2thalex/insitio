@@ -8,16 +8,16 @@ repository tabs, repository settings, user settings and Insights navigation.
 | GitHub | Insitio |
 |---|---|
 | File tree, file view, raw, history, commit diffs | ✓ |
-| Branch/tag switcher, branches page | ✓ (tags listed, no tags page) |
+| Branch/tag switcher, branches page | ✓ |
 | Code search in repo | ✓ (default branch, text only) |
-| Blame view | ✗ |
-| Edit, create, upload, delete files in the browser | ✗ |
-| Create/delete branches in the UI | ✗ |
-| Releases and tags pages, release assets | ✗ |
-| Download ZIP / tarball | ✗ |
-| Fork, Watch | ✗ |
-| Topics, language bar, license detection, contributors list | ✗ |
-| Line-range permalinks (#L10-L20) | ◐ (single line) |
+| Blame view | ✓ |
+| Edit, create, upload, delete files in the browser | ✓ |
+| Create/delete branches in the UI | ✓ |
+| Releases and tags pages, release assets | ✓ |
+| Download ZIP / tarball | ✓ |
+| Fork, Watch | ✓ |
+| Topics, language bar, license detection, contributors list | ✓ |
+| Line-range permalinks (#L10-L20) | ✓ |
 
 ## Repository: Issues
 | GitHub | Insitio |

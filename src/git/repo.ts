@@ -2,7 +2,9 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseBlame, parseShortlog, type BlameHunk } from "./blame.js";
 import { GIT_ENV, GitError, assertSafePath, assertSafeRef, runGit } from "./run.js";
+import { assertCommitPath } from "./paths.js";
 import { parseUnifiedDiff, type DiffFile } from "./diff.js";
 
 export class MergeConflictError extends Error {
@@ -16,6 +18,35 @@ export class RefMovedError extends Error {
     super(`${ref} changed during the operation; try again`);
   }
 }
+
+/** The resulting tree would contain both a file and a directory at one path. */
+export class PathConflictError extends Error {
+  constructor(readonly path: string) {
+    super(`A path can't be both a file and a folder (${path})`);
+  }
+}
+
+/** The edit produced the same tree as its parent. */
+export class EmptyCommitError extends Error {
+  constructor() {
+    super("There are no changes to commit");
+  }
+}
+
+export type TreeChange = { path: string; content?: Buffer; delete?: boolean };
+
+export type TagInfo = {
+  name: string;
+  /** The commit the tag points at. */
+  sha: string;
+  /** Committer date of that commit, unix seconds. */
+  date: number;
+  annotated: boolean;
+  /** Tag message for an annotated tag; empty for a lightweight tag. */
+  message: string;
+};
+
+export type Contributor = { name: string; email: string; commits: number };
 
 export type Author = { name: string; email: string };
 export type Mergeability = "clean" | "conflict" | "up_to_date" | "missing";
@@ -76,6 +107,13 @@ function parseCommits(out: string): Commit[] {
     .map((r) => r.replace(/^\n+/, ""))
     .filter((r) => r.length > 0)
     .map(parseCommit);
+}
+
+function assertNoPathConflict(paths: string[]): void {
+  const sorted = [...paths].sort();
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] === sorted[i - 1] || sorted[i].startsWith(`${sorted[i - 1]}/`)) throw new PathConflictError(sorted[i - 1]);
+  }
 }
 
 /** A bare repository on disk, accessed through the git CLI. */
@@ -377,5 +415,193 @@ export class Repo {
         else reject(new GitError(args, code, stderr));
       });
     });
+  }
+
+  /** True when refs/heads/name or refs/tags/name exists, without peeling it to a commit. */
+  async hasRef(kind: "heads" | "tags", name: string): Promise<boolean> {
+    assertSafeRef(name);
+    const { code } = await this.git(["show-ref", "--verify", "--quiet", `refs/${kind}/${name}`], { okCodes: [0, 1] });
+    return code === 0;
+  }
+
+  /** The commit a branch points at, or null. Does not resolve tags of the same name. */
+  async branchTip(branch: string): Promise<string | null> {
+    assertSafeRef(branch);
+    const { stdout, code } = await this.git(["rev-parse", "--verify", "-q", "--end-of-options", `refs/heads/${branch}`], {
+      okCodes: [0, 1, 128],
+    });
+    return code === 0 ? stdout.toString().trim() : null;
+  }
+
+  /** A branch name git itself would accept, or null. */
+  async validBranchName(name: string): Promise<string | null> {
+    if (!name || name.length > 250 || name.startsWith("-") || /[\0\n\r ~^:?*\[\\]/.test(name) || name.includes("..") || name.includes("@{")) {
+      return null;
+    }
+    const { stdout, code } = await this.git(["check-ref-format", "--branch", name], { okCodes: [0, 1, 128] });
+    if (code !== 0) return null;
+    const out = stdout.toString().trim();
+    return out === name ? out : null;
+  }
+
+  /** Creates `name` at `from` (branch, tag or sha). Fails if the branch already exists. */
+  async createBranch(name: string, from: string): Promise<string> {
+    const valid = await this.validBranchName(name);
+    if (!valid) throw new GitError(["branch"], 1, "invalid branch name");
+    const sha = await this.resolve(from);
+    if (!sha) throw new GitError(["branch"], 128, "source not found");
+    if (await this.branchTip(name)) throw new RefMovedError(name);
+    await this.updateRef(name, sha, ZERO_SHA);
+    return sha;
+  }
+
+  /** Deletes a branch only if it still points at `expectedSha`. */
+  async deleteBranch(name: string, expectedSha: string): Promise<void> {
+    assertSafeRef(name);
+    if (!/^[0-9a-f]{40}$/.test(expectedSha)) throw new GitError(["branch"], 1, "bad sha");
+    try {
+      await this.git(["update-ref", "-d", `refs/heads/${name}`, expectedSha]);
+    } catch (err) {
+      if (err instanceof GitError) throw new RefMovedError(name);
+      throw err;
+    }
+  }
+
+  /** Annotated tag. Returns the commit sha it points at. */
+  async createTag(name: string, target: string, message: string, author: Author): Promise<string> {
+    if (!name || name.length > 250 || name.startsWith("-") || /[\0\n\r ~^:?*\[\\]/.test(name) || name.includes("..") || name.includes("@{")) {
+      throw new GitError(["tag"], 1, "invalid tag name");
+    }
+    const check = await this.git(["check-ref-format", `refs/tags/${name}`], { okCodes: [0, 1] });
+    if (check.code !== 0) throw new GitError(["tag"], 1, "invalid tag name");
+    const sha = await this.resolve(target);
+    if (!sha) throw new GitError(["tag"], 128, "target not found");
+    const exists = await this.git(["show-ref", "--verify", "--quiet", `refs/tags/${name}`], { okCodes: [0, 1] });
+    if (exists.code === 0) throw new GitError(["tag"], 1, "tag exists");
+    await this.git(["tag", "-a", name, sha, "-m", message], { env: authorEnv(author) });
+    return sha;
+  }
+
+  async tagList(): Promise<TagInfo[]> {
+    // Real separators, not %xNN: for-each-ref on some Git builds prints %xNN literally.
+    const format = ["%(refname:short)", "%(objecttype)", "%(*objectname)", "%(objectname)", "%(*committerdate:unix)", "%(committerdate:unix)", "%(contents:subject)", "%(contents:body)"].join(FS) + RS;
+    const { stdout } = await this.git(["for-each-ref", "--sort=-creatordate", `--format=${format}`, "refs/tags"]);
+    const out: TagInfo[] = [];
+    for (const rec of stdout.toString("utf8").split(RS)) {
+      const text = rec.replace(/^\n+/, "");
+      if (!text.trim()) continue;
+      const [name, type, peeled, objectName, peeledDate, committerDate, subject, body] = text.split(FS);
+      const annotated = type === "tag";
+      const sha = (annotated ? peeled : objectName) || objectName;
+      const date = Number((annotated && peeledDate ? peeledDate : committerDate) || 0);
+      const message = annotated ? [subject, (body ?? "").replace(/\s+$/, "")].filter(Boolean).join("\n\n") : "";
+      if (name && /^[0-9a-f]{40}$/.test(sha)) out.push({ name, sha, date, annotated, message });
+    }
+    return out;
+  }
+
+  /** Every blob in the tree, with its size. */
+  async listFiles(rev: string): Promise<{ path: string; size: number }[]> {
+    assertSafeRef(rev);
+    const sha = await this.resolve(rev);
+    if (!sha) return [];
+    const { stdout } = await this.git(["ls-tree", "-r", "-l", "-z", sha]);
+    const out: { path: string; size: number }[] = [];
+    for (const rec of stdout.toString("utf8").split("\0")) {
+      if (!rec) continue;
+      const tab = rec.indexOf("\t");
+      if (tab < 0) continue;
+      const meta = rec.slice(0, tab).split(/\s+/);
+      if (meta[1] !== "blob") continue;
+      out.push({ path: rec.slice(tab + 1), size: Number(meta[3]) || 0 });
+    }
+    return out;
+  }
+
+  async blame(rev: string, path: string): Promise<BlameHunk[]> {
+    assertSafeRef(rev);
+    assertSafePath(path);
+    const sha = await this.resolve(rev);
+    if (!sha) throw new GitError(["blame"], 128, "unknown revision");
+    const { stdout, truncated } = await this.git(["blame", "--line-porcelain", sha, "--", path], { maxBytes: 8 * 1024 * 1024 });
+    if (truncated) throw new GitError(["blame"], 1, "blame too large");
+    return parseBlame(stdout.toString("utf8"));
+  }
+
+  /** Commit counts by author, as `git shortlog -sne`, most commits first. */
+  async contributors(rev: string): Promise<Contributor[]> {
+    assertSafeRef(rev);
+    const sha = await this.resolve(rev);
+    if (!sha) return [];
+    const { stdout } = await this.git(["shortlog", "-sne", sha], { okCodes: [0, 1] });
+    return parseShortlog(stdout.toString("utf8"));
+  }
+
+  /**
+   * Commits `changes` onto `branch` without a worktree. `expected` is the sha the branch must
+   * still have (null when the branch must not exist yet). `parent` is the tree the change is
+   * based on. The ref is updated with compare-and-swap.
+   */
+  async commitChanges(
+    branch: string,
+    changes: TreeChange[],
+    message: string,
+    author: Author,
+    opts: { expected: string | null; parent: string | null },
+  ): Promise<string> {
+    assertSafeRef(branch);
+    if (!changes.length || !message.trim()) throw new EmptyCommitError();
+    for (const change of changes) assertCommitPath(change.path);
+    const current = await this.branchTip(branch);
+    if (opts.expected === null) {
+      if (current) throw new RefMovedError(branch);
+    } else if (current !== opts.expected) {
+      throw new RefMovedError(branch);
+    }
+    let parentSha: string | null = null;
+    if (opts.parent) {
+      parentSha = await this.resolve(opts.parent);
+      if (!parentSha) throw new GitError(["commit"], 128, "parent not found");
+    }
+    const paths = new Set(parentSha ? (await this.listFiles(parentSha)).map((file) => file.path) : []);
+    for (const change of changes) {
+      if (change.delete) paths.delete(change.path);
+      else paths.add(change.path);
+    }
+    assertNoPathConflict([...paths]);
+
+    const tmp = await mkdtemp(join(tmpdir(), "insitio-index-"));
+    const env = { GIT_INDEX_FILE: join(tmp, "index") };
+    try {
+      if (parentSha) await this.git(["read-tree", parentSha], { env });
+      for (const change of changes) {
+        if (change.delete) continue;
+        const blob = (await this.git(["hash-object", "-w", "--stdin"], { input: change.content ?? Buffer.alloc(0) })).stdout.toString().trim();
+        const mode = await this.indexMode(env, change.path);
+        // --index-info does not need a work tree, and the path is not parsed as an option.
+        await this.git(["update-index", "--index-info"], { env, input: `${mode} ${blob}\t${change.path}\n` });
+      }
+      for (const change of changes) {
+        if (!change.delete) continue;
+        await this.git(["update-index", "--index-info"], { env, input: `0 ${"0".repeat(40)}\t${change.path}\n` });
+      }
+      const tree = (await this.git(["write-tree"], { env })).stdout.toString().trim();
+      if (parentSha) {
+        const parentTree = (await this.git(["rev-parse", `${parentSha}^{tree}`])).stdout.toString().trim();
+        if (parentTree === tree) throw new EmptyCommitError();
+      }
+      const sha = (
+        await this.git(["commit-tree", tree, ...(parentSha ? ["-p", parentSha] : []), "-m", message], { env: authorEnv(author) })
+      ).stdout.toString().trim();
+      await this.updateRef(branch, sha, opts.expected ?? ZERO_SHA);
+      return sha;
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  }
+
+  private async indexMode(env: Record<string, string>, path: string): Promise<string> {
+    const { stdout } = await this.git(["ls-files", "-s", "--", path], { env, okCodes: [0, 1] });
+    return stdout.toString().startsWith("100755 ") ? "100755" : "100644";
   }
 }

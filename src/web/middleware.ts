@@ -41,10 +41,21 @@ function sameToken(a: string, b: string): boolean {
  * under /api/ is exempt: it authenticates with bearer tokens, never cookies, so
  * a forged cross-site request carries no credentials.
  */
+/** File and release-asset uploads stream the body, so nothing may read it before the route does. */
+export function streamsItsBody(path: string, method: string): boolean {
+  if (method === "GET" || method === "HEAD") return false;
+  return /\/upload\/|\/releases\/[^/]+\/assets$/.test(path);
+}
+
 export function csrfGuard(onFail: (c: Context<Env>) => Response | Promise<Response>): MiddlewareHandler<Env> {
   return async (c, next) => {
     if (c.req.path.startsWith("/api/")) return next();
     if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+      if (streamsItsBody(c.req.path, c.req.method)) {
+        const token = c.req.header("x-csrf-token") ?? new URL(c.req.url).searchParams.get("_csrf") ?? "";
+        if (!token || !sameToken(token, c.get("csrf"))) return onFail(c);
+        return next();
+      }
       let token = c.req.header("x-csrf-token");
       const type = c.req.header("content-type") ?? "";
       if (!token && (type.includes("application/x-www-form-urlencoded") || type.includes("multipart/form-data"))) {
