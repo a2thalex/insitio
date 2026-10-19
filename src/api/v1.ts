@@ -6,10 +6,12 @@ import { now } from "../db/db.js";
 import type { Deps } from "../deps.js";
 import { createRateLimiter } from "../rateLimit.js";
 import { DeviceCapacityError, pollDevice, startDevice } from "../services/devices.js";
+import { GitError } from "../git/run.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../services/errors.js";
 import { getMilestone, getMilestoneById, recordMentions, resolveAssignees, setAssignees, setMilestone } from "../services/issueExtras.js";
 import { createIssue, getIssue, setIssueState, updateIssue, type Issue } from "../services/issues.js";
 import { accessLevel, can, type Access } from "../services/permissions.js";
+import { recordActionRun } from "../services/platform.js";
 import { setStatus } from "../services/pullExtras.js";
 import { createRepo, getRepo, gitFor, listAllVisible, listReposForOwner, validateRepoName, type RepoRow } from "../services/repos.js";
 import {
@@ -424,6 +426,27 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
       description: typeof body.description === "string" ? body.description : "",
     }, c.get("apiUser").id);
     return c.json({ sha: found, ...status });
+  });
+
+  app.post("/repos/:owner/:name/actions/runs", auth, async (c) => {
+    const repo = repoFor(c, "write");
+    if (repo instanceof Response) return repo;
+    if (repo.archived) return apiError(c, 403, "forbidden", "This repository is archived.");
+    const body = await jsonObject(c);
+    if (!body) return apiError(c, 400, "bad_request", "The request body must be a JSON object.");
+    if (typeof body.name !== "string" || typeof body.head_sha !== "string" || typeof body.status !== "string") {
+      throw new ValidationError("name, head_sha, and status are required strings");
+    }
+    if (!/^[0-9a-f]{4,40}$/i.test(body.head_sha)) throw new ValidationError("head_sha must be a commit id");
+    const found = await gitFor(deps, repo).resolve(body.head_sha).catch((err) => {
+      if (err instanceof GitError) return null;
+      throw err;
+    });
+    if (!found) throw new ValidationError("That commit does not exist in this repository.");
+    const conclusion = body.conclusion == null || body.conclusion === "" ? null : body.conclusion;
+    if (conclusion !== null && typeof conclusion !== "string") throw new ValidationError("conclusion must be a string");
+    const id = recordActionRun(deps.db, repo.id, { name: body.name, headSha: found, status: body.status, conclusion });
+    return c.json({ id, head_sha: found, status: body.status, conclusion }, 201);
   });
 
   // Logout: revokes the token that made this request, and nothing else.
