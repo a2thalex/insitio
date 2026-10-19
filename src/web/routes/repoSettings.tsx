@@ -3,11 +3,15 @@ import type { Deps } from "../../deps.js";
 import { ValidationError } from "../../services/errors.js";
 import { listRequiredChecks, setRequiredChecks } from "../../services/pullExtras.js";
 import {
+  addWebhook, createDeployKey, deleteBranchRule, deleteDeployKey, deleteWebhook, listBranchRules, listDeliveries, listDeployKeys, listWebhooks,
+  renameRepo, saveBranchRule, setArchived, setFeatures, setMergeMethods, transferRepo,
+} from "../../services/repoAdmin.js";
+import {
   addCollaborator, deleteRepo, listCollaborators, removeCollaborator, setDefaultBranch, updateRepo, type Collaborator,
 } from "../../services/repos.js";
 import { getUserByName } from "../../services/users.js";
 import type { Env } from "../env.js";
-import { field, form } from "../middleware.js";
+import { field, fields, form } from "../middleware.js";
 import { repoUrl } from "../paths.js";
 import type { RepoCtx } from "../repoContext.js";
 import { Avatar, CsrfField, Flash, Octicon } from "../views/layout.js";
@@ -18,7 +22,7 @@ const ROLES: Collaborator["role"][] = ["read", "write", "admin"];
 export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
   const R = "/:owner/:repo";
 
-  const page = async (c: Context<Env>, ctx: RepoCtx, opts: { error?: string; notice?: string } = {}) => {
+  const page = async (c: Context<Env>, ctx: RepoCtx, opts: { error?: string; notice?: string; deployKey?: string } = {}) => {
     const { owner, name, description, isPrivate, defaultBranch } = ctx.repo;
     const base = repoUrl(owner, name, "settings");
     const branches = (await ctx.git.branches()).map((b) => b.name);
@@ -87,7 +91,108 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
         <p class="f6 color-fg-muted">One context per line, up to 10. A pull request cannot merge until each one is success on its head commit.</p>
         <p class="mb-6"><a href={`${base}/checks`}>Edit required checks</a></p>
 
+        <div class="Subhead"><h2 class="Subhead-heading">Features and merge buttons</h2></div>
+        <form method="post" action={`${base}/features`} class="mb-6">
+          <CsrfField csrf={csrf} />
+          <label class="d-block mb-1"><input type="checkbox" name="issues" value="1" checked={ctx.repo.issuesEnabled} class="mr-1" />Issues</label>
+          <label class="d-block mb-2"><input type="checkbox" name="pulls" value="1" checked={ctx.repo.pullsEnabled} class="mr-1" />Pull requests</label>
+          <label class="d-block mb-1"><input type="checkbox" name="merge" value="1" checked={ctx.repo.allowMerge} class="mr-1" />Merge commit</label>
+          <label class="d-block mb-1"><input type="checkbox" name="squash" value="1" checked={ctx.repo.allowSquash} class="mr-1" />Squash</label>
+          <label class="d-block mb-2"><input type="checkbox" name="rebase" value="1" checked={ctx.repo.allowRebase} class="mr-1" />Rebase</label>
+          <button class="btn" type="submit">Save features</button>
+        </form>
+
+        <div class="Subhead"><h2 class="Subhead-heading">Branch protection</h2></div>
+        <form method="post" action={`${base}/protection`} class="mb-3 d-flex flex-wrap" style="gap:8px">
+          <CsrfField csrf={csrf} />
+          <input class="form-control" name="branch" placeholder="Branch" aria-label="Branch" required />
+          <label class="d-flex flex-items-center"><input type="checkbox" name="require_pr" value="1" class="mr-1" />Require a pull request</label>
+          <input class="form-control" name="approvals" type="number" min="0" max="6" value="0" aria-label="Approving reviews" style="width:80px" />
+          <button class="btn" type="submit">Save rule</button>
+        </form>
+        <div class="Box mb-6">
+          {listBranchRules(deps.db, ctx.repo.id).map((rule) => (
+            <div class="Box-row d-flex flex-items-center">
+              <span class="flex-auto">{rule.branch}{rule.requirePr ? " · pull request required" : ""} · {rule.approvals} approvals</span>
+              <form method="post" action={`${base}/protection/delete`}>
+                <CsrfField csrf={csrf} />
+                <input type="hidden" name="branch" value={rule.branch} />
+                <button class="btn btn-sm" type="submit">Remove</button>
+              </form>
+            </div>
+          ))}
+        </div>
+
+        <div class="Subhead"><h2 class="Subhead-heading">Webhooks</h2></div>
+        <form method="post" action={`${base}/hooks`} class="mb-3">
+          <CsrfField csrf={csrf} />
+          <input class="form-control mb-2" name="url" placeholder="https://example.com/hook" aria-label="Payload URL" required />
+          <input class="form-control mb-2" name="secret" placeholder="Secret (optional)" aria-label="Secret" />
+          <label class="mr-3"><input type="checkbox" name="events" value="push" class="mr-1" />push</label>
+          <label class="mr-3"><input type="checkbox" name="events" value="issues" class="mr-1" />issues</label>
+          <label class="mr-3"><input type="checkbox" name="events" value="pull_request" class="mr-1" />pull_request</label>
+          <button class="btn mt-2" type="submit">Add webhook</button>
+        </form>
+        <div class="Box mb-6">
+          {listWebhooks(deps.db, ctx.repo.id).map((hook) => (
+            <div class="Box-row">
+              <div class="d-flex flex-items-center">
+                <span class="flex-auto text-mono f6">{hook.url}</span>
+                <form method="post" action={`${base}/hooks/${hook.id}/delete`}>
+                  <CsrfField csrf={csrf} />
+                  <button class="btn btn-sm" type="submit">Delete</button>
+                </form>
+              </div>
+              <div class="f6 color-fg-muted">{hook.events.join(", ")}{listDeliveries(deps.db, hook.id)[0] ? ` · last HTTP ${listDeliveries(deps.db, hook.id)[0].responseStatus ?? "no response"}` : ""}</div>
+            </div>
+          ))}
+        </div>
+
+        <div class="Subhead"><h2 class="Subhead-heading">Deploy keys</h2></div>
+        {opts.deployKey && <div class="flash flash-success">Copy this key now. It will not be shown again. <code>{opts.deployKey}</code></div>}
+        <form method="post" action={`${base}/keys`} class="d-flex flex-wrap mb-3" style="gap:8px">
+          <CsrfField csrf={csrf} />
+          <input class="form-control flex-auto" name="title" placeholder="Title" aria-label="Title" required />
+          <label class="d-flex flex-items-center"><input type="checkbox" name="write" value="1" class="mr-1" />Write</label>
+          <button class="btn" type="submit">Add deploy key</button>
+        </form>
+        <div class="Box mb-6">
+          {listDeployKeys(deps.db, ctx.repo.id).map((key) => (
+            <div class="Box-row d-flex flex-items-center">
+              <span class="flex-auto">{key.title} · {key.canWrite ? "write" : "read"}</span>
+              <form method="post" action={`${base}/keys/${key.id}/delete`}>
+                <CsrfField csrf={csrf} />
+                <button class="btn btn-sm" type="submit">Delete</button>
+              </form>
+            </div>
+          ))}
+        </div>
+
         <div class="Subhead"><h2 class="Subhead-heading color-fg-danger">Danger zone</h2></div>
+        <div class="Box Box--danger p-3 mb-3">
+          <h3 class="f5">{ctx.repo.archived ? "Unarchive this repository" : "Archive this repository"}</h3>
+          <form method="post" action={`${base}/archive`}>
+            <CsrfField csrf={csrf} />
+            <button class="btn" type="submit">{ctx.repo.archived ? "Unarchive" : "Archive"}</button>
+          </form>
+        </div>
+        <div class="Box Box--danger p-3 mb-3">
+          <h3 class="f5">Rename this repository</h3>
+          <form method="post" action={`${base}/rename`} class="d-flex flex-wrap" style="gap:8px">
+            <CsrfField csrf={csrf} />
+            <input class="form-control flex-auto" name="name" aria-label="New name" required />
+            <button class="btn" type="submit">Rename</button>
+          </form>
+        </div>
+        <div class="Box Box--danger p-3 mb-3">
+          <h3 class="f5">Transfer ownership</h3>
+          <p class="f6 color-fg-muted">Type <strong>newowner/{name}</strong>.</p>
+          <form method="post" action={`${base}/transfer`} class="d-flex flex-wrap" style="gap:8px">
+            <CsrfField csrf={csrf} />
+            <input class="form-control flex-auto" name="target" aria-label="New owner and name" placeholder="newowner/name" required />
+            <button class="btn" type="submit">Transfer</button>
+          </form>
+        </div>
         <div class="Box Box--danger p-3">
           <h3 class="f5">Delete this repository</h3>
           <p class="f6 color-fg-muted">This permanently deletes the repository, its issues and its pull requests. Type <strong>{owner}/{name}</strong> to confirm.</p>
@@ -153,6 +258,65 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
       addCollaborator(deps.db, ctx.repo.id, user.id, role);
     }
     return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/features`, withRepo(deps, "admin", async (c, ctx) => {
+    const f = await form(c);
+    setFeatures(deps.db, ctx.repo.id, { issues: field(f, "issues") === "1", pulls: field(f, "pulls") === "1" });
+    setMergeMethods(deps.db, ctx.repo.id, { merge: field(f, "merge") === "1", squash: field(f, "squash") === "1", rebase: field(f, "rebase") === "1" });
+    return c.redirect(`${repoUrl(ctx.repo.owner, ctx.repo.name, "settings")}?saved=1`);
+  }));
+
+  app.post(`${R}/settings/protection`, withRepo(deps, "admin", async (c, ctx) => {
+    const f = await form(c);
+    saveBranchRule(deps.db, ctx.repo.id, { branch: field(f, "branch"), requirePr: field(f, "require_pr") === "1", approvals: Number(field(f, "approvals") || "0") });
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/protection/delete`, withRepo(deps, "admin", async (c, ctx) => {
+    deleteBranchRule(deps.db, ctx.repo.id, field(await form(c), "branch"));
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/hooks`, withRepo(deps, "admin", async (c, ctx) => {
+    const f = await form(c);
+    addWebhook(deps.db, ctx.repo.id, { url: field(f, "url"), secret: field(f, "secret"), events: fields(f, "events") }, deps.config.webhookAllowLoopback);
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/hooks/:id/delete`, withRepo(deps, "admin", async (c, ctx) => {
+    deleteWebhook(deps.db, ctx.repo.id, Number(c.req.param("id")));
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/keys`, withRepo(deps, "admin", async (c, ctx) => {
+    const f = await form(c);
+    const token = createDeployKey(deps.db, ctx.repo.id, field(f, "title"), field(f, "write") === "1");
+    return page(c, ctx, { deployKey: token });
+  }));
+
+  app.post(`${R}/settings/keys/:id/delete`, withRepo(deps, "admin", async (c, ctx) => {
+    deleteDeployKey(deps.db, ctx.repo.id, Number(c.req.param("id")));
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/archive`, withRepo(deps, "admin", async (c, ctx) => {
+    await form(c);
+    setArchived(deps.db, ctx.repo.id, !ctx.repo.archived);
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/rename`, withRepo(deps, "admin", async (c, ctx) => {
+    const renamed = await renameRepo(deps, ctx.repo, field(await form(c), "name"));
+    return c.redirect(repoUrl(renamed.owner, renamed.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/transfer`, withRepo(deps, "admin", async (c, ctx) => {
+    const target = field(await form(c), "target").trim();
+    const slash = target.indexOf("/");
+    if (slash < 1 || slash === target.length - 1) throw new ValidationError("Type the new owner and repository name as owner/name.");
+    const moved = await transferRepo(deps, ctx.repo, target.slice(0, slash), target.slice(slash + 1));
+    return c.redirect(repoUrl(moved.owner, moved.name, "settings"));
   }));
 
   app.post(`${R}/settings/delete`, withRepo(deps, "admin", async (c, ctx) => {

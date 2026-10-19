@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import type { Deps } from "../../deps.js";
 import { ValidationError } from "../../services/errors.js";
 import { assertCanTalk, listMilestones, listTemplates, reactionSummary, recordMentions, REACTION_GLYPH, REACTIONS, type ReactionEmoji } from "../../services/issueExtras.js";
+import { deliverWebhooks } from "../../services/repoAdmin.js";
 import {
   PER_PAGE, addComment, createIssue, createLabel, deleteLabel, getIssue, labelCounts, listComments, listEvents, listIssues, listPinned,
   listLabels, participants, setIssueLabels, setIssueState, updateIssue, type CloseReason, type Issue,
@@ -184,6 +185,7 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
     try {
       const issue = createIssue(deps.db, ctx.repo.id, user.id, { title: field(f, "title"), body: field(f, "body") });
       recordMentions(deps.db, user, ctx.repo, `${field(f, "title")}\n${field(f, "body")}`, { kind: "issue", number: issue.number });
+      await deliverWebhooks(deps, ctx.repo, "issues", { action: "opened", number: issue.number, title: issue.title });
       return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "issues", String(issue.number)));
     } catch (err) {
       if (!(err instanceof ValidationError)) throw err;

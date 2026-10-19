@@ -34,8 +34,16 @@ export async function loadRepo(deps: Deps, c: Context<Env>, need: Access = "read
   const repo = getRepo(deps.db, c.req.param("owner") ?? "", c.req.param("repo") ?? "");
   const user = c.get("user");
   if (!repo) return await notFound(c, "This repository");
+  const path = c.req.path;
+  if (!repo.issuesEnabled && /\/(issues|milestones)(\/|$)/.test(path)) return await notFound(c, "This repository");
+  if (!repo.pullsEnabled && /\/(pulls?|compare)(\/|$)/.test(path)) return await notFound(c, "This repository");
   const access = accessLevel(deps.db, user, repo);
   if (access === "none") return await notFound(c, "This repository");
+  const settings = path.includes("/settings");
+  const social = /\/(star|unstar|watch|fork)$/.test(path);
+  if (repo.archived && c.req.method !== "GET" && c.req.method !== "HEAD" && !settings && !social) {
+    return renderError(c, 403, "This repository is archived.");
+  }
   if (!can(access, need)) {
     if (!user) return loginRedirect(c);
     return await renderError(c, 403, "You don't have permission to do that in this repository.");

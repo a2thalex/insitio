@@ -32,6 +32,7 @@ export function RepoLayout({ ctx, tab, csrf, signedIn, children }: { ctx: RepoCt
                 </strong>
               </nav>
               <span class="Label Label--secondary ml-2">{repo.isPrivate ? "Private" : "Public"}</span>
+              {repo.archived && <span class="Label Label--attention ml-2">Archived</span>}
             </div>
             {ctx.forkedFrom && (
               <p class="f6 color-fg-muted mt-1 mb-0">
@@ -55,12 +56,13 @@ export function RepoLayout({ ctx, tab, csrf, signedIn, children }: { ctx: RepoCt
         <nav class="UnderlineNav px-3 px-md-4" aria-label="Repository">
           <div class="UnderlineNav-body">
             {item("code", base, "code", "Code")}
-            {item("issues", `${base}/issues`, "issue-opened", "Issues", counts.issues)}
-            {item("pulls", `${base}/pulls`, "git-pull-request", "Pull requests", counts.pulls)}
+            {repo.issuesEnabled && item("issues", `${base}/issues`, "issue-opened", "Issues", counts.issues)}
+            {repo.pullsEnabled && item("pulls", `${base}/pulls`, "git-pull-request", "Pull requests", counts.pulls)}
             {ctx.access === "admin" && item("settings", `${base}/settings`, "gear", "Settings")}
           </div>
         </nav>
       </div>
+      {repo.archived && <div class="flash flash-warn mx-3">This repository is archived. It is read-only.</div>}
       <div class="container-xl p-responsive py-4">{children}</div>
     </>
   );

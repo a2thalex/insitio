@@ -25,6 +25,8 @@ export type Config = {
   gitDrainMaxBytes: number;
   /** ...or after this many ms with no data from the client. */
   gitDrainIdleMs: number;
+  /** Tests may deliver webhooks to loopback. Production stays closed. */
+  webhookAllowLoopback: boolean;
 };
 
 const DEFAULT_RELEASE_REPO = "a2thalex/insitio";
@@ -87,5 +89,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     headersTimeoutMs,
     gitDrainMaxBytes: parsePositiveInt("GIT_DRAIN_MAX_BYTES", env.GIT_DRAIN_MAX_BYTES, DEFAULT_GIT_DRAIN_MAX_BYTES),
     gitDrainIdleMs: parsePositiveInt("GIT_DRAIN_IDLE_MS", env.GIT_DRAIN_IDLE_MS, DEFAULT_GIT_DRAIN_IDLE_MS, MAX_MS),
+    webhookAllowLoopback: env.WEBHOOK_ALLOW_LOOPBACK === "1",
   };
 }
