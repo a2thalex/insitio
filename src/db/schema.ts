@@ -197,6 +197,69 @@ const MIGRATIONS = [
     primary key (repo_id, commit_sha)
   );
   `,
+  // Issues: assignees, milestones, reactions, templates, lock, pin, close reasons, mentions.
+  `
+  alter table issues add column close_reason text check (close_reason is null or close_reason in ('completed', 'not_planned'));
+  alter table issues add column locked integer not null default 0;
+  alter table issues add column pinned_at integer;
+  create table milestones (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    number integer not null,
+    title text not null,
+    description text not null default '',
+    due_on integer,
+    state text not null default 'open' check (state in ('open', 'closed')),
+    created_at integer not null,
+    closed_at integer,
+    unique (repo_id, number)
+  );
+  alter table issues add column milestone_id integer references milestones(id) on delete set null;
+  create table issue_assignees (
+    issue_id integer not null references issues(id) on delete cascade,
+    user_id integer not null references users(id) on delete cascade,
+    primary key (issue_id, user_id)
+  );
+  create table reactions (
+    user_id integer not null references users(id) on delete cascade,
+    target_kind text not null check (target_kind in ('issue', 'comment')),
+    target_id integer not null,
+    emoji text not null check (emoji in ('+1', '-1', 'laugh', 'hooray', 'confused', 'heart', 'rocket', 'eyes')),
+    created_at integer not null,
+    primary key (user_id, target_kind, target_id, emoji)
+  );
+  create index reactions_target on reactions (target_kind, target_id);
+  create table issue_templates (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    name text not null,
+    about text not null default '',
+    title text not null default '',
+    body text not null default '',
+    position integer not null default 0,
+    unique (repo_id, name)
+  );
+  create table activities (
+    id integer primary key,
+    issue_id integer not null references issues(id) on delete cascade,
+    actor_id integer references users(id) on delete set null,
+    kind text not null,
+    detail text not null default '',
+    created_at integer not null
+  );
+  create index activities_issue on activities (issue_id);
+  create table issue_mentions (
+    id integer primary key,
+    issue_id integer not null references issues(id) on delete cascade,
+    source_kind text not null,
+    source_repo_id integer not null,
+    source_number integer,
+    commit_sha text not null default '',
+    actor_id integer references users(id) on delete set null,
+    created_at integer not null
+  );
+  create index issue_mentions_issue on issue_mentions (issue_id);
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

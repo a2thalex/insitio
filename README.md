@@ -9,7 +9,7 @@ The page layouts, URL scheme and data-loading approach come from evidence gather
 - **Git over HTTP**: clone, fetch and push through `git http-backend`, authenticated with personal access tokens. Private repos stay hidden (404) from anyone without access.
 - **Code**: repository home with README, file tree, syntax-highlighted file view with line-range permalinks, raw and download links, blame, creating and editing files in the browser, zip and tar.gz archives, branches and tags, releases with downloadable assets, forks, watches, topics, a language bar, license detection and contributors.
 - **Fast listings**: directory listings render immediately, and the "last commit" columns load afterwards from `/tree-commit-info/`, the same split github.com uses.
-- **Issues**: Markdown comments, `#123` and `@user` links, labels, open/closed filters, search, close and reopen.
+- **Issues**: Markdown comments, `#123` and `@user` links, labels, assignees, milestones, reactions, templates, close reasons, lock and pin, search, and "Fixes #n" auto-close.
 - **Pull requests**: compare branches, open a PR, then use the Conversation, Commits and Files changed tabs. Merges happen server-side with a merge commit, and conflicts are detected before you click merge.
 - **People**: invite-only sign-up, profiles, stars, collaborators with read, write or admin roles, and a site-admin page.
 - **Code search**: case-insensitive search across the default branch (`git grep`).

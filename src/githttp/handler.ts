@@ -5,6 +5,7 @@ import { clientAddress } from "../clientAddress.js";
 import { Repo } from "../git/repo.js";
 import { GIT_ENV } from "../git/run.js";
 import { repoDir, reposRoot } from "../git/storage.js";
+import { scanPushedCommits } from "../services/issueExtras.js";
 import { accessLevel, can } from "../services/permissions.js";
 import { getRepo, setDefaultBranch, type RepoRow } from "../services/repos.js";
 import { userForAccessToken, type User } from "../services/users.js";
@@ -112,6 +113,9 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
     return send(res, 403, `Permission to ${repo.owner}/${repo.name} denied to ${user.username}.`);
   }
 
+  const beforeDefault = route.service === "git-receive-pack" && route.rest === "git-receive-pack"
+    ? new Repo(repoDir(deps.config.dataDir, repo.owner, repo.name)).resolve(repo.defaultBranch)
+    : Promise.resolve(null);
   const url = new URL(req.url ?? "/", "http://localhost");
   const env: Record<string, string> = {
     ...GIT_ENV,
@@ -183,7 +187,10 @@ export function handleGitHttp(req: IncomingMessage, res: ServerResponse, deps: D
     }
     if (route.service === "git-receive-pack" && route.rest === "git-receive-pack") {
       try {
+        const before = await beforeDefault;
         await fixHead(deps, repo);
+        const fresh = getRepo(deps.db, repo.owner, repo.name) ?? repo;
+        if (user) await scanPushedCommits(deps, fresh, user, new Repo(repoDir(deps.config.dataDir, fresh.owner, fresh.name)), before);
       } catch (err) {
         console.error("Could not update HEAD after push", err);
       }

@@ -7,6 +7,7 @@ import { ValidationError } from "../../services/errors.js";
 import { PER_PAGE, listComments, listEvents, listLabels, participants } from "../../services/issues.js";
 import { can } from "../../services/permissions.js";
 import { createPull, getPull, listPulls, markMerged, type Pull } from "../../services/pulls.js";
+import { applyClosingReferences, recordMentions } from "../../services/issueExtras.js";
 import { authorFor } from "../../services/repos.js";
 import type { Env } from "../env.js";
 import { field, form, loginRedirect } from "../middleware.js";
@@ -392,6 +393,9 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
     try {
       const sha = await ctx.git.merge(pull.baseRef, pull.headRef, message, authorFor(user));
       markMerged(deps.db, pull.id, user.id, sha);
+      const text = `${pull.title}\n${pull.body}\n${message}`;
+      applyClosingReferences(deps.db, user, ctx.repo, text, `pull request #${pull.number}`);
+      recordMentions(deps.db, user, ctx.repo, text, { kind: "pull", number: pull.number });
     } catch (err) {
       if (err instanceof MergeConflictError) return renderError(c, 409, "This branch has conflicts that must be resolved before merging.");
       if (err instanceof RefMovedError) return renderError(c, 409, "The base branch changed while merging. Reload and try again.");
