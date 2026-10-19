@@ -116,7 +116,7 @@ export function Timeline({ ctx, issue, comments, events, extra = [], openingExtr
   );
 }
 
-export function CommentForm({ action, csrf, canToggle, state, isPull, signedIn, loginHref, locked = false, canWrite = false }: { action: string; csrf: string; canToggle: boolean; state: "open" | "closed"; isPull: boolean; signedIn: boolean; loginHref: string; locked?: boolean; canWrite?: boolean }) {
+export function CommentForm({ action, csrf, canToggle, state, isPull, signedIn, loginHref, locked = false, canWrite = false, replies = [] }: { action: string; csrf: string; canToggle: boolean; state: "open" | "closed"; isPull: boolean; signedIn: boolean; loginHref: string; locked?: boolean; canWrite?: boolean; replies?: { id: number; title: string }[] }) {
   if (!signedIn) {
     return (
       <div class="Box p-3 text-center color-fg-muted mt-3">
@@ -132,6 +132,12 @@ export function CommentForm({ action, csrf, canToggle, state, isPull, signedIn, 
     <form method="post" action={action} class="mt-4 border-top pt-4">
       <CsrfField csrf={csrf} />
       <label for="comment-body" class="d-block text-bold mb-2">Add a comment</label>
+      {replies.length > 0 && (
+        <select class="form-select mb-2" name="reply" aria-label="Saved reply">
+          <option value="">Saved reply</option>
+          {replies.map((reply) => <option value={String(reply.id)}>{reply.title}</option>)}
+        </select>
+      )}
       <textarea class="form-control input-block" id="comment-body" name="body" placeholder="Leave a comment (Markdown supported)" style="min-height:120px"></textarea>
       <div class="d-flex flex-justify-end mt-2" style="gap:8px">
         {canToggle && state === "open" && !isPull && (

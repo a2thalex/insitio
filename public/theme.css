@@ -4,6 +4,72 @@
  * [data-color-mode][data-dark-theme] rules), then restyles a few components.
  */
 
+html[data-color-mode="light"][data-light-theme="light"],
+html[data-color-mode="auto"][data-light-theme="light"] {
+  --ins-bg: #f6f4ee;
+  --ins-surface: #fffdf8;
+  --ins-surface-2: #efece3;
+  --ins-inset: #e7e3d8;
+  --ins-fg: #1c1915;
+  --ins-fg-2: #3d3832;
+  --ins-fg-muted: #5e584f;
+  --ins-border: rgba(28, 25, 21, 0.16);
+  --ins-border-soft: rgba(28, 25, 21, 0.08);
+  --ins-accent: #e4571c;
+  --ins-accent-hover: #c44714;
+  --ins-accent-ink: #fff8f3;
+  --ins-link: #b84312;
+  --ins-success: #1f7a45;
+  --ins-success-strong: #146336;
+  --ins-danger: #c4321a;
+  --ins-danger-strong: #9d2412;
+  --ins-done: #6b46c1;
+  --ins-done-strong: #55349a;
+  --ins-attention: #8a6508;
+  --ins-teal: #0e6e80;
+  color-scheme: light;
+  --bgColor-default: var(--ins-bg);
+  --bgColor-muted: var(--ins-surface-2);
+  --bgColor-inset: var(--ins-inset);
+  --bgColor-accent-emphasis: var(--ins-accent);
+  --bgColor-success-emphasis: var(--ins-success-strong);
+  --bgColor-danger-emphasis: var(--ins-danger-strong);
+  --bgColor-done-emphasis: var(--ins-done-strong);
+  --fgColor-default: var(--ins-fg);
+  --fgColor-muted: var(--ins-fg-muted);
+  --fgColor-accent: var(--ins-link);
+  --fgColor-success: var(--ins-success);
+  --fgColor-danger: var(--ins-danger);
+  --fgColor-done: var(--ins-done);
+  --fgColor-attention: var(--ins-attention);
+  --borderColor-default: var(--ins-border);
+  --borderColor-muted: var(--ins-border-soft);
+  --borderColor-accent-emphasis: var(--ins-accent);
+  --borderColor-success-emphasis: var(--ins-success-strong);
+  --borderColor-done-emphasis: var(--ins-done-strong);
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-color-mode="auto"] {
+    --ins-bg: #131c21;
+    --ins-surface: #172227;
+    --ins-surface-2: #1c2930;
+    --ins-inset: #0f171b;
+    --ins-fg: #f1efe6;
+    --ins-fg-2: #cfd1c9;
+    --ins-fg-muted: #939ea0;
+    --ins-border: rgba(241, 239, 230, 0.16);
+    --ins-border-soft: rgba(241, 239, 230, 0.09);
+    --ins-accent: #ff6a2b;
+    --ins-link: #ff8d5c;
+    color-scheme: dark;
+    --bgColor-default: var(--ins-bg);
+    --fgColor-default: var(--ins-fg);
+    --fgColor-muted: var(--ins-fg-muted);
+    --borderColor-default: var(--ins-border);
+  }
+}
+
 html[data-color-mode="dark"][data-dark-theme="dark"] {
   --ins-bg: #131c21;
   --ins-surface: #172227;

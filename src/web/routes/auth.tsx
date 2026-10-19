@@ -3,6 +3,7 @@ import { deleteCookie, setCookie } from "hono/cookie";
 import type { Deps } from "../../deps.js";
 import { requestBucket } from "../../clientAddress.js";
 import { ValidationError } from "../../services/errors.js";
+import { acceptSecondFactor, logSecurity, totpSecret } from "../../services/account.js";
 import { authenticate, createSession, deleteSession, inviteStatus, redeemInvite } from "../../services/users.js";
 import type { Env } from "../env.js";
 import { SESSION_COOKIE, cookieOptions, field, form, safeNext } from "../middleware.js";
@@ -39,7 +40,7 @@ export function AuthBox({ title, children }: { title: string; children: any }) {
   );
 }
 
-function LoginPage({ csrf, next, error, username }: { csrf: string; next: string; error?: string; username?: string }) {
+function LoginPage({ csrf, next, error, username, needCode }: { csrf: string; next: string; error?: string; username?: string; needCode?: boolean }) {
   return (
     <AuthBox title="Sign in to Insitio">
       <Flash error={error} />
@@ -50,6 +51,12 @@ function LoginPage({ csrf, next, error, username }: { csrf: string; next: string
           <input class="form-control input-block mb-3" id="login_field" name="username" autocomplete="username" value={username ?? ""} required autofocus />
           <label for="password" class="d-block mb-2">Password</label>
           <input class="form-control input-block mb-3" id="password" name="password" type="password" autocomplete="current-password" required />
+          {needCode && (
+            <>
+              <label for="code" class="d-block mb-2">Authentication code</label>
+              <input class="form-control input-block mb-3" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus />
+            </>
+          )}
           <button class="btn btn-primary btn-block" type="submit">Sign in</button>
         </form>
       </div>
@@ -84,7 +91,8 @@ function JoinPage({ csrf, token, error, values }: { csrf: string; token: string;
 }
 
 function startSession(c: Context<Env>, deps: Deps, userId: number) {
-  const s = createSession(deps.db, userId);
+  const s = createSession(deps.db, userId, c.req.header("user-agent") ?? "");
+  logSecurity(deps.db, userId, "login");
   setCookie(c, SESSION_COOKIE, s.id, { ...cookieOptions(deps), maxAge: 30 * 86400 });
 }
 
@@ -112,6 +120,15 @@ export function authRoutes(deps: Deps, app: Hono<Env>) {
     if (!user) {
       recordFailure(key);
       return render(c, "Sign in", <LoginPage csrf={c.get("csrf")} next={next} username={username} error="Incorrect username or password." />, 401);
+    }
+    const secret = totpSecret(deps.db, user.id);
+    if (secret) {
+      const code = field(f, "code");
+      if (!code) return render(c, "Sign in", <LoginPage csrf={c.get("csrf")} next={next} username={username} needCode />);
+      if (!acceptSecondFactor(deps.db, user.id, secret, code)) {
+        recordFailure(key);
+        return render(c, "Sign in", <LoginPage csrf={c.get("csrf")} next={next} username={username} needCode error="That code is not valid." />, 401);
+      }
     }
     failures.delete(key);
     startSession(c, deps, user.id);

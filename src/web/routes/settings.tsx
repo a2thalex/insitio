@@ -2,6 +2,8 @@ import type { Context, Hono } from "hono";
 import type { Child } from "hono/jsx";
 import type { Deps } from "../../deps.js";
 import { ValidationError } from "../../services/errors.js";
+import { logSecurity } from "../../services/account.js";
+import { registerAccountRoutes } from "./account.js";
 import {
   changePassword, createAccessToken, createInvite, deleteAccessToken, listAccessTokens, listInvites, revokeInvite,
   updateProfile, type User,
@@ -12,7 +14,8 @@ import { render } from "../render.js";
 import { Avatar, CsrfField, Flash, Octicon, TimeAgo } from "../views/layout.js";
 import { InviteTable } from "../views/invites.js";
 
-type Section = "profile" | "password" | "tokens" | "invites";
+export type SettingsSection = "profile" | "password" | "tokens" | "invites" | "emails" | "sessions" | "security" | "appearance" | "blocks" | "replies" | "keys";
+type Section = SettingsSection;
 
 function SettingsLayout({ user, section, showInvites, children }: { user: User; section: Section; showInvites: boolean; children: Child }) {
   const item = (s: Section, label: string, icon: string) => (
@@ -33,8 +36,15 @@ function SettingsLayout({ user, section, showInvites, children }: { user: User; 
       <div class="d-md-flex">
         <nav class="menu col-md-3 mr-md-4 mb-4" aria-label="Settings">
           {item("profile", "Public profile", "person")}
+          {item("emails", "Emails", "mail")}
           {item("password", "Password", "shield-lock")}
+          {item("security", "Security", "shield")}
+          {item("sessions", "Sessions", "devices")}
+          {item("appearance", "Appearance", "sun")}
           {item("tokens", "Personal access tokens", "key")}
+          {item("keys", "SSH and GPG keys", "key")}
+          {item("blocks", "Blocked users", "no-entry")}
+          {item("replies", "Saved replies", "reply")}
           {showInvites && item("invites", "Invites", "mail")}
         </nav>
         <div class="flex-auto">{children}</div>
@@ -132,6 +142,7 @@ export function settingsRoutes(deps: Deps, app: Hono<Env>) {
     try {
       if (field(f, "next") !== field(f, "confirm")) throw new ValidationError("New passwords don't match");
       changePassword(deps.db, c.get("user")!.id, field(f, "current"), field(f, "next"));
+      logSecurity(deps.db, c.get("user")!.id, "password_changed");
       return c.redirect("/settings/password?saved=1");
     } catch (err) {
       if (!(err instanceof ValidationError)) throw err;
@@ -196,6 +207,7 @@ export function settingsRoutes(deps: Deps, app: Hono<Env>) {
     const f = await form(c);
     try {
       const token = createAccessToken(deps.db, c.get("user")!.id, field(f, "name"));
+      logSecurity(deps.db, c.get("user")!.id, "token_created", field(f, "name"));
       return page(c, "tokens", "Tokens", tokensPage(c, { created: token }));
     } catch (err) {
       if (!(err instanceof ValidationError)) throw err;
@@ -204,6 +216,7 @@ export function settingsRoutes(deps: Deps, app: Hono<Env>) {
   });
   app.post("/settings/tokens/:id/delete", (c) => {
     deleteAccessToken(deps.db, c.get("user")!.id, Number(c.req.param("id")));
+    logSecurity(deps.db, c.get("user")!.id, "token_revoked");
     return c.redirect("/settings/tokens");
   });
 
@@ -244,4 +257,6 @@ export function settingsRoutes(deps: Deps, app: Hono<Env>) {
     revokeInvite(deps.db, c.req.param("token"), c.get("user")!.id);
     return c.redirect("/settings/invites");
   });
+
+  registerAccountRoutes(deps, app, page);
 }

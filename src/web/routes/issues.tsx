@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import type { Deps } from "../../deps.js";
 import { ValidationError } from "../../services/errors.js";
 import { assertCanTalk, listMilestones, listTemplates, reactionSummary, recordMentions, REACTION_GLYPH, REACTIONS, type ReactionEmoji } from "../../services/issueExtras.js";
+import { assertNotBlocked, listSavedReplies, savedReplyBody } from "../../services/account.js";
 import { deliverWebhooks } from "../../services/repoAdmin.js";
 import {
   PER_PAGE, addComment, createIssue, createLabel, deleteLabel, getIssue, labelCounts, listComments, listEvents, listIssues, listPinned,
@@ -183,6 +184,7 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
     if (!user) return loginRedirect(c);
     const f = await form(c);
     try {
+      assertNotBlocked(deps.db, user.id, ctx.repo.ownerId);
       const issue = createIssue(deps.db, ctx.repo.id, user.id, { title: field(f, "title"), body: field(f, "body") });
       recordMentions(deps.db, user, ctx.repo, `${field(f, "title")}\n${field(f, "body")}`, { kind: "issue", number: issue.number });
       await deliverWebhooks(deps, ctx.repo, "issues", { action: "opened", number: issue.number, title: issue.title });
@@ -271,7 +273,7 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
                 );
               }}
             />
-            <CommentForm action={`${base}/comment`} csrf={c.get("csrf")} canToggle={canManage(c, ctx, issue)} state={issue.state} isPull={false} signedIn={!!c.get("user")} loginHref={loginHref(c)} locked={issue.locked} canWrite={can(ctx.access, "write")} />
+            <CommentForm action={`${base}/comment`} csrf={c.get("csrf")} canToggle={canManage(c, ctx, issue)} state={issue.state} isPull={false} signedIn={!!c.get("user")} loginHref={loginHref(c)} locked={issue.locked} canWrite={can(ctx.access, "write")} replies={c.get("user") ? listSavedReplies(deps.db, c.get("user")!.id) : []} />
           </div>
           <aside class="col-md-3 flex-shrink-0" aria-label="Issue details">
             <LabelsSidebar ctx={ctx} issue={issue} allLabels={listLabels(deps.db, ctx.repo.id)} canEdit={can(ctx.access, "write")} csrf={c.get("csrf")} action={`${base}/labels`} />
@@ -319,7 +321,9 @@ export function issueRoutes(deps: Deps, app: Hono<Env>) {
       if (!issue || issue.isPull !== (kind === "pull")) return notFound(c);
       const f = await form(c);
       const action = field(f, "action");
-      const body = field(f, "body");
+      assertNotBlocked(deps.db, user.id, ctx.repo.ownerId);
+      let body = field(f, "body");
+      if (!body.trim() && field(f, "reply")) body = savedReplyBody(deps.db, user.id, Number(field(f, "reply"))) ?? "";
       if (action === "close" || action === "reopen") {
         if (!canManage(c, ctx, issue)) return renderError(c, 403, "Only the author and collaborators with write access can change this.");
         if (issue.isPull && getPull(deps.db, ctx.repo.id, issue.number)?.mergedAt) {

@@ -12,6 +12,7 @@ import { applyClosingReferences, assertCanTalk, recordMentions } from "../../ser
 import {
   currentReviews, listLineComments, listPullTemplates, listReviews, listReviewers, listStatuses, unmetChecks,
 } from "../../services/pullExtras.js";
+import { assertNotBlocked, listSavedReplies } from "../../services/account.js";
 import { deliverWebhooks, listBranchRules } from "../../services/repoAdmin.js";
 import { authorFor } from "../../services/repos.js";
 import type { Env } from "../env.js";
@@ -322,6 +323,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
       if (base !== head && (await ctx.git.compare(base, head)).commits.length === 0) {
         throw new ValidationError(`${base} is already up to date with ${head}`);
       }
+      assertNotBlocked(deps.db, user.id, ctx.repo.ownerId);
       const pull = createPull(deps.db, ctx.repo.id, user.id, { ...values, baseRef: base, headRef: head, draft: field(f, "draft") === "1" });
       await deliverWebhooks(deps, ctx.repo, "pull_request", { action: "opened", number: pull.number, title: pull.title });
       return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "pull", String(pull.number)));
@@ -429,6 +431,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
               loginHref={`/login?next=${encodeURIComponent(base)}`}
               locked={pull.locked}
               canWrite={canWrite}
+              replies={viewer ? listSavedReplies(deps.db, viewer.id) : []}
             />
           </div>
           <aside class="col-md-3 flex-shrink-0" aria-label="Pull request details">

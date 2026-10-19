@@ -357,6 +357,64 @@ const MIGRATIONS = [
     created_at integer not null
   );
   `,
+  // Account: emails, sessions metadata, two-factor, theme, blocks, replies, keys, security log.
+  `
+  alter table users add column theme text not null default 'dark';
+  alter table users add column notify text not null default 'participating';
+  alter table users add column totp_secret text;
+  alter table users add column totp_pending text;
+  alter table sessions add column created_at integer not null default 0;
+  alter table sessions add column user_agent text not null default '';
+  create table emails (
+    id integer primary key,
+    user_id integer not null references users(id) on delete cascade,
+    email text not null unique collate nocase,
+    is_primary integer not null default 0
+  );
+  insert into emails (user_id, email, is_primary)
+    select id, email, 1 from users where email <> '';
+  create table recovery_codes (
+    user_id integer not null references users(id) on delete cascade,
+    code_hash text not null,
+    primary key (user_id, code_hash)
+  );
+  create table ssh_keys (
+    id integer primary key,
+    user_id integer not null references users(id) on delete cascade,
+    title text not null,
+    public_key text not null,
+    fingerprint text not null,
+    created_at integer not null
+  );
+  create table gpg_keys (
+    id integer primary key,
+    user_id integer not null references users(id) on delete cascade,
+    key_id text not null,
+    armored text not null,
+    created_at integer not null
+  );
+  create table blocks (
+    user_id integer not null references users(id) on delete cascade,
+    blocked_id integer not null references users(id) on delete cascade,
+    created_at integer not null,
+    primary key (user_id, blocked_id)
+  );
+  create table saved_replies (
+    id integer primary key,
+    user_id integer not null references users(id) on delete cascade,
+    title text not null,
+    body text not null,
+    created_at integer not null
+  );
+  create table security_events (
+    id integer primary key,
+    user_id integer not null references users(id) on delete cascade,
+    kind text not null,
+    detail text not null default '',
+    created_at integer not null
+  );
+  create index security_events_user on security_events (user_id, id desc);
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

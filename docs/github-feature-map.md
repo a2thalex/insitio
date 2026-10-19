@@ -62,10 +62,10 @@ repository tabs, repository settings, user settings and Insights navigation.
 | GitHub section | Insitio |
 |---|---|
 | Public profile, password, personal access tokens | ✓ |
-| Emails, SSH and GPG keys, sessions, two-factor auth | ✗ |
-| Notifications preferences, appearance/theme | ✗ (theme follows system) |
-| Organizations, teams, blocked users, saved replies | ✗ |
-| Applications, security log, developer settings | ✗ |
+| Emails, SSH and GPG keys, sessions, two-factor auth | ✓ (keys are stored; SSH git is still later) |
+| Notifications preferences, appearance/theme | ✓ (preference is saved; no mail is sent) |
+| Organizations, teams, blocked users, saved replies | ◐ (blocks and saved replies; organizations are later) |
+| Applications, security log, developer settings | ◐ (security log; tokens already existed) |
 
 ## Site-wide
 | GitHub | Insitio |
