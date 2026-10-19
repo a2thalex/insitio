@@ -6,6 +6,7 @@ import { now } from "../db/db.js";
 import type { Deps } from "../deps.js";
 import { createRateLimiter } from "../rateLimit.js";
 import { DeviceCapacityError, pollDevice, startDevice } from "../services/devices.js";
+import { GitError } from "../git/run.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../services/errors.js";
 import { getMilestone, getMilestoneById, recordMentions, resolveAssignees, setAssignees, setMilestone } from "../services/issueExtras.js";
 import { createIssue, getIssue, setIssueState, updateIssue, type Issue } from "../services/issues.js";
@@ -436,7 +437,11 @@ export function apiV1(deps: Deps): Hono<ApiEnv> {
     if (typeof body.name !== "string" || typeof body.head_sha !== "string" || typeof body.status !== "string") {
       throw new ValidationError("name, head_sha, and status are required strings");
     }
-    const found = await gitFor(deps, repo).resolve(body.head_sha);
+    if (!/^[0-9a-f]{4,40}$/i.test(body.head_sha)) throw new ValidationError("head_sha must be a commit id");
+    const found = await gitFor(deps, repo).resolve(body.head_sha).catch((err) => {
+      if (err instanceof GitError) return null;
+      throw err;
+    });
     if (!found) throw new ValidationError("That commit does not exist in this repository.");
     const conclusion = body.conclusion == null || body.conclusion === "" ? null : body.conclusion;
     if (conclusion !== null && typeof conclusion !== "string") throw new ValidationError("conclusion must be a string");

@@ -197,9 +197,9 @@ export function createProject(db: DatabaseSync, repoId: number, name: string): n
   });
 }
 
-export function addProjectCard(db: DatabaseSync, repoId: number, columnId: number, title: string, issueNumber: number | null): void {
-  const column = columnInRepo(db, repoId, columnId);
-  const cards = (db.prepare("select count(*) as n from project_cards c join project_columns col on col.id = c.column_id join projects p on p.id = col.project_id where p.repo_id = ?").get(repoId) as Row).n as number;
+export function addProjectCard(db: DatabaseSync, repoId: number, projectId: number, columnId: number, title: string, issueNumber: number | null): void {
+  const column = columnInProject(db, repoId, projectId, columnId);
+  const cards = (db.prepare("select count(*) as n from project_cards c join project_columns col on col.id = c.column_id where col.project_id = ?").get(projectId) as Row).n as number;
   if (cards >= 100) throw new ValidationError("A project can have at most 100 cards.");
   const clean = title.trim().slice(0, 200);
   if (!clean) throw new ValidationError("A card needs a title.");
@@ -207,25 +207,26 @@ export function addProjectCard(db: DatabaseSync, repoId: number, columnId: numbe
   db.prepare("insert into project_cards (column_id, title, issue_number, position) values (?, ?, ?, ?)").run(column.id, clean, issueNumber, position);
 }
 
-export function moveProjectCard(db: DatabaseSync, repoId: number, cardId: number, columnId: number): void {
-  const column = columnInRepo(db, repoId, columnId);
+export function moveProjectCard(db: DatabaseSync, repoId: number, projectId: number, cardId: number, columnId: number): void {
+  const column = columnInProject(db, repoId, projectId, columnId);
   const card = db
     .prepare(
-      `select c.id from project_cards c join project_columns col on col.id = c.column_id join projects p on p.id = col.project_id
-       where c.id = ? and p.repo_id = ?`,
+      `select c.id from project_cards c join project_columns col on col.id = c.column_id
+       where c.id = ? and col.project_id = ?`,
     )
-    .get(cardId, repoId) as Row | undefined;
-  if (!card) throw new ValidationError("That card is not on this repository.");
+    .get(cardId, projectId) as Row | undefined;
+  if (!card) throw new ValidationError("That card is not on this project.");
   db.prepare("update project_cards set column_id = ? where id = ?").run(column.id, card.id);
 }
 
-function columnInRepo(db: DatabaseSync, repoId: number, columnId: number): Row {
+function columnInProject(db: DatabaseSync, repoId: number, projectId: number, columnId: number): Row {
   const column = db
     .prepare(
-      `select col.id from project_columns col join projects p on p.id = col.project_id where col.id = ? and p.repo_id = ?`,
+      `select col.id from project_columns col join projects p on p.id = col.project_id
+       where col.id = ? and col.project_id = ? and p.repo_id = ?`,
     )
-    .get(columnId, repoId) as Row | undefined;
-  if (!column) throw new ValidationError("That column is not on this repository.");
+    .get(columnId, projectId, repoId) as Row | undefined;
+  if (!column) throw new ValidationError("That column is not on this project.");
   return column;
 }
 
@@ -256,6 +257,11 @@ export function createAdvisory(
   db.prepare(
     "insert into advisories (repo_id, title, severity, summary, published, created_by, created_at) values (?, ?, ?, ?, ?, ?, ?)",
   ).run(repoId, title, input.severity, input.summary, input.published ? 1 : 0, userId, now());
+}
+
+export function publishAdvisory(db: DatabaseSync, repoId: number, id: number): void {
+  const updated = db.prepare("update advisories set published = 1 where repo_id = ? and id = ?").run(repoId, id);
+  if (Number(updated.changes) === 0) throw new ValidationError("That advisory does not exist.");
 }
 
 export function recordActionRun(

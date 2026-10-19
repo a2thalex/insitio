@@ -39,7 +39,7 @@ export async function loadRepo(deps: Deps, c: Context<Env>, need: Access = "read
   if (!repo.pullsEnabled && /\/(pulls?|compare)(\/|$)/.test(path)) return await notFound(c, "This repository");
   const access = accessLevel(deps.db, user, repo);
   if (access === "none") return await notFound(c, "This repository");
-  const settings = path.includes("/settings");
+  const settings = /^\/[^/]+\/[^/]+\/settings(?:\/|$)/.test(path);
   const social = /\/(star|unstar|watch|fork)$/.test(path);
   if (repo.archived && c.req.method !== "GET" && c.req.method !== "HEAD" && !settings && !social) {
     return renderError(c, 403, "This repository is archived.");

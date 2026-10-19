@@ -98,4 +98,22 @@ describe("repository tabs", () => {
     expect(insights).toContain(authorFor(ada).name);
     expect(repo.stars).toBe(0);
   });
+
+  it("keeps an archived wiki read-only and publishes a draft", async () => {
+    await createRepo(t.deps, ada, { name: "hello", description: "", isPrivate: false, initReadme: true });
+    t.deps.db.prepare("update repos set archived = 1 where name = 'hello'").run();
+    expect((await t.post("/ada/hello/wiki/settings", { title: "Settings", body: "nope" }, adaWho)).status).toBe(403);
+    t.deps.db.prepare("update repos set archived = 0 where name = 'hello'").run();
+    expect((await t.post("/ada/hello/security/advisories", { title: "Draft hole", severity: "low", summary: "Later" }, adaWho)).status).toBe(302);
+    const id = (t.deps.db.prepare("select id from advisories").get() as { id: number }).id;
+    expect((await t.post(`/ada/hello/security/advisories/${id}/publish`, {}, adaWho)).status).toBe(302);
+    expect(await (await t.get("/ada/hello/security")).text()).toContain("Draft hole");
+    const token = createAccessToken(t.deps.db, ada.id, "ci");
+    const api = await t.app.request("/api/v1/repos/ada/hello/actions/runs", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "Bad", head_sha: "-bad", status: "queued" }),
+    });
+    expect(api.status).toBe(422);
+  });
 });

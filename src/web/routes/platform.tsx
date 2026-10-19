@@ -11,6 +11,7 @@ import {
   addDiscussionComment,
   addProjectCard,
   createAdvisory,
+  publishAdvisory,
   createDiscussion,
   createProject,
   discussionComments,
@@ -51,7 +52,13 @@ export function platformRoutes(deps: Deps, app: Hono<Env>) {
       <>
         <div class="d-flex flex-items-center mb-3">
           <h1 class="f2 text-normal flex-auto">Wiki</h1>
-          {can(ctx.access, "write") && <a class="btn btn-primary" href={`${base(ctx)}/wiki/home`}>New page</a>}
+          {can(ctx.access, "write") && (
+            <form method="post" action={`${base(ctx)}/wiki`} class="d-flex" style="gap:8px">
+              <CsrfField csrf={c.get("csrf")} />
+              <input class="form-control" name="name" aria-label="Page name" placeholder="page-name" required />
+              <button class="btn btn-primary" type="submit">New page</button>
+            </form>
+          )}
         </div>
         {pages.length === 0 ? <p class="color-fg-muted">No pages yet.</p> : (
           <div class="Box">{pages.map((item) => <a class="Box-row d-block" href={`${base(ctx)}/wiki/${item.slug}`}>{item.title}</a>)}</div>
@@ -77,6 +84,11 @@ export function platformRoutes(deps: Deps, app: Hono<Env>) {
         )}
       </>
     )));
+  }));
+
+  app.post(`${R}/wiki`, withRepo(deps, "write", async (c, ctx) => {
+    const slug = wikiSlug(field(await form(c), "name"));
+    return c.redirect(`${base(ctx)}/wiki/${slug}`);
   }));
 
   app.post(`${R}/wiki/:slug`, withRepo(deps, "write", async (c, ctx) => {
@@ -168,6 +180,7 @@ export function platformRoutes(deps: Deps, app: Hono<Env>) {
   app.post(`${R}/discussions/:n/state`, withRepo(deps, "read", async (c, ctx) => {
     const user = c.get("user");
     if (!user) return renderError(c, 403, "You don't have permission to do that in this repository.");
+    assertNotBlocked(deps.db, user.id, ctx.repo.ownerId);
     const thread = getDiscussion(deps.db, ctx.repo.id, Number(c.req.param("n")));
     if (!thread) return renderError(c, 404, "This discussion");
     if (user.id !== thread.authorId && !can(ctx.access, "write")) return renderError(c, 403, "You don't have permission to do that in this repository.");
@@ -244,12 +257,12 @@ export function platformRoutes(deps: Deps, app: Hono<Env>) {
   app.post(`${R}/projects/:id/columns/:column/cards`, withRepo(deps, "write", async (c, ctx) => {
     const f = await form(c);
     const issue = Number(field(f, "issue"));
-    addProjectCard(deps.db, ctx.repo.id, Number(c.req.param("column")), field(f, "title"), Number.isInteger(issue) && issue > 0 ? issue : null);
+    addProjectCard(deps.db, ctx.repo.id, Number(c.req.param("id")), Number(c.req.param("column")), field(f, "title"), Number.isInteger(issue) && issue > 0 ? issue : null);
     return c.redirect(`${base(ctx)}/projects/${c.req.param("id")}`);
   }));
 
   app.post(`${R}/projects/:id/cards/:card`, withRepo(deps, "write", async (c, ctx) => {
-    moveProjectCard(deps.db, ctx.repo.id, Number(c.req.param("card")), Number(field(await form(c), "column")));
+    moveProjectCard(deps.db, ctx.repo.id, Number(c.req.param("id")), Number(c.req.param("card")), Number(field(await form(c), "column")));
     return c.redirect(`${base(ctx)}/projects/${c.req.param("id")}`);
   }));
 
@@ -261,7 +274,16 @@ export function platformRoutes(deps: Deps, app: Hono<Env>) {
         <h1 class="f2 text-normal mb-3">Security</h1>
         <h2 class="f4">Advisories</h2>
         {advisories.length === 0 ? <p class="color-fg-muted">No published advisories.</p> : advisories.map((item) => (
-          <div class="Box p-3 mb-2"><strong>{item.title}</strong> <span class="Label ml-2">{item.severity}</span>{item.published ? null : <span class="Label ml-2">Draft</span>}<p class="mb-0">{item.summary}</p></div>
+          <div class="Box p-3 mb-2">
+            <strong>{item.title}</strong> <span class="Label ml-2">{item.severity}</span>{item.published ? null : <span class="Label ml-2">Draft</span>}
+            <p class="mb-0">{item.summary}</p>
+            {!item.published && ctx.access === "admin" && (
+              <form method="post" action={`${base(ctx)}/security/advisories/${item.id}/publish`} class="mt-2">
+                <CsrfField csrf={c.get("csrf")} />
+                <button class="btn btn-sm" type="submit">Publish</button>
+              </form>
+            )}
+          </div>
         ))}
         {ctx.access === "admin" && (
           <form method="post" action={`${base(ctx)}/security/advisories`} class="Box p-3 mb-4">
@@ -301,6 +323,11 @@ export function platformRoutes(deps: Deps, app: Hono<Env>) {
       summary: field(f, "summary"),
       published: field(f, "published") === "1",
     });
+    return c.redirect(`${base(ctx)}/security`);
+  }));
+
+  app.post(`${R}/security/advisories/:id/publish`, withRepo(deps, "admin", (c, ctx) => {
+    publishAdvisory(deps.db, ctx.repo.id, Number(c.req.param("id")));
     return c.redirect(`${base(ctx)}/security`);
   }));
 
@@ -347,7 +374,11 @@ export function platformRoutes(deps: Deps, app: Hono<Env>) {
   app.post(`${R}/actions/runs`, withRepo(deps, "write", async (c, ctx) => {
     const f = await form(c);
     const sha = field(f, "head_sha").trim();
-    const found = await ctx.git.resolve(sha);
+    if (!/^[0-9a-f]{4,40}$/i.test(sha)) throw new ValidationError("head_sha must be a commit id");
+    const found = await ctx.git.resolve(sha).catch((err) => {
+      if (err instanceof GitError) return null;
+      throw err;
+    });
     if (!found) throw new ValidationError("That commit does not exist in this repository.");
     recordActionRun(deps.db, ctx.repo.id, { name: field(f, "name"), headSha: found, status: field(f, "status"), conclusion: field(f, "conclusion") || null });
     return c.redirect(`${base(ctx)}/actions`);
