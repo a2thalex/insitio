@@ -13,6 +13,7 @@ export type User = {
   bio: string;
   theme: "dark" | "light" | "system";
   notify: "participating" | "all" | "ignore";
+  kind: "user" | "org";
   createdAt: number;
 };
 
@@ -22,7 +23,7 @@ const USERNAME_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 // Top-level URL segments a username must not shadow.
 const RESERVED = new Set([
   "login", "logout", "join", "new", "settings", "site-admin", "static", "api", "explore", "search",
-  "dashboard", "notifications", "about", "help", "issues", "pulls", "download",
+  "dashboard", "notifications", "about", "help", "issues", "pulls", "download", "orgs",
 ]);
 const SESSION_DAYS = 30;
 const DAY = 86400;
@@ -37,6 +38,7 @@ export function toUser(r: Row): User {
     bio: r.bio,
     theme: r.theme === "light" || r.theme === "system" ? r.theme : "dark",
     notify: r.notify === "all" || r.notify === "ignore" ? r.notify : "participating",
+    kind: r.kind === "org" ? "org" : "user",
     createdAt: r.created_at,
   };
 }
@@ -92,7 +94,7 @@ export function countUsers(db: DatabaseSync): number {
 
 export function authenticate(db: DatabaseSync, username: string, password: string): User | null {
   const r = db.prepare("select * from users where username = ?").get(username.trim()) as Row | undefined;
-  if (!r || !verifyPassword(password, r.password_hash)) return null;
+  if (!r || r.kind === "org" || !verifyPassword(password, r.password_hash)) return null;
   return toUser(r);
 }
 

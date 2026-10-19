@@ -3,6 +3,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import type { Deps } from "../deps.js";
 import { randomToken } from "../auth/tokens.js";
+import { unreadCount } from "../services/notifications.js";
 import { getSession } from "../services/users.js";
 import type { Env } from "./env.js";
 
@@ -20,6 +21,7 @@ export function loadSession(deps: Deps): MiddlewareHandler<Env> {
     const s = sid ? getSession(deps.db, sid) : null;
     c.set("user", s?.user ?? null);
     c.set("session", s?.session ?? null);
+    c.set("unread", s?.user ? unreadCount(deps.db, s.user.id) : 0);
     let csrf = s?.session.csrf ?? getCookie(c, CSRF_COOKIE);
     if (!csrf) {
       csrf = randomToken(24);

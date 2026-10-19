@@ -287,4 +287,4 @@ The Windows binary is not signed.
 
 ## Not included (yet)
 
-SSH access, organizations and teams, forks, Actions/CI, webhooks, releases, wikis, line-level review comments, and email notifications. `nsit` covers git and repositories only: for now, issues and pull requests are used in the web UI.
+SSH git, Git LFS, Actions, Projects, Wiki, Discussions, gists, packages, and email delivery. The notification inbox, organizations, and teams are on the site. `nsit` covers git and repositories only: issues and pull requests are used in the web UI.

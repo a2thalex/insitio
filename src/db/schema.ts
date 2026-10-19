@@ -415,6 +415,44 @@ const MIGRATIONS = [
   );
   create index security_events_user on security_events (user_id, id desc);
   `,
+  // Site-wide: organizations, teams, and the notification inbox.
+  `
+  alter table users add column kind text not null default 'user' check (kind in ('user', 'org'));
+  create table org_members (
+    org_id integer not null references users(id) on delete cascade,
+    user_id integer not null references users(id) on delete cascade,
+    role text not null check (role in ('owner', 'member')),
+    primary key (org_id, user_id)
+  );
+  create table teams (
+    id integer primary key,
+    org_id integer not null references users(id) on delete cascade,
+    name text not null,
+    slug text not null,
+    unique (org_id, slug)
+  );
+  create table team_members (
+    team_id integer not null references teams(id) on delete cascade,
+    user_id integer not null references users(id) on delete cascade,
+    primary key (team_id, user_id)
+  );
+  create table team_repos (
+    team_id integer not null references teams(id) on delete cascade,
+    repo_id integer not null references repos(id) on delete cascade,
+    role text not null check (role in ('read', 'write', 'admin')),
+    primary key (team_id, repo_id)
+  );
+  create table notifications (
+    id integer primary key,
+    user_id integer not null references users(id) on delete cascade,
+    title text not null,
+    url text not null,
+    reason text not null,
+    read_at integer,
+    created_at integer not null
+  );
+  create index notifications_user on notifications (user_id, id);
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

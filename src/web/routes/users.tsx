@@ -49,6 +49,7 @@ export function userRoutes(deps: Deps, app: Hono<Env>) {
             {profile.bio && <p class="mt-3">{profile.bio}</p>}
             <p class="f6 color-fg-muted mt-3">
               <Octicon name="clock" class="mr-1" />Joined <DateText ts={profile.createdAt} />
+              {profile.kind === "org" && <span class="Label Label--secondary ml-2">Organization</span>}
               {profile.isAdmin && <span class="Label ml-2">Site admin</span>}
             </p>
           </aside>

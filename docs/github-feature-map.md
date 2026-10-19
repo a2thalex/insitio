@@ -64,7 +64,7 @@ repository tabs, repository settings, user settings and Insights navigation.
 | Public profile, password, personal access tokens | ✓ |
 | Emails, SSH and GPG keys, sessions, two-factor auth | ✓ (keys are stored; SSH git is still later) |
 | Notifications preferences, appearance/theme | ✓ (preference is saved; no mail is sent) |
-| Organizations, teams, blocked users, saved replies | ◐ (blocks and saved replies; organizations are later) |
+| Organizations, teams, blocked users, saved replies | ✓ |
 | Applications, security log, developer settings | ◐ (security log; tokens already existed) |
 
 ## Site-wide
@@ -72,10 +72,10 @@ repository tabs, repository settings, user settings and Insights navigation.
 |---|---|
 | Dashboard with your repos and open work | ✓ |
 | Repository search | ✓ |
-| Notifications inbox | ✗ |
+| Notifications inbox | ✓ (in the site; no mail is sent) |
 | Activity feed, explore/trending | ◐ (recent repos only) |
-| Global code/issue/user search | ✗ |
-| Organizations and teams | ✗ |
+| Global code/issue/user search | ✓ |
+| Organizations and teams | ✓ |
 | Gists, packages, sponsors, marketplace, Codespaces, Pages | ✗ |
 | SSH git transport, Git LFS | ✗ |
 | Email notifications | ✗ |
