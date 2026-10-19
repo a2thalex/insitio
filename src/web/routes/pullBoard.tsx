@@ -14,6 +14,7 @@ import {
   addLineComment, addReview, deleteLineComment, deletePullTemplate, getLineComment, listPullTemplates, savePullTemplate, setReviewers, updateLineComment,
 } from "../../services/pullExtras.js";
 import { authorFor } from "../../services/repos.js";
+import { applySuggestionToFile, suggestionBlock } from "../../services/suggestions.js";
 import type { Env } from "../env.js";
 import { field, form, loginRedirect } from "../middleware.js";
 import { repoUrl } from "../paths.js";
@@ -163,6 +164,35 @@ export function pullBoardRoutes(deps: Deps, app: Hono<Env>) {
     const f = await form(c);
     if (field(f, "action") === "delete") deleteLineComment(deps.db, comment.id);
     else updateLineComment(deps.db, comment.id, field(f, "body"));
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "pull", String(pull.number), "files"));
+  }));
+
+  app.post(`${R}/pull/:n/line-comments/:id/apply`, withRepo(deps, "write", async (c, ctx) => {
+    const user = c.get("user")!;
+    await form(c);
+    const pull = pullOf(c, ctx);
+    if (!pull) return notFound(c);
+    if (pull.mergedAt) return renderError(c, 409, "This pull request was merged.");
+    const comment = getLineComment(deps.db, pull.id, Number(c.req.param("id")));
+    if (!comment || comment.side !== "right") return renderError(c, 400, "Only a suggestion on the new side can be applied.");
+    const suggestion = suggestionBlock(comment.body);
+    if (suggestion === null) throw new ValidationError("That comment has no suggestion.");
+    try {
+      assertCommitPath(comment.path);
+    } catch {
+      throw new ValidationError("That path can't be changed.");
+    }
+    if (!(await ctx.git.resolve(pull.headRef))) throw new ValidationError("The head branch is gone.");
+    let blob;
+    try {
+      blob = await ctx.git.blob(pull.headRef, comment.path, 1_000_000);
+    } catch (err) {
+      if (err instanceof GitError) throw new ValidationError("That file is not on the head branch.");
+      throw err;
+    }
+    if (blob.truncated || blob.content.includes(0)) throw new ValidationError("That file can't be edited from a suggestion.");
+    const next = applySuggestionToFile(blob.content.toString("utf8"), comment.line, comment.lineText, suggestion);
+    await ctx.git.commitFiles(pull.headRef, { [comment.path]: next }, `Apply suggestion on ${comment.path}`, authorFor(user));
     return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "pull", String(pull.number), "files"));
   }));
 }

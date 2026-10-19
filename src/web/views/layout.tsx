@@ -137,6 +137,7 @@ function Header({ user, csrf, unread = 0 }: { user: User | null; csrf: string; u
                 <a class="dropdown-item" href={`/${user.username}?tab=repositories`}>Your repositories</a>
                 <a class="dropdown-item" href={`/${user.username}?tab=stars`}>Your stars</a>
                 <div class="dropdown-divider"></div>
+                <a class="dropdown-item" href="/gists">Your gists</a>
                 <a class="dropdown-item" href="/orgs/new">New organization</a>
                 <a class="dropdown-item" href="/settings/profile">Settings</a>
                 {user.isAdmin && <a class="dropdown-item" href="/site-admin">Site admin</a>}

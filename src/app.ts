@@ -11,6 +11,7 @@ import { staticRoutes } from "./web/routes/static.js";
 import { authRoutes } from "./web/routes/auth.js";
 import { settingsRoutes } from "./web/routes/settings.js";
 import { adminRoutes } from "./web/routes/admin.js";
+import { gistRoutes } from "./web/routes/gists.js";
 import { homeRoutes } from "./web/routes/home.js";
 import { newRepoRoutes } from "./web/routes/newRepo.js";
 import { orgRoutes } from "./web/routes/orgs.js";
@@ -65,6 +66,7 @@ export function buildApp(deps: Deps): Hono<Env> {
   homeRoutes(deps, app);
   // /download, /install.ps1 and /install.sh are single-segment paths like /:owner, so they come before userRoutes.
   downloadRoutes(deps, app);
+  gistRoutes(deps, app);
   newRepoRoutes(deps, app);
   orgRoutes(deps, app);
   codeRoutes(deps, app);
