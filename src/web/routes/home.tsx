@@ -8,6 +8,7 @@ import type { Env } from "../env.js";
 import { form, loginRedirect } from "../middleware.js";
 import { blobUrl } from "../paths.js";
 import { render } from "../render.js";
+import { InstallSteps } from "./downloads.js";
 import { Avatar, CsrfField, InsitioMark, Octicon, TimeAgo } from "../views/layout.js";
 import { RepoListItem } from "../views/repoList.js";
 
@@ -27,19 +28,18 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
   app.get("/", (c) => {
     const user = c.get("user");
     if (!user) {
-      const host = new URL(c.req.url).host;
       const recent = listAllVisible(deps.db, null, 8);
       return render(
         c,
         "",
+        <>
         <div class="gate">
           <div class="gate-intro">
             <InsitioMark size={40} />
             <h1>Insitio</h1>
             <p class="lede">A private git host. Repositories stay on this server, and only the people you invite can get in.</p>
             <a class="btn btn-primary btn-large" href="/login">Sign in</a>
-            <p class="gate-note">Accounts start from an invite link. There is no open sign-up.</p>
-            <pre class="gate-clone"><b>git clone</b> https://{host}/owner/name.git</pre>
+            <p class="gate-note">Accounts start from an invite link. There is no open sign-up. <a href="#install">Install directions</a> are below.</p>
           </div>
           <section class="gate-shelf" aria-label="Public repositories">
             <h2>Public repositories</h2>
@@ -49,7 +49,12 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
               <div class="Box">{recent.map((repo) => <RepoListItem repo={repo} showOwner />)}</div>
             )}
           </section>
-        </div>,
+        </div>
+        <section class="install" id="install" aria-label="Install">
+          <h2>Install</h2>
+          <InstallSteps baseUrl={deps.config.baseUrl} />
+        </section>
+        </>,
       );
     }
     const mine = listReposForMember(deps.db, user);
@@ -66,7 +71,7 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
             <a class="btn btn-sm btn-primary" href="/new"><Octicon name="repo" class="mr-1" />New</a>
           </div>
           {mine.length === 0 ? (
-            <p class="color-fg-muted f6">You don't have any repositories yet.</p>
+            <p class="color-fg-muted f6">You don't have any repositories yet. <a href="/download">Install nsit</a>, then run <code class="text-mono">nsit auth login</code> and <code class="text-mono">nsit repo create name</code>.</p>
           ) : (
             <ul class="list-style-none">{mine.slice(0, 20).map((r) => <RepoLink repo={r} />)}</ul>
           )}

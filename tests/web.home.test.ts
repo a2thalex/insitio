@@ -19,7 +19,11 @@ describe("public home", () => {
     expect(html).toContain("The books");
     expect(html).not.toContain('href="/ada/vault"');
     expect(html).toContain('href="/login"');
-    expect(html).toContain("git clone");
+    expect(html).toContain("irm http://localhost:3000/install.ps1 | iex");
+    expect(html).toContain("curl -fsSL http://localhost:3000/install.sh | sh");
+    expect(html).toContain("nsit auth login");
+    expect(html).toContain("nsit clone owner/name");
+    expect(html).toContain("git clone http://localhost:3000/owner/name.git");
     expect(html).not.toContain("In situ.");
     expect(html).not.toContain("Code that stays where it belongs.");
   });
