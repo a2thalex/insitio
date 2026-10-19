@@ -25,6 +25,7 @@ import { issueBoardRoutes } from "./web/routes/issueBoard.js";
 import { issueRoutes } from "./web/routes/issues.js";
 import { pullBoardRoutes } from "./web/routes/pullBoard.js";
 import { pullRoutes } from "./web/routes/pulls.js";
+import { platformRoutes } from "./web/routes/platform.js";
 import { repoSettingsRoutes } from "./web/routes/repoSettings.js";
 import { userRoutes } from "./web/routes/users.js";
 import { deviceRoutes } from "./web/routes/device.js";
@@ -77,6 +78,7 @@ export function buildApp(deps: Deps): Hono<Env> {
   issueRoutes(deps, app);
   pullBoardRoutes(deps, app);
   pullRoutes(deps, app);
+  platformRoutes(deps, app);
   repoSettingsRoutes(deps, app);
   userRoutes(deps, app);
 

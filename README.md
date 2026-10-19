@@ -287,4 +287,4 @@ The Windows binary is not signed.
 
 ## Not included (yet)
 
-SSH git, Git LFS, Actions, Projects, Wiki, Discussions, gists, packages, and email delivery. The notification inbox, organizations, and teams are on the site. `nsit` covers git and repositories only: issues and pull requests are used in the web UI.
+SSH git, Git LFS, gists, packages, and email delivery. Actions workflows are listed and runs can be recorded; Insitio does not execute them. Wiki, discussions, projects, advisories, and insights are on the site. `nsit` covers git and repositories only: issues and pull requests are used in the web UI.

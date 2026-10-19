@@ -5,7 +5,7 @@ import type { RepoCtx } from "../repoContext.js";
 import { blobUrl, commitUrl, commitsUrl, encPath, repoUrl, treeUrl } from "../paths.js";
 import { Avatar, CsrfField, Octicon, TimeAgo } from "./layout.js";
 
-export type RepoTab = "code" | "issues" | "pulls" | "settings";
+export type RepoTab = "code" | "issues" | "pulls" | "actions" | "projects" | "wiki" | "discussions" | "security" | "insights" | "settings";
 
 export function RepoLayout({ ctx, tab, csrf, signedIn, children }: { ctx: RepoCtx; tab: RepoTab; csrf: string; signedIn: boolean; children: Child }) {
   const { repo, counts } = ctx;
@@ -58,6 +58,12 @@ export function RepoLayout({ ctx, tab, csrf, signedIn, children }: { ctx: RepoCt
             {item("code", base, "code", "Code")}
             {repo.issuesEnabled && item("issues", `${base}/issues`, "issue-opened", "Issues", counts.issues)}
             {repo.pullsEnabled && item("pulls", `${base}/pulls`, "git-pull-request", "Pull requests", counts.pulls)}
+            {item("actions", `${base}/actions`, "play", "Actions")}
+            {item("projects", `${base}/projects`, "project", "Projects")}
+            {item("wiki", `${base}/wiki`, "book", "Wiki")}
+            {item("discussions", `${base}/discussions`, "comment-discussion", "Discussions")}
+            {item("security", `${base}/security`, "shield", "Security")}
+            {item("insights", `${base}/insights`, "graph", "Insights")}
             {ctx.access === "admin" && item("settings", `${base}/settings`, "gear", "Settings")}
           </div>
         </nav>

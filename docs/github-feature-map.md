@@ -40,11 +40,11 @@ repository tabs, repository settings, user settings and Insights navigation.
 ## Repository: other tabs
 | GitHub tab | Insitio |
 |---|---|
-| Actions (CI workflows, runners, logs, status checks) | ✗ |
-| Projects (boards) | ✗ |
-| Wiki, Discussions | ✗ |
-| Security and quality (advisories, secret scanning, Dependabot) | ✗ |
-| Insights (pulse, contributors, traffic, commit activity, network, forks) | ✗ |
+| Actions (CI workflows, runners, logs, status checks) | ◐ (workflow files and recorded runs; workflows are not executed) |
+| Projects (boards) | ✓ |
+| Wiki, Discussions | ✓ |
+| Security and quality (advisories, secret scanning, Dependabot) | ◐ (advisories and an on-demand secret scan; no Dependabot) |
+| Insights (pulse, contributors, traffic, commit activity, network, forks) | ◐ (contributors, recent commits, stars, forks; page views are not recorded) |
 | Agents (Copilot coding agent) | ✗ |
 
 ## Repository settings

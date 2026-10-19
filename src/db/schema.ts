@@ -454,6 +454,76 @@ const MIGRATIONS = [
   );
   create index notifications_user on notifications (user_id, id);
   `,
+  // Repository tabs: wiki, discussions, projects, advisories, and recorded action runs.
+  `
+  create table wiki_pages (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    slug text not null,
+    title text not null,
+    body text not null,
+    updated_by integer references users(id) on delete set null,
+    updated_at integer not null,
+    unique (repo_id, slug)
+  );
+  create table discussions (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    number integer not null,
+    author_id integer not null references users(id),
+    category text not null check (category in ('general', 'ideas', 'q-and-a')),
+    title text not null,
+    body text not null,
+    state text not null default 'open' check (state in ('open', 'closed')),
+    created_at integer not null,
+    unique (repo_id, number)
+  );
+  create table discussion_comments (
+    id integer primary key,
+    discussion_id integer not null references discussions(id) on delete cascade,
+    author_id integer not null references users(id),
+    body text not null,
+    created_at integer not null
+  );
+  create table projects (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    name text not null,
+    created_at integer not null
+  );
+  create table project_columns (
+    id integer primary key,
+    project_id integer not null references projects(id) on delete cascade,
+    name text not null,
+    position integer not null
+  );
+  create table project_cards (
+    id integer primary key,
+    column_id integer not null references project_columns(id) on delete cascade,
+    title text not null,
+    issue_number integer,
+    position integer not null
+  );
+  create table advisories (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    title text not null,
+    severity text not null check (severity in ('low', 'medium', 'high', 'critical')),
+    summary text not null,
+    published integer not null default 0 check (published in (0, 1)),
+    created_by integer references users(id) on delete set null,
+    created_at integer not null
+  );
+  create table action_runs (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    name text not null,
+    head_sha text not null,
+    status text not null check (status in ('queued', 'in_progress', 'completed')),
+    conclusion text check (conclusion in ('success', 'failure', 'cancelled')),
+    created_at integer not null
+  );
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {
