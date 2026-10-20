@@ -293,7 +293,83 @@ a { color: var(--ins-link); }
   min-height: calc(100vh - 140px);
 }
 
-/* Public home: a name and a shelf of repositories, not a centered poster. */
+/* Public home: a full-width introduction, three shelves, then install. */
+.home {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 48px 32px 24px;
+}
+.home-hero {
+  display: flex;
+  gap: 28px;
+  align-items: flex-start;
+  padding: 28px 32px;
+  background: var(--ins-surface);
+  border: 1px solid var(--ins-border);
+  border-radius: 16px;
+}
+.home-hero h1 {
+  font-size: 64px;
+  line-height: 0.9;
+  margin: 0 0 12px;
+}
+.home-hero .lede {
+  font-size: 18px;
+  line-height: 1.45;
+  max-width: 36em;
+  margin: 0 0 18px;
+  color: var(--ins-fg-2);
+}
+.home-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.home-facts {
+  list-style: none;
+  margin: 20px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.home-facts li {
+  margin: 0;
+  padding: 16px 18px;
+  background: var(--ins-inset);
+  border-radius: 12px;
+  color: var(--ins-fg-2);
+  font-size: 15px;
+  line-height: 1.4;
+}
+.home-facts strong { color: var(--ins-fg); font-weight: 600; }
+.home-board {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+.home-board section {
+  min-height: 180px;
+  padding: 16px;
+  background: var(--ins-surface);
+  border: 1px solid var(--ins-border);
+  border-radius: 12px;
+}
+.home-board h2, .home-links {
+  font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ins-fg-muted);
+}
+.home-board h2 { margin: 0 0 12px; }
+.home-links { letter-spacing: 0.04em; }
+.home-links a { letter-spacing: 0; text-transform: none; font-size: 14px; }
+@media (max-width: 900px) {
+  .home { padding: 28px 16px 8px; }
+  .home-hero { flex-direction: column; padding: 22px 18px; }
+  .home-hero h1 { font-size: 48px; }
+  .home-facts, .home-board { grid-template-columns: 1fr; }
+}
+
 .gate {
   display: grid;
   grid-template-columns: minmax(260px, 380px) minmax(0, 1fr);

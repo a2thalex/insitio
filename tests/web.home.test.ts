@@ -15,6 +15,10 @@ describe("public home", () => {
     await createRepo(t.deps, ada, { name: "vault", description: "Hidden", isPrivate: true, initReadme: false });
     const html = await (await t.get("/")).text();
     expect(html).toContain("Public repositories");
+    expect(html).toContain("Public issues");
+    expect(html).toContain("Gists");
+    expect(html).toContain("Invite only");
+    expect(html).toContain('href="/explore"');
     expect(html).toContain('href="/ada/ledger"');
     expect(html).toContain("The books");
     expect(html).not.toContain('href="/ada/vault"');

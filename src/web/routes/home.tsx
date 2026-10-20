@@ -45,26 +45,56 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
     const user = c.get("user");
     if (!user) {
       const recent = listAllVisible(deps.db, null, 8);
+      const found = explorePublic(deps.db);
       return render(
         c,
         "",
         <>
-        <div class="gate">
-          <div class="gate-intro">
-            <InsitioMark size={40} />
-            <h1>Insitio</h1>
-            <p class="lede">A private git host. Repositories stay on this server, and only the people you invite can get in.</p>
-            <a class="btn btn-primary btn-large" href="/login">Sign in</a>
-            <p class="gate-note">Accounts start from an invite link. There is no open sign-up. <a href="#install">Install directions</a> are below.</p>
+        <div class="home">
+          <div class="home-hero">
+            <InsitioMark size={48} />
+            <div>
+              <h1>Insitio</h1>
+              <p class="lede">A private git host. Repositories stay on this server, and only the people you invite can get in.</p>
+              <div class="home-actions">
+                <a class="btn btn-primary btn-large" href="/login">Sign in</a>
+                <a class="btn btn-large" href="/explore">Explore</a>
+              </div>
+              <p class="gate-note">Accounts start from an invite link. There is no open sign-up. <a href="#install">Install directions</a> are below.</p>
+            </div>
           </div>
-          <section class="gate-shelf" aria-label="Public repositories">
-            <h2>Public repositories</h2>
-            {recent.length === 0 ? (
-              <p class="color-fg-muted">Nothing on this server is public yet.</p>
-            ) : (
-              <div class="Box">{recent.map((repo) => <RepoListItem repo={repo} showOwner />)}</div>
-            )}
-          </section>
+          <ul class="home-facts">
+            <li><strong>Private by default.</strong> A repository stays hidden until you make it public.</li>
+            <li><strong>Invite only.</strong> There is no open sign-up on this server.</li>
+            <li><strong>Code, issues, and reviews.</strong> Pull requests, wiki pages, discussions, and project boards live on each repository.</li>
+            <li><strong>Your tools.</strong> Use git, or install <a href="#install">nsit</a> and run <code class="text-mono">nsit auth login</code>.</li>
+          </ul>
+          <div class="home-board">
+            <section aria-label="Public repositories">
+              <h2>Public repositories</h2>
+              {recent.length === 0 ? (
+                <p class="color-fg-muted">Nothing on this server is public yet.</p>
+              ) : (
+                <div class="Box">{recent.map((repo) => <RepoListItem repo={repo} showOwner />)}</div>
+              )}
+            </section>
+            <section aria-label="Public issues">
+              <h2>Public issues</h2>
+              {found.issues.length === 0 ? (
+                <p class="color-fg-muted">No public issues yet.</p>
+              ) : (
+                <div class="Box">{found.issues.slice(0, 8).map((issue) => <a class="Box-row d-block" href={`/${issue.owner}/${issue.name}/issues/${issue.number}`}>{issue.owner}/{issue.name}#{issue.number} {issue.title}</a>)}</div>
+              )}
+            </section>
+            <section aria-label="Public gists">
+              <h2>Gists</h2>
+              {found.gists.length === 0 ? (
+                <p class="color-fg-muted">No public gists yet. <a href="/gists">Open gists</a>.</p>
+              ) : (
+                <div class="Box">{found.gists.slice(0, 8).map((gist) => <a class="Box-row d-block" href={`/gists/${gist.id}`}>{gist.description || gist.id}</a>)}</div>
+              )}
+            </section>
+          </div>
         </div>
         <section class="install" id="install" aria-label="Install">
           <h2>Install</h2>
@@ -80,7 +110,9 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
     return render(
       c,
       "Dashboard",
-      <div class="container-xl p-responsive py-4 d-md-flex">
+      <div class="container-xl p-responsive py-4">
+        <p class="home-links mb-3"><a href="/explore">Explore</a> · <a href="/gists">Gists</a> · <a href="/notifications">Notifications</a> · <a href="/download">Install nsit</a></p>
+        <div class="d-md-flex">
         <aside class="col-md-4 col-lg-3 pr-md-4 mb-4" aria-label="Your repositories">
           <div class="d-flex flex-items-center flex-justify-between mb-2">
             <h2 class="f5">Top repositories</h2>
@@ -125,6 +157,7 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
             </div>
           )}
         </section>
+        </div>
       </div>,
     );
   });
