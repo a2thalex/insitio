@@ -293,7 +293,103 @@ a { color: var(--ins-link); }
   min-height: calc(100vh - 140px);
 }
 
-/* Public home: a name and a shelf of repositories, not a centered poster. */
+/* Public home: introduction beside the facts, then a repository column and a rail. */
+.home {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 28px 32px 8px;
+}
+.home-mast {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.85fr);
+  gap: 28px;
+  align-items: start;
+}
+.home-intro .insitio-mark { display: block; margin-bottom: 10px; }
+.home-intro .gate-note { max-width: 46em; }
+.home-intro h1 {
+  font-size: 44px;
+  line-height: 0.95;
+  margin: 0 0 10px;
+}
+.home-intro .lede {
+  font-size: 17px;
+  line-height: 1.45;
+  max-width: 38em;
+  margin: 0 0 16px;
+  color: var(--ins-fg-2);
+}
+.home-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.home-facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.home-facts li {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--ins-surface);
+  border: 1px solid var(--ins-border);
+  border-radius: 12px;
+  color: var(--ins-fg-2);
+  font-size: 14px;
+  line-height: 1.4;
+}
+.home-facts strong { color: var(--ins-fg); font-weight: 600; }
+.home-index {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(260px, 0.9fr);
+  gap: 28px 24px;
+  margin-top: 32px;
+  align-items: start;
+}
+.home-rail { display: flex; flex-direction: column; gap: 22px; }
+.home-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 10px;
+}
+.home-head h2 {
+  font-size: 22px;
+  margin: 0;
+}
+.home-head a { font-size: 13px; white-space: nowrap; }
+.home-empty {
+  padding: 14px 16px;
+  background: var(--ins-surface);
+  border: 1px solid var(--ins-border);
+  border-radius: 12px;
+  color: var(--ins-fg-2);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.home-empty p { margin: 0 0 8px; }
+.home-empty p:last-child { margin: 0; }
+.home-clone {
+  margin-top: 16px;
+  padding: 14px 16px;
+  background: var(--ins-inset);
+  border-radius: 12px;
+}
+.home-clone h2 {
+  font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+  margin: 0 0 8px;
+}
+.home-clone p { margin: 0 0 6px; font-size: 13px; overflow-x: auto; }
+.home-links { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 900px) {
+  .home { padding: 20px 16px 8px; }
+  .home-mast, .home-index { grid-template-columns: 1fr; }
+  .home-intro h1 { font-size: 36px; }
+}
+
 .gate {
   display: grid;
   grid-template-columns: minmax(260px, 380px) minmax(0, 1fr);

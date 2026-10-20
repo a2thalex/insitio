@@ -73,7 +73,12 @@ export function recentViews(db: DatabaseSync, repoId: number): { day: string; vi
   }));
 }
 
-export function explorePublic(db: DatabaseSync): { repos: { owner: string; name: string; description: string }[]; issues: { owner: string; name: string; number: number; title: string }[]; gists: { id: string; owner: string; description: string }[] } {
+export function explorePublic(db: DatabaseSync): {
+  repos: { owner: string; name: string; description: string }[];
+  issues: { owner: string; name: string; number: number; title: string }[];
+  gists: { id: string; owner: string; description: string }[];
+  discussions: { owner: string; name: string; number: number; title: string; category: string }[];
+} {
   const repos = (db.prepare(
     `select u.username as owner, r.name, r.description from repos r join users u on u.id = r.owner_id
      where r.is_private = 0 order by r.id desc limit 20`,
@@ -81,11 +86,22 @@ export function explorePublic(db: DatabaseSync): { repos: { owner: string; name:
   const issues = (db.prepare(
     `select u.username as owner, r.name, i.number, i.title from issues i
      join repos r on r.id = i.repo_id join users u on u.id = r.owner_id
-     where r.is_private = 0 and i.is_pull = 0 order by i.id desc limit 20`,
+     where r.is_private = 0 and r.issues_enabled = 1 and i.is_pull = 0 order by i.id desc limit 20`,
   ).all() as Row[]).map((row) => ({ owner: row.owner, name: row.name, number: row.number, title: row.title }));
   const gists = (db.prepare(
     `select g.id, u.username as owner, g.description from gists g join users u on u.id = g.owner_id
      where g.secret = 0 order by g.updated_at desc limit 20`,
   ).all() as Row[]).map((row) => ({ id: row.id, owner: row.owner, description: row.description }));
-  return { repos, issues, gists };
+  const discussions = (db.prepare(
+    `select u.username as owner, r.name, d.number, d.title, d.category from discussions d
+     join repos r on r.id = d.repo_id join users u on u.id = r.owner_id
+     where r.is_private = 0 order by d.id desc limit 20`,
+  ).all() as Row[]).map((row) => ({
+    owner: row.owner,
+    name: row.name,
+    number: row.number,
+    title: row.title,
+    category: row.category,
+  }));
+  return { repos, issues, gists, discussions };
 }
