@@ -25,6 +25,18 @@ function RepoLink({ repo }: { repo: RepoRow }) {
   );
 }
 
+function Shelf({ title, href, link, children }: { title: string; href?: string; link?: string; children?: any }) {
+  return (
+    <section aria-label={title}>
+      <div class="home-head">
+        <h2>{title}</h2>
+        {href && link ? <a href={href}>{link}</a> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
 export function homeRoutes(deps: Deps, app: Hono<Env>) {
   app.get("/explore", (c) => {
     const found = explorePublic(deps.db);
@@ -36,7 +48,9 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
         <h2 class="f4">Issues</h2>
         <div class="Box mb-4">{found.issues.map((issue) => <a class="Box-row d-block" href={`/${issue.owner}/${issue.name}/issues/${issue.number}`}>{issue.owner}/{issue.name}#{issue.number} {issue.title}</a>)}</div>
         <h2 class="f4">Gists</h2>
-        <div class="Box">{found.gists.map((gist) => <a class="Box-row d-block" href={`/gists/${gist.id}`}>{gist.description || gist.id} <span class="color-fg-muted">{gist.owner}</span></a>)}</div>
+        <div class="Box mb-4">{found.gists.map((gist) => <a class="Box-row d-block" href={`/gists/${gist.id}`}>{gist.description || gist.id} <span class="color-fg-muted">{gist.owner}</span></a>)}</div>
+        <h2 class="f4" id="discussions">Discussions</h2>
+        <div class="Box">{found.discussions.map((thread) => <a class="Box-row d-block" href={`/${thread.owner}/${thread.name}/discussions/${thread.number}`}>{thread.owner}/{thread.name}#{thread.number} {thread.title}</a>)}</div>
       </div>
     ));
   });
@@ -51,9 +65,9 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
         "",
         <>
         <div class="home">
-          <div class="home-hero">
-            <InsitioMark size={48} />
-            <div>
+          <div class="home-mast">
+            <div class="home-intro">
+              <InsitioMark size={36} />
               <h1>Insitio</h1>
               <p class="lede">A private git host. Repositories stay on this server, and only the people you invite can get in.</p>
               <div class="home-actions">
@@ -62,38 +76,72 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
               </div>
               <p class="gate-note">Accounts start from an invite link. There is no open sign-up. <a href="#install">Install directions</a> are below.</p>
             </div>
+            <ul class="home-facts">
+              <li><strong>Public or private.</strong> A new repository is public unless you choose private. A private one stays hidden.</li>
+              <li><strong>Invite only.</strong> There is no open sign-up on this server.</li>
+              <li><strong>Code, issues, and reviews.</strong> Pull requests, wiki pages, discussions, and project boards live on each repository.</li>
+              <li><strong>Your tools.</strong> Use git, or install <a href="#install">nsit</a> and run <code class="text-mono">nsit auth login</code>.</li>
+            </ul>
           </div>
-          <ul class="home-facts">
-            <li><strong>Private by default.</strong> A repository stays hidden until you make it public.</li>
-            <li><strong>Invite only.</strong> There is no open sign-up on this server.</li>
-            <li><strong>Code, issues, and reviews.</strong> Pull requests, wiki pages, discussions, and project boards live on each repository.</li>
-            <li><strong>Your tools.</strong> Use git, or install <a href="#install">nsit</a> and run <code class="text-mono">nsit auth login</code>.</li>
-          </ul>
-          <div class="home-board">
-            <section aria-label="Public repositories">
-              <h2>Public repositories</h2>
-              {recent.length === 0 ? (
-                <p class="color-fg-muted">Nothing on this server is public yet.</p>
-              ) : (
-                <div class="Box">{recent.map((repo) => <RepoListItem repo={repo} showOwner />)}</div>
+          <div class="home-index">
+            <div>
+              <Shelf title="Public repositories" href="/explore" link="See all">
+                {recent.length === 0 ? (
+                  <div class="home-empty">
+                    <p>Nothing on this server is public yet.</p>
+                    <p>After you sign in, a new repository is public unless you choose private. Private repositories stay off this page.</p>
+                  </div>
+                ) : (
+                  <div class="Box">{recent.map((repo) => <RepoListItem repo={repo} showOwner />)}</div>
+                )}
+              </Shelf>
+              {recent.length > 0 && (
+                <div class="home-clone">
+                  <h2>Clone</h2>
+                  {recent.slice(0, 4).map((repo) => (
+                    <p><code class="text-mono">git clone {deps.config.baseUrl}/{repo.owner}/{repo.name}.git</code></p>
+                  ))}
+                </div>
               )}
-            </section>
-            <section aria-label="Public issues">
-              <h2>Public issues</h2>
-              {found.issues.length === 0 ? (
-                <p class="color-fg-muted">No public issues yet.</p>
-              ) : (
-                <div class="Box">{found.issues.slice(0, 8).map((issue) => <a class="Box-row d-block" href={`/${issue.owner}/${issue.name}/issues/${issue.number}`}>{issue.owner}/{issue.name}#{issue.number} {issue.title}</a>)}</div>
-              )}
-            </section>
-            <section aria-label="Public gists">
-              <h2>Gists</h2>
-              {found.gists.length === 0 ? (
-                <p class="color-fg-muted">No public gists yet. <a href="/gists">Open gists</a>.</p>
-              ) : (
-                <div class="Box">{found.gists.slice(0, 8).map((gist) => <a class="Box-row d-block" href={`/gists/${gist.id}`}>{gist.description || gist.id}</a>)}</div>
-              )}
-            </section>
+            </div>
+            <div class="home-rail">
+              <Shelf title="Public issues" href="/explore" link="See all">
+                {found.issues.length === 0 ? (
+                  <div class="home-empty"><p>No public issues yet.</p></div>
+                ) : (
+                  <div class="Box">{found.issues.slice(0, 8).map((issue) => (
+                    <a class="Box-row d-block" href={`/${issue.owner}/${issue.name}/issues/${issue.number}`}>
+                      <span class="text-bold">{issue.title}</span>
+                      <span class="d-block f6 color-fg-muted">{issue.owner}/{issue.name}#{issue.number}</span>
+                    </a>
+                  ))}</div>
+                )}
+              </Shelf>
+              <Shelf title="Gists" href="/gists" link="Open gists">
+                {found.gists.length === 0 ? (
+                  <div class="home-empty"><p>No public gists yet.</p></div>
+                ) : (
+                  <div class="Box">{found.gists.slice(0, 8).map((gist) => (
+                    <a class="Box-row d-block" href={`/gists/${gist.id}`}>
+                      <span class="text-bold">{gist.description || gist.id}</span>
+                      <span class="d-block f6 color-fg-muted">{gist.owner}</span>
+                    </a>
+                  ))}</div>
+                )}
+              </Shelf>
+              <Shelf title="Discussions" href="/explore#discussions" link="See all">
+                {found.discussions.length === 0 ? (
+                  <div class="home-empty"><p>No public discussions yet.</p></div>
+                ) : (
+                  <div class="Box">{found.discussions.slice(0, 8).map((thread) => (
+                    <a class="Box-row d-block" href={`/${thread.owner}/${thread.name}/discussions/${thread.number}`}>
+                      <span class="text-bold">{thread.title}</span>
+                      <span class="d-block f6 color-fg-muted">{thread.owner}/{thread.name}, {thread.category}</span>
+                    </a>
+                  ))}</div>
+                )}
+              </Shelf>
+            </div>
           </div>
         </div>
         <section class="install" id="install" aria-label="Install">
@@ -107,11 +155,18 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
     const starred = listStarred(deps.db, user.id, user);
     const byId = new Map(mine.map((r) => [r.id, r]));
     const activity = recentOpenIssues(deps.db, mine.map((r) => r.id));
+    const others = listAllVisible(deps.db, user, 12).filter((repo) => !byId.has(repo.id));
     return render(
       c,
       "Dashboard",
       <div class="container-xl p-responsive py-4">
-        <p class="home-links mb-3"><a href="/explore">Explore</a> · <a href="/gists">Gists</a> · <a href="/notifications">Notifications</a> · <a href="/download">Install nsit</a></p>
+        <div class="home-links mb-4">
+          <a class="btn btn-sm btn-primary" href="/new">New repository</a>
+          <a class="btn btn-sm" href="/explore">Explore</a>
+          <a class="btn btn-sm" href="/gists">Gists</a>
+          <a class="btn btn-sm" href="/notifications">Notifications</a>
+          <a class="btn btn-sm" href="/download">Install nsit</a>
+        </div>
         <div class="d-md-flex">
         <aside class="col-md-4 col-lg-3 pr-md-4 mb-4" aria-label="Your repositories">
           <div class="d-flex flex-items-center flex-justify-between mb-2">
@@ -130,7 +185,8 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
             </>
           )}
         </aside>
-        <section class="flex-auto" aria-label="Recent activity">
+        <div class="flex-auto">
+        <section aria-label="Recent activity">
           <h2 class="f4 text-normal mb-3">Open issues and pull requests in your repositories</h2>
           {activity.length === 0 ? (
             <div class="blankslate Box">
@@ -157,6 +213,34 @@ export function homeRoutes(deps: Deps, app: Hono<Env>) {
             </div>
           )}
         </section>
+        {mine.length > 0 && (
+          <section class="mt-4" aria-label="Your repositories">
+            <h2 class="f4 text-normal mb-2">Your repositories</h2>
+            <div class="Box">{mine.slice(0, 6).map((repo) => <RepoListItem repo={repo} showOwner />)}</div>
+          </section>
+        )}
+        {others.length > 0 && (
+          <section class="mt-4" aria-label="On this server">
+            <h2 class="f4 text-normal mb-2">On this server</h2>
+            <div class="Box">{others.slice(0, 6).map((repo) => <RepoListItem repo={repo} showOwner />)}</div>
+          </section>
+        )}
+        {mine.length === 0 && (
+          <div class="Box mt-3">
+            <div class="Box-row">
+              <a class="text-bold" href="/new">Create a repository</a>
+              <p class="mb-0 color-fg-muted">A new repository is public unless you choose private.</p>
+            </div>
+            <div class="Box-row">
+              <a class="text-bold" href="/download">Install nsit</a>
+              <p class="mb-0 color-fg-muted">Then run <code class="text-mono">nsit auth login</code> and <code class="text-mono">nsit repo create name</code>.</p>
+            </div>
+            <div class="Box-row">
+              <a class="text-bold" href="/explore">See what is already public</a>
+            </div>
+          </div>
+        )}
+        </div>
         </div>
       </div>,
     );
