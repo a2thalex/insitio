@@ -4,7 +4,7 @@ import { assertCommitPath } from "../../git/paths.js";
 import type { Deps } from "../../deps.js";
 import { GitError } from "../../git/run.js";
 import { MergeConflictError, RefMovedError } from "../../git/repo.js";
-import { listBranchRules } from "../../services/repoAdmin.js";
+import { listBranchRules, ruleForBranch } from "../../services/repoAdmin.js";
 import { ValidationError } from "../../services/errors.js";
 import { assertCanTalk } from "../../services/issueExtras.js";
 import { can } from "../../services/permissions.js";
@@ -174,7 +174,7 @@ export function pullBoardRoutes(deps: Deps, app: Hono<Env>) {
     const pull = pullOf(c, ctx);
     if (!pull) return notFound(c);
     if (pull.mergedAt) return renderError(c, 409, "This pull request was merged.");
-    if (listBranchRules(deps.db, ctx.repo.id).some((rule) => rule.branch === pull.headRef) && ctx.access !== "admin") {
+    if (ruleForBranch(listBranchRules(deps.db, ctx.repo.id), pull.headRef)?.requirePr && ctx.access !== "admin") {
       return renderError(c, 403, "This branch is protected.");
     }
     const comment = getLineComment(deps.db, pull.id, Number(c.req.param("id")));

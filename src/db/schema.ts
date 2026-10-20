@@ -547,6 +547,32 @@ const MIGRATIONS = [
     primary key (gist_id, name)
   );
   `,
+  // Pattern branch rules, environments, and real page-load counts.
+  `
+  alter table branch_rules add column block_force integer not null default 1;
+  alter table branch_rules add column block_delete integer not null default 1;
+  create table environments (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    name text not null,
+    url text not null default '',
+    unique (repo_id, name)
+  );
+  create table deployments (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    environment_id integer not null references environments(id) on delete cascade,
+    sha text not null,
+    description text not null default '',
+    created_at integer not null
+  );
+  create table repo_views (
+    repo_id integer not null references repos(id) on delete cascade,
+    day text not null,
+    views integer not null default 0,
+    primary key (repo_id, day)
+  );
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

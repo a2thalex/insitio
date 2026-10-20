@@ -8,7 +8,7 @@ import { GIT_ENV } from "../git/run.js";
 import { repoDir, reposRoot } from "../git/storage.js";
 import { scanPushedCommits } from "../services/issueExtras.js";
 import { accessLevel, can, type Access } from "../services/permissions.js";
-import { deployKeyAccess, deliverWebhooks, protectedRefList } from "../services/repoAdmin.js";
+import { deployKeyAccess, deliverWebhooks, noDeleteRefList, noForceRefList, protectedRefList } from "../services/repoAdmin.js";
 import { getRepo, setDefaultBranch, type RepoRow } from "../services/repos.js";
 import { userForAccessToken, type User } from "../services/users.js";
 
@@ -139,6 +139,8 @@ export async function handleGitHttp(req: IncomingMessage, res: ServerResponse, d
     REMOTE_USER: user?.username ?? "",
     INSITIO_PUSH_ADMIN: access === "admin" ? "1" : "0",
     INSITIO_PROTECTED_REFS: protectedRefList(deps.db, repo.id),
+    INSITIO_NO_FORCE: noForceRefList(deps.db, repo.id),
+    INSITIO_NO_DELETE: noDeleteRefList(deps.db, repo.id),
     REMOTE_ADDR: clientAddress(req.socket.remoteAddress, req.headers["x-forwarded-for"] as string | undefined, deps.config.trustedProxies),
   };
   if (req.headers["content-length"]) env.CONTENT_LENGTH = String(req.headers["content-length"]);

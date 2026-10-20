@@ -44,7 +44,7 @@ repository tabs, repository settings, user settings and Insights navigation.
 | Projects (boards) | ✓ |
 | Wiki, Discussions | ✓ |
 | Security and quality (advisories, secret scanning, Dependabot) | ◐ (advisories and an on-demand secret scan; no Dependabot) |
-| Insights (pulse, contributors, traffic, commit activity, network, forks) | ◐ (contributors, recent commits, stars, forks; page views are not recorded) |
+| Insights (pulse, contributors, traffic, commit activity, network, forks) | ◐ (contributors, commits, stars, forks, and real page loads; not unique visitors) |
 | Agents (Copilot coding agent) | ✗ |
 
 ## Repository settings
@@ -53,10 +53,10 @@ repository tabs, repository settings, user settings and Insights navigation.
 | General: description, visibility, default branch, delete | ✓ |
 | General: rename, transfer, archive, feature toggles, merge-button options | ✓ |
 | Collaborators | ✓ (read/write/admin) |
-| Branches / rulesets (protection) | ◐ (exact branch, require a pull request, approving reviews) |
+| Branches / rulesets (protection) | ✓ (exact or prefix, pull request, approvals, block force-push and deletion) |
 | Webhooks | ✓ |
 | Deploy keys | ✓ (repo-scoped git HTTP tokens, not SSH) |
-| Environments, Pages, Codespaces, Actions/Agents settings, GitHub Apps | ✗ |
+| Environments, Pages, Codespaces, Actions/Agents settings, GitHub Apps | ◐ (environments and deployments; Pages, Codespaces, and Apps stay out) |
 
 ## Account (user settings)
 | GitHub section | Insitio |
@@ -73,7 +73,7 @@ repository tabs, repository settings, user settings and Insights navigation.
 | Dashboard with your repos and open work | ✓ |
 | Repository search | ✓ |
 | Notifications inbox | ✓ (in the site; no mail is sent) |
-| Activity feed, explore/trending | ◐ (recent repos only) |
+| Activity feed, explore/trending | ◐ (`/explore` lists public repositories, issues, and gists) |
 | Global code/issue/user search | ✓ |
 | Organizations and teams | ✓ |
 | Gists, packages, sponsors, marketplace, Codespaces, Pages | ◐ (gists; the rest are out of scope) |

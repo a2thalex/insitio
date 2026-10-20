@@ -23,7 +23,7 @@ const USERNAME_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 // Top-level URL segments a username must not shadow.
 const RESERVED = new Set([
   "login", "logout", "join", "new", "settings", "site-admin", "static", "api", "explore", "search",
-  "dashboard", "notifications", "about", "help", "issues", "pulls", "download", "orgs", "gists",
+  "dashboard", "notifications", "about", "help", "issues", "pulls", "download", "orgs", "gists", "explore",
 ]);
 const SESSION_DAYS = 30;
 const DAY = 86400;

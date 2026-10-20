@@ -13,7 +13,7 @@ import {
   currentReviews, listLineComments, listPullTemplates, listReviews, listReviewers, listStatuses, unmetChecks,
 } from "../../services/pullExtras.js";
 import { assertNotBlocked, listSavedReplies } from "../../services/account.js";
-import { deliverWebhooks, listBranchRules } from "../../services/repoAdmin.js";
+import { deliverWebhooks, listBranchRules, ruleForBranch } from "../../services/repoAdmin.js";
 import { authorFor } from "../../services/repos.js";
 import { suggestionBlock } from "../../services/suggestions.js";
 import type { Env } from "../env.js";
@@ -603,7 +603,7 @@ export function pullRoutes(deps: Deps, app: Hono<Env>) {
     if (chosen === "merge" && !ctx.repo.allowMerge) return renderError(c, 409, "Merge commits are turned off for this repository.");
     if (chosen === "squash" && !ctx.repo.allowSquash) return renderError(c, 409, "Squash merges are turned off for this repository.");
     if (chosen === "rebase" && !ctx.repo.allowRebase) return renderError(c, 409, "Rebase merges are turned off for this repository.");
-    const rule = listBranchRules(deps.db, ctx.repo.id).find((item) => item.branch === pull.baseRef);
+    const rule = ruleForBranch(listBranchRules(deps.db, ctx.repo.id), pull.baseRef);
     if (rule && rule.approvals > 0) {
       const approvals = currentReviews(listReviews(deps.db, pull.id)).filter((review) => review.state === "approve" && review.userId !== pull.authorId).length;
       if (approvals < rule.approvals) return renderError(c, 409, `This branch requires ${rule.approvals} approving reviews.`);

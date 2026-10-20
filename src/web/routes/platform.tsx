@@ -6,6 +6,7 @@ import { GitError } from "../../git/run.js";
 import type { TreeEntry } from "../../git/repo.js";
 import { assertNotBlocked } from "../../services/account.js";
 import { ValidationError } from "../../services/errors.js";
+import { recentViews } from "../../services/parity.js";
 import { can } from "../../services/permissions.js";
 import {
   addDiscussionComment,
@@ -399,7 +400,9 @@ export function platformRoutes(deps: Deps, app: Hono<Env>) {
     return render(c, "Insights", page(c, ctx, "insights", (
       <>
         <h1 class="f2 text-normal mb-2">Insights</h1>
-        <p class="color-fg-muted">Page views are not recorded.</p>
+        <p class="color-fg-muted">Page loads of this repository, by day. Not unique people.</p>
+        <div class="Box mb-3">{recentViews(deps.db, ctx.repo.id).map((row) => <div class="Box-row">{row.day} <span class="Counter">{row.views}</span></div>)}</div>
+        {recentViews(deps.db, ctx.repo.id).length === 0 && <p class="color-fg-muted">No page loads recorded yet.</p>}
         <p>{ctx.repo.stars} stars · {ctx.forks} forks · {opened} issues opened in seven days · {people.reduce((sum, person) => sum + person.commits, 0) === 0 && commits.length === 0 ? "no commits" : `${people.length} contributors`}</p>
         <h2 class="f4">Contributors</h2>
         {people.length === 0 ? <p class="color-fg-muted">No commits on the default branch.</p> : (

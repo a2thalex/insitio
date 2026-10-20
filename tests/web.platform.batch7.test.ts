@@ -94,7 +94,7 @@ describe("repository tabs", () => {
     expect((t.deps.db.prepare("select column_id from project_cards where id = ?").get(card.id) as { column_id: number }).column_id).toBe(done.id);
 
     const insights = await (await t.get("/ada/hello/insights")).text();
-    expect(insights).toContain("Page views are not recorded.");
+    expect(insights).toContain("Page loads of this repository");
     expect(insights).toContain(authorFor(ada).name);
     expect(repo.stars).toBe(0);
   });

@@ -1,6 +1,7 @@
 import type { Context, Hono } from "hono";
 import type { Deps } from "../../deps.js";
 import { ValidationError } from "../../services/errors.js";
+import { createEnvironment, listEnvironments, recordDeployment } from "../../services/parity.js";
 import { listRequiredChecks, setRequiredChecks } from "../../services/pullExtras.js";
 import {
   addWebhook, createDeployKey, deleteBranchRule, deleteDeployKey, deleteWebhook, listBranchRules, listDeliveries, listDeployKeys, listWebhooks,
@@ -62,6 +63,24 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
           <button class="btn btn-primary" type="submit">Save changes</button>
         </form>
 
+        <div class="Subhead"><h2 class="Subhead-heading">Environments</h2></div>
+        <form method="post" action={`${base}/environments`} class="mb-3 d-flex flex-wrap" style="gap:8px">
+          <CsrfField csrf={csrf} />
+          <input class="form-control" name="name" aria-label="Environment name" placeholder="production" required />
+          <input class="form-control" name="url" aria-label="Environment URL" placeholder="https://example.com" />
+          <button class="btn" type="submit">Add environment</button>
+        </form>
+        <div class="Box mb-3">
+          {listEnvironments(deps.db, ctx.repo.id).map((env) => <div class="Box-row">{env.name}{env.url ? <span class="color-fg-muted ml-2">{env.url}</span> : null}</div>)}
+        </div>
+        <form method="post" action={repoUrl(owner, name, "deployments")} class="mb-6 d-flex flex-wrap" style="gap:8px">
+          <CsrfField csrf={csrf} />
+          <input class="form-control" name="environment" aria-label="Environment" placeholder="production" required />
+          <input class="form-control" name="sha" aria-label="Commit" placeholder="Commit" required />
+          <input class="form-control" name="description" aria-label="Description" placeholder="What shipped" />
+          <button class="btn" type="submit">Record deployment</button>
+        </form>
+
         <div class="Subhead"><h2 class="Subhead-heading">Collaborators</h2></div>
         <div class="Box mb-3">
           {collaborators.length === 0 && <div class="Box-row color-fg-muted">Only you can push to this repository.</div>}
@@ -107,13 +126,15 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
           <CsrfField csrf={csrf} />
           <input class="form-control" name="branch" placeholder="Branch" aria-label="Branch" required />
           <label class="d-flex flex-items-center"><input type="checkbox" name="require_pr" value="1" class="mr-1" />Require a pull request</label>
+          <label class="d-flex flex-items-center"><input type="checkbox" name="block_force" value="1" checked class="mr-1" />Block force-push</label>
+          <label class="d-flex flex-items-center"><input type="checkbox" name="block_delete" value="1" checked class="mr-1" />Block deletion</label>
           <input class="form-control" name="approvals" type="number" min="0" max="6" value="0" aria-label="Approving reviews" style="width:80px" />
           <button class="btn" type="submit">Save rule</button>
         </form>
         <div class="Box mb-6">
           {listBranchRules(deps.db, ctx.repo.id).map((rule) => (
             <div class="Box-row d-flex flex-items-center">
-              <span class="flex-auto">{rule.branch}{rule.requirePr ? " · pull request required" : ""} · {rule.approvals} approvals</span>
+              <span class="flex-auto">{rule.branch}{rule.requirePr ? " · pull request required" : ""} · {rule.approvals} approvals{rule.blockForce ? " · no force-push" : ""}{rule.blockDelete ? " · no delete" : ""}</span>
               <form method="post" action={`${base}/protection/delete`}>
                 <CsrfField csrf={csrf} />
                 <input type="hidden" name="branch" value={rule.branch} />
@@ -269,8 +290,42 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
 
   app.post(`${R}/settings/protection`, withRepo(deps, "admin", async (c, ctx) => {
     const f = await form(c);
-    saveBranchRule(deps.db, ctx.repo.id, { branch: field(f, "branch"), requirePr: field(f, "require_pr") === "1", approvals: Number(field(f, "approvals") || "0") });
+    saveBranchRule(deps.db, ctx.repo.id, {
+      branch: field(f, "branch"),
+      requirePr: field(f, "require_pr") === "1",
+      approvals: Number(field(f, "approvals") || "0"),
+      blockForce: field(f, "block_force") === "1",
+      blockDelete: field(f, "block_delete") === "1",
+    });
     return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/environments`, withRepo(deps, "admin", async (c, ctx) => {
+    const f = await form(c);
+    createEnvironment(deps.db, ctx.repo.id, field(f, "name"), field(f, "url"));
+    return c.redirect(`${repoUrl(ctx.repo.owner, ctx.repo.name, "settings")}?saved=1`);
+  }));
+
+  app.post(`${R}/deployments`, withRepo(deps, "write", async (c, ctx) => {
+    const f = await form(c);
+    const sha = field(f, "sha").trim();
+    const found = await ctx.git.resolve(sha).catch(() => null);
+    if (!found) throw new ValidationError("That commit does not exist in this repository.");
+    recordDeployment(deps.db, ctx.repo.id, field(f, "environment"), found, field(f, "description"));
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "deployments"));
+  }));
+
+  app.get(`${R}/deployments`, withRepo(deps, "read", async (c, ctx) => {
+    const { listDeployments } = await import("../../services/parity.js");
+    const rows = listDeployments(deps.db, ctx.repo.id);
+    return repoPage(c, ctx, "code", "Deployments", (
+      <div>
+        <h1 class="f2 text-normal">Deployments</h1>
+        {rows.length === 0 ? <p class="color-fg-muted">No deployments yet.</p> : rows.map((row) => (
+          <div class="Box-row">{row.environment} <span class="text-mono">{row.sha.slice(0, 7)}</span> {row.description}</div>
+        ))}
+      </div>
+    ));
   }));
 
   app.post(`${R}/settings/protection/delete`, withRepo(deps, "admin", async (c, ctx) => {
