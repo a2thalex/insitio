@@ -7,6 +7,7 @@ import type { Commit, TreeEntry } from "../../git/repo.js";
 import { splitRefAndPath } from "../../git/refs.js";
 import { GitError, assertSafePath } from "../../git/run.js";
 import { repoAnalysis } from "../../services/analyze.js";
+import { recordView } from "../../services/parity.js";
 import { can, type Access } from "../../services/permissions.js";
 import { latestRelease } from "../../services/releases.js";
 import { star, unstar } from "../../services/repos.js";
@@ -240,6 +241,7 @@ export function codeRoutes(deps: Deps, app: Hono<Env>) {
   }
 
   app.get(R, withRepo(deps, "read", async (c, ctx) => {
+    recordView(deps.db, ctx.repo.id);
     if (await ctx.git.isEmpty()) {
       return repoPage(c, ctx, "code", `${ctx.repo.owner}/${ctx.repo.name}`, <EmptyRepo ctx={ctx} cloneUrl={cloneUrl(ctx)} canPush={can(ctx.access, "write")} />);
     }

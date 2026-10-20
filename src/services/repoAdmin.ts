@@ -74,19 +74,33 @@ export function setMergeMethods(db: DatabaseSync, id: number, methods: { merge: 
 
 const BRANCH = /^[A-Za-z0-9._/-]{1,100}$/;
 
-export type BranchRule = { branch: string; requirePr: boolean; approvals: number };
+export type BranchRule = { branch: string; requirePr: boolean; approvals: number; blockForce: boolean; blockDelete: boolean };
 
 export function listBranchRules(db: DatabaseSync, repoId: number): BranchRule[] {
-  return (db.prepare("select branch, require_pr, approvals from branch_rules where repo_id = ? order by branch").all(repoId) as Row[]).map((row) => ({
+  return (db.prepare("select branch, require_pr, approvals, block_force, block_delete from branch_rules where repo_id = ? order by branch").all(repoId) as Row[]).map((row) => ({
     branch: row.branch,
     requirePr: !!row.require_pr,
     approvals: row.approvals,
+    blockForce: row.block_force !== 0,
+    blockDelete: row.block_delete !== 0,
   }));
 }
 
-export function saveBranchRule(db: DatabaseSync, repoId: number, input: { branch: string; requirePr: boolean; approvals: number }): void {
+/** An exact name wins. Otherwise a trailing `*` matches the start of the branch name. */
+export function ruleForBranch(rules: BranchRule[], branch: string): BranchRule | null {
+  const exact = rules.find((rule) => rule.branch === branch);
+  if (exact) return exact;
+  for (const rule of rules) {
+    if (!rule.branch.endsWith("*")) continue;
+    if (branch.startsWith(rule.branch.slice(0, -1))) return rule;
+  }
+  return null;
+}
+
+export function saveBranchRule(db: DatabaseSync, repoId: number, input: { branch: string; requirePr: boolean; approvals: number; blockForce?: boolean; blockDelete?: boolean }): void {
   const branch = input.branch.trim();
-  if (!BRANCH.test(branch) || branch.includes("..") || branch.startsWith("/") || branch.endsWith("/")) {
+  const body = branch.endsWith("*") ? branch.slice(0, -1) : branch;
+  if (!body || !BRANCH.test(body) || branch.includes("..") || (branch.match(/\*/g) ?? []).length > 1) {
     throw new ValidationError("That branch name can't be protected.");
   }
   const approvals = input.approvals;
@@ -94,20 +108,29 @@ export function saveBranchRule(db: DatabaseSync, repoId: number, input: { branch
   const count = (db.prepare("select count(*) as n from branch_rules where repo_id = ? and branch <> ?").get(repoId, branch) as Row).n;
   if (count >= 10) throw new ValidationError("A repository can protect at most 10 branches.");
   db.prepare(
-    `insert into branch_rules (repo_id, branch, require_pr, approvals) values (?, ?, ?, ?)
-     on conflict (repo_id, branch) do update set require_pr = excluded.require_pr, approvals = excluded.approvals`,
-  ).run(repoId, branch, input.requirePr ? 1 : 0, approvals);
+    `insert into branch_rules (repo_id, branch, require_pr, approvals, block_force, block_delete) values (?, ?, ?, ?, ?, ?)
+     on conflict (repo_id, branch) do update set require_pr = excluded.require_pr, approvals = excluded.approvals, block_force = excluded.block_force, block_delete = excluded.block_delete`,
+  ).run(repoId, branch, input.requirePr ? 1 : 0, approvals, input.blockForce === false ? 0 : 1, input.blockDelete === false ? 0 : 1);
 }
 
 export function deleteBranchRule(db: DatabaseSync, repoId: number, branch: string): void {
   db.prepare("delete from branch_rules where repo_id = ? and branch = ?").run(repoId, branch);
 }
 
+function refList(rules: BranchRule[], pick: (rule: BranchRule) => boolean): string {
+  return rules.filter(pick).map((rule) => `refs/heads/${rule.branch}`).join(",");
+}
+
 export function protectedRefList(db: DatabaseSync, repoId: number): string {
-  return listBranchRules(db, repoId)
-    .filter((rule) => rule.requirePr)
-    .map((rule) => `refs/heads/${rule.branch}`)
-    .join(",");
+  return refList(listBranchRules(db, repoId), (rule) => rule.requirePr);
+}
+
+export function noForceRefList(db: DatabaseSync, repoId: number): string {
+  return refList(listBranchRules(db, repoId), (rule) => rule.blockForce && !rule.requirePr);
+}
+
+export function noDeleteRefList(db: DatabaseSync, repoId: number): string {
+  return refList(listBranchRules(db, repoId), (rule) => rule.blockDelete);
 }
 
 export type Webhook = { id: number; url: string; events: string[]; active: boolean; hasSecret: boolean };

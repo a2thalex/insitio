@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import type { Deps } from "../../deps.js";
 import { listNotifications, markNotificationsRead } from "../../services/notifications.js";
+import { explorePublic } from "../../services/parity.js";
 import { listAllVisible, listReposForMember, listStarred, searchRepos, type RepoRow } from "../../services/repos.js";
 import { searchCode, searchIssues, searchUsers } from "../../services/search.js";
 import { recentOpenIssues } from "../../services/issues.js";
@@ -25,6 +26,21 @@ function RepoLink({ repo }: { repo: RepoRow }) {
 }
 
 export function homeRoutes(deps: Deps, app: Hono<Env>) {
+  app.get("/explore", (c) => {
+    const found = explorePublic(deps.db);
+    return render(c, "Explore", (
+      <div class="container-lg p-responsive py-4">
+        <h1 class="f2 text-normal">Explore</h1>
+        <h2 class="f4">Repositories</h2>
+        <div class="Box mb-4">{found.repos.map((repo) => <a class="Box-row d-block" href={`/${repo.owner}/${repo.name}`}>{repo.owner}/{repo.name}</a>)}</div>
+        <h2 class="f4">Issues</h2>
+        <div class="Box mb-4">{found.issues.map((issue) => <a class="Box-row d-block" href={`/${issue.owner}/${issue.name}/issues/${issue.number}`}>{issue.owner}/{issue.name}#{issue.number} {issue.title}</a>)}</div>
+        <h2 class="f4">Gists</h2>
+        <div class="Box">{found.gists.map((gist) => <a class="Box-row d-block" href={`/gists/${gist.id}`}>{gist.description || gist.id} <span class="color-fg-muted">{gist.owner}</span></a>)}</div>
+      </div>
+    ));
+  });
+
   app.get("/", (c) => {
     const user = c.get("user");
     if (!user) {
