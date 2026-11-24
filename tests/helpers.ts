@@ -44,6 +44,7 @@ export function testDeps(overrides: Partial<Config> = {}): Deps {
       gitDrainMaxBytes: DEFAULT_GIT_DRAIN_MAX_BYTES,
       gitDrainIdleMs: DEFAULT_GIT_DRAIN_IDLE_MS,
       webhookAllowLoopback: false,
+      mirrorAllowLoopback: false,
       ...overrides,
     },
   };

@@ -1,11 +1,13 @@
 import { loadConfig } from "./config.js";
 import { openDeps } from "./bootstrap.js";
 import { createInsitioServer } from "./server.js";
+import { startPushMirrorSweep } from "./services/mirrors.js";
 import { countUsers } from "./services/users.js";
 
 const config = loadConfig();
 const deps = openDeps(config);
 const server = createInsitioServer(deps);
+const stopMirrorSweep = startPushMirrorSweep(deps);
 
 server.listen(config.port, config.host, () => {
   const where = config.host ? `${config.host}:${config.port}` : `port ${config.port}`;
@@ -17,6 +19,7 @@ server.listen(config.port, config.host, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    stopMirrorSweep();
     server.close();
     deps.db.close();
     process.exit(0);

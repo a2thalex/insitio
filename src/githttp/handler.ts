@@ -7,6 +7,7 @@ import { Repo } from "../git/repo.js";
 import { GIT_ENV } from "../git/run.js";
 import { repoDir, reposRoot } from "../git/storage.js";
 import { scanPushedCommits } from "../services/issueExtras.js";
+import { syncPushMirrors } from "../services/mirrors.js";
 import { accessLevel, can, type Access } from "../services/permissions.js";
 import { deployKeyAccess, deliverWebhooks, noDeleteRefList, noForceRefList, protectedRefList } from "../services/repoAdmin.js";
 import { getRepo, setDefaultBranch, type RepoRow } from "../services/repos.js";
@@ -207,6 +208,8 @@ export async function handleGitHttp(req: IncomingMessage, res: ServerResponse, d
         const fresh = getRepo(deps.db, repo.owner, repo.name) ?? repo;
         if (user) await scanPushedCommits(deps, fresh, user, new Repo(repoDir(deps.config.dataDir, fresh.owner, fresh.name)), before);
         await deliverWebhooks(deps, fresh, "push", { ref: `refs/heads/${fresh.defaultBranch}`, pusher: user?.username ?? "deploy-key" });
+        // Not awaited: the client gets its answer now, and the mirror push records its own result.
+        void syncPushMirrors(deps, fresh.id);
       } catch (err) {
         console.error("Could not update HEAD after push", err);
       }

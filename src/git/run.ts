@@ -17,6 +17,8 @@ export type RunOptions = {
   maxBytes?: number;
   /** Exit codes treated as success. */
   okCodes?: number[];
+  /** Kill git after this many ms; the run then fails with code null. */
+  timeoutMs?: number;
 };
 
 export const GIT_ENV: Record<string, string> = {
@@ -38,6 +40,7 @@ export function runGit(
       cwd,
       env: { ...process.env, ...GIT_ENV, ...opts.env },
       windowsHide: true,
+      timeout: opts.timeoutMs,
     });
     const chunks: Buffer[] = [];
     let size = 0;

@@ -573,6 +573,21 @@ const MIGRATIONS = [
     primary key (repo_id, day)
   );
   `,
+  // Push mirrors: every branch and tag is pushed to another forge after each change.
+  `
+  create table push_mirrors (
+    id integer primary key,
+    repo_id integer not null references repos(id) on delete cascade,
+    url text not null,
+    username text not null,
+    token text not null,
+    created_at integer not null,
+    last_attempt_at integer,
+    last_synced_at integer,
+    last_error text not null default '',
+    last_refs text not null default ''
+  );
+  `,
 ];
 
 export function migrate(db: DatabaseSync): void {

@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import type { Deps } from "../../deps.js";
 import { ValidationError } from "../../services/errors.js";
 import { createEnvironment, listEnvironments, recordDeployment } from "../../services/parity.js";
+import { addPushMirror, deletePushMirror, listPushMirrors, syncPushMirror } from "../../services/mirrors.js";
 import { listRequiredChecks, setRequiredChecks } from "../../services/pullExtras.js";
 import {
   addWebhook, createDeployKey, deleteBranchRule, deleteDeployKey, deleteWebhook, listBranchRules, listDeliveries, listDeployKeys, listWebhooks,
@@ -16,6 +17,7 @@ import { field, fields, form } from "../middleware.js";
 import { repoUrl } from "../paths.js";
 import type { RepoCtx } from "../repoContext.js";
 import { Avatar, CsrfField, Flash, Octicon } from "../views/layout.js";
+import { timeAgo } from "../format.js";
 import { repoPage, withRepo } from "./code.js";
 
 const ROLES: Collaborator["role"][] = ["read", "write", "admin"];
@@ -169,6 +171,40 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
           ))}
         </div>
 
+        <div class="Subhead"><h2 class="Subhead-heading">Push mirrors</h2></div>
+        <p class="f6 color-fg-muted">Every branch and tag is pushed to the mirror after each change, and branches deleted here are deleted there. Use an https URL and an access token that can push to it.</p>
+        <form method="post" action={`${base}/mirrors`} class="mb-3">
+          <CsrfField csrf={csrf} />
+          <input class="form-control input-block mb-2" name="url" placeholder="https://github.com/owner/repo.git" aria-label="Mirror URL" required />
+          <div class="d-flex flex-wrap" style="gap:8px">
+            <input class="form-control" name="username" placeholder="Username" aria-label="Mirror username" autocomplete="off" required />
+            <input class="form-control flex-auto" name="token" type="password" placeholder="Access token" aria-label="Mirror access token" autocomplete="new-password" required />
+            <button class="btn" type="submit">Add mirror</button>
+          </div>
+        </form>
+        <div class="Box mb-6">
+          {listPushMirrors(deps.db, ctx.repo.id).map((mirror) => (
+            <div class="Box-row">
+              <div class="d-flex flex-items-center" style="gap:8px">
+                <span class="flex-auto text-mono f6">{mirror.url}</span>
+                <form method="post" action={`${base}/mirrors/${mirror.id}/sync`}>
+                  <CsrfField csrf={csrf} />
+                  <button class="btn btn-sm" type="submit">Sync now</button>
+                </form>
+                <form method="post" action={`${base}/mirrors/${mirror.id}/delete`}>
+                  <CsrfField csrf={csrf} />
+                  <button class="btn btn-sm" type="submit">Delete</button>
+                </form>
+              </div>
+              <div class="f6 color-fg-muted">
+                as {mirror.username}
+                {mirror.lastSyncedAt ? ` · last pushed ${timeAgo(mirror.lastSyncedAt)}` : " · not pushed yet"}
+              </div>
+              {mirror.lastError && <div class="f6 color-fg-danger">Last attempt failed: {mirror.lastError}</div>}
+            </div>
+          ))}
+        </div>
+
         <div class="Subhead"><h2 class="Subhead-heading">Deploy keys</h2></div>
         {opts.deployKey && <div class="flash flash-success">Copy this key now. It will not be shown again. <code>{opts.deployKey}</code></div>}
         <form method="post" action={`${base}/keys`} class="d-flex flex-wrap mb-3" style="gap:8px">
@@ -228,7 +264,10 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
     );
   };
 
-  app.get(`${R}/settings`, withRepo(deps, "admin", (c, ctx) => page(c, ctx, { notice: c.req.query("saved") ? "Settings saved." : undefined })));
+  app.get(`${R}/settings`, withRepo(deps, "admin", (c, ctx) => {
+    const notice = c.req.query("mirror") ? "Mirror push started. Reload to see the result." : c.req.query("saved") ? "Settings saved." : undefined;
+    return page(c, ctx, { notice });
+  }));
 
   app.post(`${R}/settings`, withRepo(deps, "admin", async (c, ctx) => {
     const f = await form(c);
@@ -341,6 +380,23 @@ export function repoSettingsRoutes(deps: Deps, app: Hono<Env>) {
 
   app.post(`${R}/settings/hooks/:id/delete`, withRepo(deps, "admin", async (c, ctx) => {
     deleteWebhook(deps.db, ctx.repo.id, Number(c.req.param("id")));
+    return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
+  }));
+
+  app.post(`${R}/settings/mirrors`, withRepo(deps, "admin", async (c, ctx) => {
+    const f = await form(c);
+    const id = addPushMirror(deps.db, ctx.repo.id, { url: field(f, "url"), username: field(f, "username"), token: field(f, "token") }, deps.config.mirrorAllowLoopback);
+    void syncPushMirror(deps, ctx.repo.id, id);
+    return c.redirect(`${repoUrl(ctx.repo.owner, ctx.repo.name, "settings")}?mirror=1`);
+  }));
+
+  app.post(`${R}/settings/mirrors/:id/sync`, withRepo(deps, "admin", (c, ctx) => {
+    void syncPushMirror(deps, ctx.repo.id, Number(c.req.param("id")));
+    return c.redirect(`${repoUrl(ctx.repo.owner, ctx.repo.name, "settings")}?mirror=1`);
+  }));
+
+  app.post(`${R}/settings/mirrors/:id/delete`, withRepo(deps, "admin", (c, ctx) => {
+    deletePushMirror(deps.db, ctx.repo.id, Number(c.req.param("id")));
     return c.redirect(repoUrl(ctx.repo.owner, ctx.repo.name, "settings"));
   }));
 
