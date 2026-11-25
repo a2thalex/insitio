@@ -27,6 +27,8 @@ export type Config = {
   gitDrainIdleMs: number;
   /** Tests may deliver webhooks to loopback. Production stays closed. */
   webhookAllowLoopback: boolean;
+  /** Tests may push mirrors to plain http on loopback. Production pushes to https only. */
+  mirrorAllowLoopback: boolean;
 };
 
 const DEFAULT_RELEASE_REPO = "a2thalex/insitio";
@@ -90,5 +92,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     gitDrainMaxBytes: parsePositiveInt("GIT_DRAIN_MAX_BYTES", env.GIT_DRAIN_MAX_BYTES, DEFAULT_GIT_DRAIN_MAX_BYTES),
     gitDrainIdleMs: parsePositiveInt("GIT_DRAIN_IDLE_MS", env.GIT_DRAIN_IDLE_MS, DEFAULT_GIT_DRAIN_IDLE_MS, MAX_MS),
     webhookAllowLoopback: env.WEBHOOK_ALLOW_LOOPBACK === "1",
+    mirrorAllowLoopback: env.MIRROR_ALLOW_LOOPBACK === "1",
   };
 }

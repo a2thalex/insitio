@@ -138,24 +138,30 @@ export type Webhook = { id: number; url: string; events: string[]; active: boole
 const EVENTS = new Set(["push", "issues", "pull_request"]);
 
 export function assertWebhookUrl(raw: string, allowLoopback = false): URL {
+  return assertOutboundUrl(raw, "webhook", allowLoopback);
+}
+
+/** A URL the server may call out to: http(s), no credentials, and not a private, loopback or metadata address. */
+export function assertOutboundUrl(raw: string, kind: "webhook" | "mirror", allowLoopback = false): URL {
+  const label = kind === "webhook" ? "Webhook" : "Mirror";
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new ValidationError("Webhook URL must be http or https.");
+    throw new ValidationError(`${label} URL must be http or https.`);
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new ValidationError("Webhook URL must be http or https.");
-  if (url.username || url.password) throw new ValidationError("Webhook URL must not include a username or password.");
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new ValidationError(`${label} URL must be http or https.`);
+  if (url.username || url.password) throw new ValidationError(`${label} URL must not include a username or password.`);
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (!host) throw new ValidationError("Webhook URL must include a host.");
+  if (!host) throw new ValidationError(`${label} URL must include a host.`);
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host === "metadata.google.internal") {
-    if (!(allowLoopback && host === "localhost")) throw new ValidationError("That webhook address is not allowed.");
+    if (!(allowLoopback && host === "localhost")) throw new ValidationError(`That ${kind} address is not allowed.`);
   }
-  if (isPrivateAddress(host) && !(allowLoopback && isLoopback(host))) throw new ValidationError("That webhook address is not allowed.");
+  if (isPrivateAddress(host) && !(allowLoopback && isLoopback(host))) throw new ValidationError(`That ${kind} address is not allowed.`);
   return url;
 }
 
-function isLoopback(host: string): boolean {
+export function isLoopback(host: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
